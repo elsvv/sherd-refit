@@ -33,13 +33,16 @@ class Params:
     stage1: int = 400               # hypotheses refined with breakline ICP
     stage2: int = 40                # candidates refined with full ICP
     stage1_delta: float = 0.06      # t, breakline proximity when stage-1 poses are re-scored
-    tight_delta: float = 0.04       # t, distance for the tight-contact fraction
+    tight_delta: float = 0.01       # t, distance for the tight-contact fraction
     facing_delta: float = 0.3       # t, fracture points considered "facing" the other fragment
     seam_delta: float = 0.12        # t, breakline proximity counted as a shared seam
     near_delta: float = 0.5         # t, shell-margin radius for the continuity test
     pen_delta: float = 0.06         # t, penetration depth counted
     nms_delta: float = 0.5          # t, translation radius of the non-maximum suppression
     icp_delta: float = 0.04         # t, finest rung of the ICP ladder (the whole ladder scales with it)
+    # `tight_delta` and `max_gap` are an order of magnitude below the rest because they are the
+    # only two distances measured point-to-*surface*; the others are point-to-point between
+    # samples, or breakline to breakline, and still carry a sample spacing inside them.
     # Resolution floors, counted in working-mesh edges; `Scales` below turns them into distances.
     # Each one is set just below `k / 0.058`, because 0.058 t is the coarsest working mesh the
     # thick terracotta reference set produces: on that set every floor stays inactive and the
@@ -50,23 +53,26 @@ class Params:
     # than how precisely, and widening it drags far-away points into the median, so it is left at
     # a value that never binds (on pot G a floor of 1.5 edges lifts the median gap of the true
     # joins from 0.173 t to 0.220 t).  See docs/superpowers/notes/2026-09-05-thin-walls.md.
-    coarse_res: float = 2.3
+    coarse_res: float = 2.3          # every floor below crosses over at ~15 edges per t
     stage1_res: float = 0.9
-    tight_res: float = 0.6
+    tight_res: float = 0.15
     facing_res: float = 1.0
-    gap_res: float = 1.0
+    gap_res: float = 0.45
     seam_res: float = 1.8
     near_res: float = 4.0
     pen_res: float = 0.9
     icp_res: float = 0.6
     min_tight: float = 0.25
-    max_gap: float = 0.065
+    max_gap: float = 0.03
     max_pen: float = 0.005
     min_seam: float = 3.0
     min_cont_n: float = 0.8
     early_reject_tight: float = 0.0     # >0: skip the fracture-only ICPs and the costly verification below this
     margin_points: int = 6000           # shell-margin points kept for the pc_reg ICP and the continuity test
-    pen_samples: int = 0                # >0: surface samples used by the penetration test (0 = all of them)
+    surface_points: int = 20000         # whole-surface samples per fragment (penetration test and shell margin)
+    frac_per_t2: float = 150.0          # fracture samples per t^2 of fracture area
+    min_frac_points: int = 5000
+    max_frac_points: int = 60000
     seed: int = 0
 
 
@@ -225,12 +231,21 @@ def brk_score(A: MatchData, B: MatchData, T, delta):
 # ---------------------------------------------------------------- verification
 
 def fracture_scores(A: MatchData, B: MatchData, T: np.ndarray, sc: Scales, p: Params) -> dict:
-    """Tight-contact fraction, median gap and contact area from the facing fracture points."""
+    """Tight-contact fraction, median gap and contact area from the facing fracture points.
+
+    The distances are point-to-*surface*: each fragment's fracture samples are measured against the
+    other's fracture triangles, not against the other's sample cloud.  Two independent samples of
+    the same surface never land on each other, so the point-to-point form had a floor equal to the
+    sample spacing -- about `0.5 / sqrt(density)`, which grew with the fragment's area-to-wall
+    ratio and reached 0.075 t on a large pot A sherd against 0.043 t on the terracotta.  That floor
+    alone was enough to keep every true join of the thin pots away from the gap threshold, and the
+    synthetic benchmark shows the same thing on fragments that fit to 0.001 mm.  Against the
+    triangles the only floor left is the mesh resolution, which `Scales` already carries.
+    """
     s = {}
     t = sc.t
-    PBf = apply_transform(T, B.Pf); PAf = A.Pf
-    d1, _ = A.tree_frac.query(PBf, workers=threads())
-    d2, _ = cKDTree(PBf).query(PAf, workers=threads())
+    d1 = A.fracture_distance(apply_transform(T, B.Pf))
+    d2 = B.fracture_distance(apply_transform(np.linalg.inv(T), A.Pf))
     for tag, d, area in (("A", d2, A.frac_area), ("B", d1, B.frac_area)):
         face = d < sc.facing
         if face.sum() < 20:
@@ -364,7 +379,7 @@ def match_pair(A: MatchData, B: MatchData, t: float, p: Params, keep: int = 5, n
     t0 = time.time()
     n_threads = worker_threads() if n_threads is None else max(1, n_threads)
     rng = np.random.default_rng(p.seed)
-    if A.tree_frac is None or B.tree_frac is None or A.brk_tree is None or B.brk_tree is None:
+    if not (A.has_frac and B.has_frac) or A.brk_tree is None or B.brk_tree is None:
         return []
     sc = Scales.for_fragments(p, t, A, B)
     R, tr = hypotheses(A, B, p)

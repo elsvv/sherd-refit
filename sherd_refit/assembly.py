@@ -21,8 +21,8 @@ def _penetration(A: MatchData, B: MatchData, T_ab: np.ndarray, t: float, p: Para
     if not (A.fr.watertight and B.fr.watertight):
         return 0.0
     depth = Scales.for_fragments(p, t, A, B).pen
-    sdA = A.signed_distance(apply_transform(T_ab, B.S))
-    sdB = B.signed_distance(apply_transform(np.linalg.inv(T_ab), A.S))
+    sdA = A.signed_distance(apply_transform(T_ab, B.S_pen))
+    sdB = B.signed_distance(apply_transform(np.linalg.inv(T_ab), A.S_pen))
     return float(max((sdA < -depth).mean(), (sdB < -depth).mean()))
 
 

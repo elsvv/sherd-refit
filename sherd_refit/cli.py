@@ -25,7 +25,8 @@ def build_parser():
     r.add_argument("--min-seam", type=float, default=3.0, help="min seam length (in t)")
     r.add_argument("--early-reject-tight", type=float, default=Params.early_reject_tight, help="skip the fracture-only ICPs and the costly verification below this tight-contact fraction")
     r.add_argument("--margin-points", type=int, default=Params.margin_points, help="shell-margin points kept per fragment for ICP and the continuity test")
-    r.add_argument("--pen-samples", type=int, default=Params.pen_samples, help="surface samples per fragment used by the penetration test")
+    r.add_argument("--surface-points", type=int, default=Params.surface_points, help="whole-surface samples per fragment (penetration test and shell margin)")
+    r.add_argument("--frac-density", type=float, default=Params.frac_per_t2, help="fracture samples per t^2 of fracture area")
     r.add_argument("--no-preview", action="store_true")
     r.add_argument("--no-refine", action="store_true", help="skip full-resolution refinement")
     r.add_argument("--no-meshes", action="store_true", help="do not write placed/merged meshes")
@@ -46,7 +47,7 @@ def main(argv=None):
     if args.cmd == "run":
         p = Params(stage1=args.stage1, stage2=args.candidates, min_tight=args.min_tight, max_gap=args.max_gap, max_pen=args.max_pen,
                    min_seam=args.min_seam, early_reject_tight=args.early_reject_tight,
-                   margin_points=args.margin_points, pen_samples=args.pen_samples)
+                   margin_points=args.margin_points, surface_points=args.surface_points, frac_per_t2=args.frac_density)
         pipeline.run(args.input_dir, args.out, target_faces=args.target_faces, workers=args.workers, params=p,
                      preview=not args.no_preview, refine=not args.no_refine, write_meshes=not args.no_meshes, threads=args.threads)
     elif args.cmd == "segment":

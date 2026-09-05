@@ -235,6 +235,31 @@ class Fragment:
         return self.scene.compute_signed_distance(o3d.core.Tensor(Q.astype(np.float32))).numpy()
 
     @property
+    def frac_scene(self):
+        """Raycasting scene over the fracture faces alone, built on first use.
+
+        `tight` and `gap` are distances to the other fragment's fracture *surface*.  Measuring them
+        against a point sample of that surface put a floor under them equal to the sample spacing;
+        measuring them against the triangles themselves removes the floor and leaves only the mesh
+        resolution, which the `res` terms of `Scales` already account for.  The scene covers the
+        fracture faces only: against the whole mesh a fragment laid flat on its neighbour's outer
+        shell would score perfect contact.
+        """
+        if getattr(self, "_frac_scene", None) is None:
+            idx = np.where(self.frac)[0]
+            Ff = self.F[idx] if len(idx) else self.F[:1]
+            sc = o3d.t.geometry.RaycastingScene()
+            sc.add_triangles(o3d.t.geometry.TriangleMesh(o3d.core.Tensor(self.V.astype(np.float32)),
+                                                         o3d.core.Tensor(Ff.astype(np.uint32))))
+            self._frac_scene = sc
+        return self._frac_scene
+
+    def fracture_distance(self, Q: np.ndarray) -> np.ndarray:
+        """Unsigned distance from each query point to this fragment's fracture surface."""
+        return self.frac_scene.compute_distance(
+            o3d.core.Tensor(np.ascontiguousarray(Q, dtype=np.float32))).numpy().astype(np.float64)
+
+    @property
     def fracture_area(self) -> float:
         return float(self.A[self.frac].sum())
 
@@ -252,17 +277,29 @@ class Fragment:
 class MatchData:
     """Runtime structures for matching one fragment: breakline with frames, samples, KD-trees, point clouds."""
 
-    def __init__(self, fr: Fragment, t: float, seed: int = 0, n_samples: int = 30000,
-                 margin_points: int = 6000, pen_samples: int = 0):
+    def __init__(self, fr: Fragment, t: float, seed: int = 0, surface_points: int = 20000,
+                 frac_per_t2: float = 150.0, min_frac_points: int = 5000, max_frac_points: int = 60000,
+                 margin_points: int = 6000):
         self.fr = fr
         self.name = fr.name
         self.t = t
         rng = np.random.default_rng(seed)
         V, F, frac, FN, A, C = fr.V, fr.F, fr.frac, fr.FN, fr.A, fr.C
-        # surface samples
-        self.S, sp = sample_on_faces(V, F, A, np.ones(len(F), bool), n_samples, rng)
+        # Whole-surface samples: the penetration test and the shell margin live on these.
+        self.S, sp = sample_on_faces(V, F, A, np.ones(len(F), bool), surface_points, rng)
         self.SN = FN[sp]
         self.S_frac = frac[sp]
+        self.S_pen = self.S
+        # Fracture samples, drawn on the fracture faces alone at a density fixed in units of `t`.
+        # `gap` and `tight` are nearest-neighbour distances between two independent samples of the
+        # same surface, so their floor is the sample spacing, about 0.5 / sqrt(density).  A flat
+        # count per fragment made that floor grow with the fragment's area-to-wall ratio -- 0.043 t
+        # on the thick terracotta against 0.075 t on a pot A sherd, which is most of why the true
+        # joins of the pots could not reach the gap threshold.  At a fixed density the floor is the
+        # same 0.041 t everywhere.  The cap keeps the KD-tree queries affordable on large sherds.
+        n_frac = int(np.clip(frac_per_t2 * float(A[frac].sum()) / t ** 2, min_frac_points, max_frac_points))
+        self.Pf, fp = sample_on_faces(V, F, A, frac, n_frac, rng)
+        self.Nf = FN[fp]
         # breakline points: midpoints of edges between shell and fracture faces
         fa, fb, ke = face_adjacency(F)
         cross = frac[fa] != frac[fb]
@@ -294,20 +331,16 @@ class MatchData:
         # shell margin for ICP / continuity: shell points near the seam, excluding a thin band next to the
         # breakline where crease faces misclassified as shell would otherwise dominate the nearest-neighbour test
         self.margin = (~self.S_frac) & (d_brk > 0.12 * t) & (d_brk < 1.5 * t)
-        # Point sets used by ICP and verification, materialised once.  The margin holds about
-        # 13k of the 30k samples and dominates the cost of the pc_reg ICP, so it is thinned to
-        # `margin_points`: a uniform random subset of an area-weighted sample is still
+        # Point sets used by ICP and verification, materialised once.  The margin is the larger
+        # half of the whole-surface sample and dominates the cost of the pc_reg ICP, so it is
+        # thinned to `margin_points`: a uniform random subset of an area-weighted sample is still
         # area-weighted, and the true joins' scores move by less than the sampling noise of the
-        # metric itself.  The penetration test keeps every sample by default (`pen_samples = 0`):
-        # with 10k samples its value shifts by up to 0.001, a fifth of the 0.005 threshold, which
-        # is enough to move a candidate across it.  Subsets come from the seeded rng, so two runs
-        # see the same points.
-        self.Pf, self.Nf = self.S[self.S_frac], self.SN[self.S_frac]
+        # metric itself.  Subsets come from the seeded rng, so two runs see the same points.
         self.margin_idx = _subsample(np.where(self.margin)[0], margin_points, rng)
         self.Pm, self.Nm = self.S[self.margin_idx], self.SN[self.margin_idx]
-        self.S_pen = self.S[_subsample(np.arange(len(self.S)), pen_samples, rng)] if pen_samples else self.S
         self.pc_reg = _pc(np.concatenate([self.Pf, self.Pm]), np.concatenate([self.Nf, self.Nm]))
         self.pc_frac = _pc(self.Pf, self.Nf)
+        self.has_frac = len(self.Pf) > 0
         self.pc_brk = _pc(P[self.brk_sub], ns[self.brk_sub])
         self.pc_brk_full = _pc(P, ns)
         self.tree_frac = cKDTree(self.Pf) if len(self.Pf) else None
@@ -316,6 +349,9 @@ class MatchData:
 
     def signed_distance(self, Q):
         return self.fr.signed_distance(Q)
+
+    def fracture_distance(self, Q):
+        return self.fr.fracture_distance(Q)
 
 
 def _subsample(idx: np.ndarray, n: int, rng) -> np.ndarray:

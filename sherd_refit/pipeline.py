@@ -82,8 +82,10 @@ def _preprocess_one(args):
     return cache_path
 
 
-def _match_data(fr: Fragment, t: float, p: Params, n_samples: int = 30000) -> MatchData:
-    return MatchData(fr, t, seed=p.seed, n_samples=n_samples, margin_points=p.margin_points, pen_samples=p.pen_samples)
+def _match_data(fr: Fragment, t: float, p: Params, surface_points: int | None = None) -> MatchData:
+    return MatchData(fr, t, seed=p.seed, surface_points=p.surface_points if surface_points is None else surface_points,
+                     frac_per_t2=p.frac_per_t2, min_frac_points=p.min_frac_points,
+                     max_frac_points=p.max_frac_points, margin_points=p.margin_points)
 
 
 def _match_one(args):
@@ -167,7 +169,7 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
 
     # 3. assembly
     t0 = time.time()
-    md = {n: _match_data(frags[n], thick, p, n_samples=15000) for n in names}
+    md = {n: _match_data(frags[n], thick, p, surface_points=15000) for n in names}
     poses, groups, used, rejected = assemble(md, cands, thick, p)
     timings["assembly"] = time.time() - t0
 

@@ -180,6 +180,26 @@ FY234104 – FY234094 – FY234021 в ряд, 094 посередине — и о
 какие ускорения пришлось отклонить ради качества сборки —
 в `docs/superpowers/notes/2026-09-05-performance.md`.
 
+## Тестовые данные и эталоны
+
+Три набора с известным ответом, на которых проверяется каждое изменение алгоритма:
+
+| набор | что это | эталон | где взять |
+|---|---|---|---|
+| `input/test_fragments_1` | 4 фрагмента толстостенной терракоты (сканы музея) | ручная сборка 3 из 4 | у музея |
+| `input/sfspp/pot_A..J`, `mixed_all` | 164 реальных скана фрагментов 10 горшков (Structure-from-Sherds++, CC BY-NC-SA 4.0) | позы и соседства | `download.sh` из репозитория SfS++, затем `python tools/stage_sfspp.py` |
+| `input/synthetic_pingsdorf_{20,60,170}` | настоящий фотограмметрический скан горшка ~900 г. н.э., разбитый на 20/60/170 фрагментов с износом кромок, недостающими и чужими кусками | точные позы, соседства, принадлежность предмету | [Release benchmark-data-v1](https://github.com/elsvv/sherd-refit/releases/tag/benchmark-data-v1) или `python tools/fetch_sources.py` + `python tools/make_synthetic.py` |
+
+Исходные сканы сосудов опубликованы LWL-Archäologie für Westfalen на Zenodo под лицензией
+CC BY 4.0 (автор моделей: LWL-Archäologie für Westfalen / Florian Westphal): горшок
+типа Пингсдорф «074 Tongefäß» (doi:10.5281/zenodo.10332909), кубок «049 Kelch»
+(zenodo.10354385), «012 Verziertes Gefäß» (zenodo.10311275), «094 Bemalte Schüssel»
+(zenodo.10330624), «025 Zylinderhalsgefäß» (zenodo.10327711). При любом распространении
+производных данных сохраняйте эту атрибуцию.
+
+Оценка результата против эталона: `python tools/evaluate.py OUT_DIR INPUT_DIR` (точность и
+полнота стыков, ошибки поз, чистота групп для смешанных наборов).
+
 ## Ограничения и что делать, если не собралось
 
 - **Сначала откройте `preview_segmentation.png`.** Красным показана распознанная поверхность

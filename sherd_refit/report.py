@@ -62,8 +62,10 @@ def write_report(out_dir, frag_stats, thickness, cands, poses, groups, used, rej
     lines.append("")
     lines.append("## Best candidate per pair")
     lines.append("")
-    lines.append("Acceptance requires tight ≥ {min_tight}, gap ≤ {max_gap}, penetration ≤ {max_pen}, seam ≥ {min_seam}, normal agreement ≥ {min_cont_n}. "
-                 "n/a = not computed: the candidate was rejected early (tight below {early_reject_tight}).".format(**params))
+    legend = "Acceptance requires tight ≥ {min_tight}, gap ≤ {max_gap}, penetration ≤ {max_pen}, seam ≥ {min_seam}, normal agreement ≥ {min_cont_n}.".format(**params)
+    if params.get("early_reject_tight", 0.0) > 0:
+        legend += " n/a = not computed: the candidate was rejected early (tight below {early_reject_tight}).".format(**params)
+    lines.append(legend)
     lines.append("")
     lines.append("| A | B | accepted | score | seam (t) | tight A/B | gap (t) | penetration | normal agr. |")
     lines.append("|---|---|---|---|---|---|---|---|---|")

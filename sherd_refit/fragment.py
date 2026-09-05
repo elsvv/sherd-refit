@@ -20,7 +20,7 @@ log = logging.getLogger("sherd_refit")
 MESH_EXT = (".ply", ".obj", ".stl", ".off")
 FACES_PER_T2 = 600      # working-mesh faces per t^2 of surface (~12 edges across the wall)
 MIN_FACES = 50000
-CACHE_VERSION = 5       # bump when preprocessing/segmentation changes so stale caches are recomputed
+CACHE_VERSION = 6       # bump when preprocessing/segmentation changes so stale caches are recomputed
 
 
 def load_mesh(path: str) -> o3d.geometry.TriangleMesh:
@@ -246,6 +246,7 @@ class Fragment:
     A: np.ndarray = field(default=None, repr=False)
     C: np.ndarray = field(default=None, repr=False)
     scene: object = field(default=None, repr=False)
+    md: dict = field(default=None, repr=False)      # cached `match_arrays` output, or None
 
     # ---------- construction ----------
     @classmethod
@@ -301,14 +302,23 @@ class Fragment:
         return fr
 
     # ---------- cache ----------
-    def save(self, path: str):
-        np.savez_compressed(path, name=self.name, path=self.path, V=self.V, F=self.F, frac=self.frac, thick=self.thick,
-                            res=self.res, watertight=self.watertight, n_orig_vertices=self.n_orig_vertices, n_orig_faces=self.n_orig_faces,
-                            target_faces=self.target_faces, thick_mode=self.thick_mode, cache_version=self.cache_version,
-                            mtime=os.path.getmtime(self.path) if os.path.exists(self.path) else 0.0)
+    def save(self, path: str, md: dict | None = None):
+        """Write the cache.  `md` is the array half of `MatchData` (see `match_arrays`); it is
+        stored alongside so that a matching worker does not recompute it for every pair."""
+        d = dict(name=self.name, path=self.path, V=self.V, F=self.F, frac=self.frac, thick=self.thick,
+                 res=self.res, watertight=self.watertight, n_orig_vertices=self.n_orig_vertices, n_orig_faces=self.n_orig_faces,
+                 target_faces=self.target_faces, thick_mode=self.thick_mode, cache_version=self.cache_version,
+                 mtime=os.path.getmtime(self.path) if os.path.exists(self.path) else 0.0)
+        md = self.md if md is None else md
+        if md is not None:
+            for k, v in md["params"].items():
+                d["mdp_" + k] = v
+            for k in MD_ARRAYS:
+                d["md_" + k] = md[k]
+        np.savez_compressed(path, **d)
 
     @classmethod
-    def load(cls, path: str) -> "Fragment":
+    def load(cls, path: str, with_md: bool = True) -> "Fragment":
         d = np.load(path, allow_pickle=False)
         fr = cls(name=str(d["name"]), path=str(d["path"]), V=d["V"], F=d["F"], frac=d["frac"], thick=float(d["thick"]),
                  res=float(d["res"]), watertight=bool(d["watertight"]), n_orig_vertices=int(d["n_orig_vertices"]), n_orig_faces=int(d["n_orig_faces"]),
@@ -316,6 +326,10 @@ class Fragment:
                  thick_mode=float(d["thick_mode"]) if "thick_mode" in d else 0.0,
                  cache_version=int(d["cache_version"]) if "cache_version" in d else 0)
         fr.cache_mtime = float(d["mtime"]) if "mtime" in d else 0.0
+        if with_md and all("md_" + k in d for k in MD_ARRAYS) and all("mdp_" + k in d for k in MD_PARAMS):
+            md = {k: d["md_" + k] for k in MD_ARRAYS}
+            md["params"] = {k: MD_PARAMS[k](d["mdp_" + k]) for k in MD_PARAMS}
+            fr.md = md
         fr.FN, fr.A, fr.C = face_geometry(fr.V, fr.F)
         fr.scene = o3d.t.geometry.RaycastingScene()
         fr.scene.add_triangles(o3d.t.geometry.TriangleMesh(o3d.core.Tensor(fr.V.astype(np.float32)), o3d.core.Tensor(fr.F.astype(np.uint32))))
@@ -371,73 +385,126 @@ class Fragment:
                     area=self.area, fracture_area_fraction=self.fracture_area / self.area)
 
 
+MD_ARRAYS = ("S", "sp", "Pf", "fp", "brk_P", "brk_ns", "brk_nf", "brk_f", "brk_sub", "margin_idx")
+MD_PARAMS = dict(t=float, seed=int, surface_points=int, frac_per_t2=float,
+                 min_frac_points=int, max_frac_points=int, margin_points=int)
+
+
+def md_params(t: float, seed: int = 0, surface_points: int = 20000, frac_per_t2: float = 150.0,
+              min_frac_points: int = 5000, max_frac_points: int = 12000, margin_points: int = 6000) -> dict:
+    """The knobs `match_arrays` depends on, normalised so that two dicts compare equal."""
+    return dict(t=float(t), seed=int(seed), surface_points=int(surface_points), frac_per_t2=float(frac_per_t2),
+                min_frac_points=int(min_frac_points), max_frac_points=int(max_frac_points),
+                margin_points=int(margin_points))
+
+
+def match_arrays(fr: Fragment, t: float, **kw) -> dict:
+    """The array half of `MatchData`: everything that survives being written to the cache.
+
+    Split out of `MatchData.__init__` so that preprocessing can compute it once per fragment
+    instead of once per pair job.  It is the expensive half — the face adjacency, the two ball
+    matrices that build the breakline frames and the sampling — while what stays in `MatchData`
+    is only KD-trees and Open3D point clouds over these arrays, which cost milliseconds.
+
+    Everything here depends on `t`, and a pair is matched at `t = min(t_A, t_B)`, so the cached
+    copy (computed at the fragment's own thickness) can only be reused for the thinner fragment of
+    a pair.  `MatchData` checks that and recomputes for the other one, which keeps the result
+    identical to what a from-scratch build produces.  The single `rng` is consumed in the same
+    order as before the split, so the samples are unchanged as well.
+    """
+    p = md_params(t, **kw)
+    rng = np.random.default_rng(p["seed"])
+    V, F, frac, FN, A, C = fr.V, fr.F, fr.frac, fr.FN, fr.A, fr.C
+    # Whole-surface samples: the penetration test and the shell margin live on these.
+    S, sp = sample_on_faces(V, F, A, np.ones(len(F), bool), p["surface_points"], rng)
+    # so that a big sherd and a small one are described equally finely.  Since `tight` and
+    # `gap` are measured against the other fragment's triangles rather than against its
+    # samples, the count no longer sets a floor under them: at a fixed pose the scores are flat
+    # in it (pot A at its ground-truth poses moves from tight 0.19 to 0.20 between 50 and 150
+    # per t^2).  What the count still buys is the ICP, which averages over that many
+    # correspondences -- at 50 per t^2 pot A ends at 5 of 8 fragments placed and at 150 it
+    # ends at 7 of 8, on identical thresholds.  Since the cost of the ICP is what grows, the
+    # upper bound is what keeps it affordable: uncapped, the largest sherds take 23k-49k
+    # points and matching runs 45 % to 226 % longer per pot; at 12k it is within 30 % of what
+    # the flat 30 000-sample scheme cost, with the same result.
+    n_frac = int(np.clip(p["frac_per_t2"] * float(A[frac].sum()) / t ** 2, p["min_frac_points"], p["max_frac_points"]))
+    Pf, fp = sample_on_faces(V, F, A, frac, n_frac, rng)
+    # breakline points: midpoints of edges between shell and fracture faces
+    fa, fb, ke = face_adjacency(F)
+    cross = frac[fa] != frac[fb]
+    ke = ke[cross]
+    P = 0.5 * (V[ke[:, 0]] + V[ke[:, 1]])
+    brk_tree = cKDTree(P) if len(P) else None
+    sh_idx, fr_idx = np.where(~frac)[0], np.where(frac)[0]
+    if len(P) and len(sh_idx) and len(fr_idx):
+        Ws = ball_matrix(C[sh_idx], P, 0.35 * t); Wf = ball_matrix(C[fr_idx], P, 0.35 * t)
+        ns, _ = smoothed_normals(Ws, FN[sh_idx], A[sh_idx]); nf, _ = smoothed_normals(Wf, FN[fr_idx], A[fr_idx])
+    else:
+        ns = np.zeros((len(P), 3)); nf = np.zeros((len(P), 3))
+    f = nf - np.einsum("ij,ij->i", nf, ns)[:, None] * ns
+    f /= np.maximum(np.linalg.norm(f, axis=1, keepdims=True), 1e-9)
+    valid = ((np.linalg.norm(ns, axis=1) > 0.5) & (np.linalg.norm(nf, axis=1) > 0.5)
+             & (np.linalg.norm(np.cross(ns, f), axis=1) > 0.5))
+    # subsample for hypotheses (voxel t/3), valid frames only
+    if len(P):
+        pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(P))
+        _, _, lists = pc.voxel_down_sample_and_trace(t / 3.0, P.min(0) - 1, P.max(0) + 1)
+        sub = np.array([l[0] for l in lists], dtype=int)
+        brk_sub = sub[valid[sub]]
+    else:
+        brk_sub = np.zeros(0, int)
+    # fracture points and shell margin for ICP
+    d_brk = brk_tree.query(S, workers=threads())[0] if brk_tree is not None else np.full(len(S), np.inf)
+    # shell margin for ICP / continuity: shell points near the seam, excluding a thin band next to the
+    # breakline where crease faces misclassified as shell would otherwise dominate the nearest-neighbour test
+    margin = (~frac[sp]) & (d_brk > 0.12 * t) & (d_brk < 1.5 * t)
+    # The margin is the larger half of the whole-surface sample and dominates the cost of the
+    # pc_reg ICP, so it is thinned to `margin_points`: a uniform random subset of an area-weighted
+    # sample is still area-weighted, and the true joins' scores move by less than the sampling
+    # noise of the metric itself.  Subsets come from the seeded rng, so two runs see the same points.
+    margin_idx = _subsample(np.where(margin)[0], p["margin_points"], rng)
+    return dict(params=p, S=S, sp=sp.astype(np.int32), Pf=Pf, fp=fp.astype(np.int32), brk_P=P,
+                brk_ns=ns, brk_nf=nf, brk_f=f, brk_sub=brk_sub.astype(np.int32),
+                margin_idx=margin_idx.astype(np.int32))
+
+
 class MatchData:
-    """Runtime structures for matching one fragment: breakline with frames, samples, KD-trees, point clouds."""
+    """Runtime structures for matching one fragment: breakline with frames, samples, KD-trees, point clouds.
+
+    The arrays come from `match_arrays`, either recomputed here or taken from the fragment cache
+    (`fr.md`) when it was built with exactly these settings and at exactly this `t`.
+    """
 
     def __init__(self, fr: Fragment, t: float, seed: int = 0, surface_points: int = 20000,
                  frac_per_t2: float = 150.0, min_frac_points: int = 5000, max_frac_points: int = 12000,
-                 margin_points: int = 6000):
+                 margin_points: int = 6000, arrays: dict | None = None):
+        want = md_params(t, seed=seed, surface_points=surface_points, frac_per_t2=frac_per_t2,
+                         min_frac_points=min_frac_points, max_frac_points=max_frac_points,
+                         margin_points=margin_points)
+        arrays = fr.md if arrays is None else arrays
+        if arrays is None or arrays.get("params") != want:
+            arrays = match_arrays(fr, t, seed=seed, surface_points=surface_points, frac_per_t2=frac_per_t2,
+                                  min_frac_points=min_frac_points, max_frac_points=max_frac_points,
+                                  margin_points=margin_points)
+            self.from_cache = False
+        else:
+            self.from_cache = True
         self.fr = fr
         self.name = fr.name
         self.t = t
-        rng = np.random.default_rng(seed)
-        V, F, frac, FN, A, C = fr.V, fr.F, fr.frac, fr.FN, fr.A, fr.C
-        # Whole-surface samples: the penetration test and the shell margin live on these.
-        self.S, sp = sample_on_faces(V, F, A, np.ones(len(F), bool), surface_points, rng)
-        self.SN = FN[sp]
-        self.S_frac = frac[sp]
+        FN = fr.FN
+        sp, fp = arrays["sp"], arrays["fp"]
+        self.S, self.Pf = arrays["S"], arrays["Pf"]
+        self.SN, self.Nf = FN[sp], FN[fp]
+        self.S_frac = fr.frac[sp]
         self.S_pen = self.S
-        # Fracture samples, drawn on the fracture faces alone at a density fixed in units of `t`,
-        # so that a big sherd and a small one are described equally finely.  Since `tight` and
-        # `gap` are measured against the other fragment's triangles rather than against its
-        # samples, the count no longer sets a floor under them: at a fixed pose the scores are flat
-        # in it (pot A at its ground-truth poses moves from tight 0.19 to 0.20 between 50 and 150
-        # per t^2).  What the count still buys is the ICP, which averages over that many
-        # correspondences -- at 50 per t^2 pot A ends at 5 of 8 fragments placed and at 150 it
-        # ends at 7 of 8, on identical thresholds.  Since the cost of the ICP is what grows, the
-        # upper bound is what keeps it affordable: uncapped, the largest sherds take 23k-49k
-        # points and matching runs 45 % to 226 % longer per pot; at 12k it is within 30 % of what
-        # the flat 30 000-sample scheme cost, with the same result.
-        n_frac = int(np.clip(frac_per_t2 * float(A[frac].sum()) / t ** 2, min_frac_points, max_frac_points))
-        self.Pf, fp = sample_on_faces(V, F, A, frac, n_frac, rng)
-        self.Nf = FN[fp]
-        # breakline points: midpoints of edges between shell and fracture faces
-        fa, fb, ke = face_adjacency(F)
-        cross = frac[fa] != frac[fb]
-        ke = ke[cross]
-        P = 0.5 * (V[ke[:, 0]] + V[ke[:, 1]])
-        self.brk_P = P
+        P, ns = arrays["brk_P"], arrays["brk_ns"]
+        self.brk_P, self.brk_ns, self.brk_nf, self.brk_f = P, ns, arrays["brk_nf"], arrays["brk_f"]
+        self.brk_t = np.cross(ns, self.brk_f)
+        self.brk_dih = np.degrees(np.arccos(np.clip(np.einsum("ij,ij->i", ns, self.brk_nf), -1, 1)))
+        self.brk_sub = arrays["brk_sub"]
         self.brk_tree = cKDTree(P) if len(P) else None
-        sh_idx, fr_idx = np.where(~frac)[0], np.where(frac)[0]
-        if len(P) and len(sh_idx) and len(fr_idx):
-            Ws = ball_matrix(C[sh_idx], P, 0.35 * t); Wf = ball_matrix(C[fr_idx], P, 0.35 * t)
-            ns, _ = smoothed_normals(Ws, FN[sh_idx], A[sh_idx]); nf, _ = smoothed_normals(Wf, FN[fr_idx], A[fr_idx])
-        else:
-            ns = np.zeros((len(P), 3)); nf = np.zeros((len(P), 3))
-        f = nf - np.einsum("ij,ij->i", nf, ns)[:, None] * ns
-        f /= np.maximum(np.linalg.norm(f, axis=1, keepdims=True), 1e-9)
-        self.brk_ns, self.brk_nf, self.brk_f, self.brk_t = ns, nf, f, np.cross(ns, f)
-        self.brk_dih = np.degrees(np.arccos(np.clip(np.einsum("ij,ij->i", ns, nf), -1, 1)))
-        valid = (np.linalg.norm(ns, axis=1) > 0.5) & (np.linalg.norm(nf, axis=1) > 0.5) & (np.linalg.norm(self.brk_t, axis=1) > 0.5)
-        # subsample for hypotheses (voxel t/3), valid frames only
-        if len(P):
-            pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(P))
-            _, _, lists = pc.voxel_down_sample_and_trace(t / 3.0, P.min(0) - 1, P.max(0) + 1)
-            sub = np.array([l[0] for l in lists], dtype=int)
-            self.brk_sub = sub[valid[sub]]
-        else:
-            self.brk_sub = np.zeros(0, int)
-        # fracture points and shell margin for ICP
-        d_brk = self.brk_tree.query(self.S, workers=threads())[0] if self.brk_tree is not None else np.full(len(self.S), np.inf)
-        # shell margin for ICP / continuity: shell points near the seam, excluding a thin band next to the
-        # breakline where crease faces misclassified as shell would otherwise dominate the nearest-neighbour test
-        self.margin = (~self.S_frac) & (d_brk > 0.12 * t) & (d_brk < 1.5 * t)
-        # Point sets used by ICP and verification, materialised once.  The margin is the larger
-        # half of the whole-surface sample and dominates the cost of the pc_reg ICP, so it is
-        # thinned to `margin_points`: a uniform random subset of an area-weighted sample is still
-        # area-weighted, and the true joins' scores move by less than the sampling noise of the
-        # metric itself.  Subsets come from the seeded rng, so two runs see the same points.
-        self.margin_idx = _subsample(np.where(self.margin)[0], margin_points, rng)
+        self.margin_idx = arrays["margin_idx"]
         self.Pm, self.Nm = self.S[self.margin_idx], self.SN[self.margin_idx]
         self.pc_reg = _pc(np.concatenate([self.Pf, self.Pm]), np.concatenate([self.Nf, self.Nm]))
         self.pc_frac = _pc(self.Pf, self.Nf)

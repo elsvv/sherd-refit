@@ -6,13 +6,14 @@ import itertools
 import logging
 import os
 import time
+from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
 
 import numpy as np
 
 from .assembly import assemble, recenter
-from .fragment import MESH_EXT, Fragment, MatchData, load_mesh
+from .fragment import MESH_EXT, Fragment, MatchData, load_mesh, match_arrays, md_params
 from .geometry import apply_transform, sample_on_faces
 from .matching import Candidate, Params, match_pair
 from .render import PALETTE, principal_views, render_views
@@ -37,8 +38,9 @@ def _set_threads(workers: int):
     os.environ.setdefault("OMP_NUM_THREADS", str(per))
 
 
-def _match_workers(workers: int, n_jobs: int, threads: int | None = None) -> tuple[int, int]:
-    """(processes, threads per process) for the matching stage, keeping processes x threads ~ cores.
+def _match_workers(workers: int, n_jobs: int, threads: int | None = None) -> tuple[int, int, int]:
+    """(processes, threads per process, fragments per block) for the matching stage, keeping
+    processes x threads ~ cores.
 
     One process per pair leaves most of the machine idle whenever there are fewer pairs than
     cores, and even with more pairs than cores the pairs finish at very different times, so the
@@ -51,7 +53,7 @@ def _match_workers(workers: int, n_jobs: int, threads: int | None = None) -> tup
     cores = os.cpu_count() or 2
     procs = max(1, min(workers, n_jobs))
     per = max(1, int(threads)) if threads else max(1, round(cores / procs))
-    return procs, per
+    return procs, per, 1
 
 
 def _init_worker(level):
@@ -67,18 +69,34 @@ def fragment_names(files: list[str]) -> dict[str, str]:
     return out
 
 
+def _md_kw(p: Params) -> dict:
+    """The `match_arrays` knobs taken from `Params` (everything except `t`)."""
+    return dict(seed=p.seed, surface_points=p.surface_points, frac_per_t2=p.frac_per_t2,
+                min_frac_points=p.min_frac_points, max_frac_points=p.max_frac_points,
+                margin_points=p.margin_points)
+
+
 def _preprocess_one(args):
-    path, name, cache_path, target_faces = args
+    """Segment one fragment and store its matching arrays beside the segmentation.
+
+    A cache whose geometry is still valid but whose matching arrays were built with other
+    settings only has the arrays recomputed (a fraction of a second), not the segmentation.
+    """
+    path, name, cache_path, target_faces, md_kw = args
     if os.path.exists(cache_path):
         try:
             fr = Fragment.load(cache_path)
             if fr.cache_valid_for(path, target_faces) and fr.name == name:
+                if fr.md is not None and fr.md["params"] == md_params(fr.thick, **md_kw):
+                    return cache_path
+                log.info("%s: matching arrays are stale, recomputing them", fr.name)
+                fr.save(cache_path, md=match_arrays(fr, fr.thick, **md_kw))
                 return cache_path
             log.info("%s: cache is stale (settings or file changed), recomputing", fr.name)
         except Exception as e:      # unreadable cache: recompute
             log.warning("%s: cannot read cache (%s), recomputing", cache_path, e)
     fr = Fragment.from_mesh_file(path, target_faces=target_faces, name=name)
-    fr.save(cache_path)
+    fr.save(cache_path, md=match_arrays(fr, fr.thick, **md_kw))
     return cache_path
 
 
@@ -88,15 +106,60 @@ def _match_data(fr: Fragment, t: float, p: Params, surface_points: int | None = 
                      max_frac_points=p.max_frac_points, margin_points=p.margin_points)
 
 
-def _match_one(args):
-    """Match one pair.  Both `MatchData` are built at the pair's own wall thickness, `min(t_A,
-    t_B)`: the thicker of the two is often a rim, and the wall is the thinner one."""
-    ca, cb, params_dict, keep, n_threads = args
+# Per-worker cache of the fragments a pair job needs.  With thousands of pairs the same fragment
+# is asked for over and over, and `_pair_blocks` orders the jobs so that consecutive ones share
+# most of their fragments; six entries is enough to serve a block of three against a block of
+# three, and costs about 40 MB per fragment held.
+MD_LRU_MAX = 6
+_MD_LRU: "OrderedDict[tuple, MatchData]" = OrderedDict()
+
+
+def _cached_match_data(cache_path: str, t: float, p: Params) -> MatchData:
+    """`MatchData` for one fragment at one wall thickness, from the worker's LRU if it is there.
+
+    A miss still reuses the loaded `Fragment` if the same file is in the cache under another `t`:
+    the mesh, its face geometry and its raycasting scene do not depend on the thickness.
+    """
+    key = (cache_path, t)
+    md = _MD_LRU.pop(key, None)
+    if md is None:
+        fr = next((m.fr for (path, _), m in _MD_LRU.items() if path == cache_path), None)
+        md = _match_data(fr if fr is not None else Fragment.load(cache_path), t, p)
+    _MD_LRU[key] = md
+    while len(_MD_LRU) > MD_LRU_MAX:
+        _MD_LRU.popitem(last=False)
+    return md
+
+
+def _match_block(args):
+    """Match a group of pairs in one worker.  Both `MatchData` of a pair are built at the pair's
+    own wall thickness, `min(t_A, t_B)`: the thicker of the two is often a rim, and the wall is
+    the thinner one.  Returns (pair index, candidates) so the caller can restore the pair order."""
+    jobs, params_dict, keep, n_threads = args
     p = Params(**params_dict)
-    fa, fb = Fragment.load(ca), Fragment.load(cb)
-    t_pair = min(fa.thick, fb.thick)
-    A = _match_data(fa, t_pair, p); B = _match_data(fb, t_pair, p)
-    return [c.to_json() for c in match_pair(A, B, p, keep=keep, n_threads=n_threads)]
+    out = []
+    for k, ca, cb, t_pair in jobs:
+        A = _cached_match_data(ca, t_pair, p)
+        B = _cached_match_data(cb, t_pair, p)
+        out.append((k, [c.to_json() for c in match_pair(A, B, p, keep=keep, n_threads=n_threads)]))
+    return out
+
+
+def _pair_blocks(names: list[str], pairs: list[tuple], block: int) -> list[list[int]]:
+    """Pair indices grouped so that one group touches at most `2 * block` fragments.
+
+    Building a fragment's `MatchData` costs a fraction of a second, which is nothing against a
+    pair but a large share of a cheap screening pass over thousands of pairs.  Cutting the
+    collection into blocks of `block` fragments and handing a worker all the pairs between two
+    blocks turns `2` builds per pair into `2 * block / (block + 1)` at worst, and into none at all
+    once the LRU holds the block.
+    """
+    blk = {n: i // block for i, n in enumerate(names)}
+    groups: dict[tuple, list[int]] = {}
+    for k, (a, b) in enumerate(pairs):
+        key = (min(blk[a], blk[b]), max(blk[a], blk[b]))
+        groups.setdefault(key, []).append(k)
+    return [groups[key] for key in sorted(groups)]
 
 
 # ---------------------------------------------------------------- pipeline
@@ -117,7 +180,7 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
     # 1. preprocessing
     t0 = time.time()
     name_of = fragment_names(files)
-    jobs = [(f, name_of[f], os.path.join(cache_dir, name_of[f] + ".npz"), target_faces) for f in files]
+    jobs = [(f, name_of[f], os.path.join(cache_dir, name_of[f] + ".npz"), target_faces, _md_kw(p)) for f in files]
     with ProcessPoolExecutor(max_workers=min(workers, len(jobs)), initializer=_init_worker, initargs=(log.getEffectiveLevel(),)) as ex:
         caches = list(ex.map(_preprocess_one, jobs))
     frags, cache_of = {}, {}
@@ -144,19 +207,24 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
             pairs.append((a, b))
     if skipped:
         log.info("%d pairs skipped because wall thickness differs by more than %.1fx", len(skipped), p.thick_ratio)
-    cands: list[Candidate] = []
+    per_pair: list[list[Candidate]] = [[] for _ in pairs]
     if workers > 1 and pairs:
-        procs, per = _match_workers(workers, len(pairs), threads)
-        log.info("matching %d pairs in %d processes x %d threads", len(pairs), procs, per)
-        jobs = [(cache_of[a], cache_of[b], asdict(p), keep_per_pair, per) for a, b in pairs]
+        procs, per, block = _match_workers(workers, len(pairs), threads)
+        blocks = _pair_blocks(names, pairs, block)
+        log.info("matching %d pairs in %d processes x %d threads, %d job%s of up to %d pairs",
+                 len(pairs), procs, per, len(blocks), "" if len(blocks) == 1 else "s", max(len(b) for b in blocks))
+        jobs = [([(k, cache_of[pairs[k][0]], cache_of[pairs[k][1]],
+                   min(frags[pairs[k][0]].thick, frags[pairs[k][1]].thick)) for k in b],
+                 asdict(p), keep_per_pair, per) for b in blocks]
         env = {k: os.environ.get(k) for k in ("SHERD_REFIT_THREADS", "OMP_NUM_THREADS")}
         # the workers thread over candidates themselves, so their ICP gets one OpenMP thread each
         os.environ["SHERD_REFIT_THREADS"] = str(per)
         os.environ["OMP_NUM_THREADS"] = "1"
         try:
             with ProcessPoolExecutor(max_workers=procs, initializer=_init_worker, initargs=(log.getEffectiveLevel(),)) as ex:
-                for res in ex.map(_match_one, jobs):
-                    cands += [Candidate.from_json(d) for d in res]
+                for res in ex.map(_match_block, jobs):
+                    for k, cs in res:
+                        per_pair[k] = [Candidate.from_json(d) for d in cs]
         finally:
             for k, v in env.items():
                 if v is None:
@@ -166,8 +234,10 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
     else:
         # in-process: this process's OpenMP was configured at start-up and cannot be changed any
         # more, so leave the parallelism inside Open3D's ICP where it already is
-        for a, b in pairs:
-            cands += [Candidate.from_json(d) for d in _match_one((cache_of[a], cache_of[b], asdict(p), keep_per_pair, 1))]
+        jobs = [(k, cache_of[a], cache_of[b], min(frags[a].thick, frags[b].thick)) for k, (a, b) in enumerate(pairs)]
+        for k, cs in _match_block((jobs, asdict(p), keep_per_pair, 1)):
+            per_pair[k] = [Candidate.from_json(d) for d in cs]
+    cands: list[Candidate] = [c for cs in per_pair for c in cs]      # back in pair order
     timings["matching"] = time.time() - t0
     log.info("matching done in %.1fs: %d candidates, %d accepted", timings["matching"], len(cands), sum(c.accepted for c in cands))
 
@@ -232,7 +302,7 @@ def segment_only(input_dir: str, out_dir: str, target_faces: int = 200000, worke
     cache_dir = os.path.join(out_dir, "cache"); os.makedirs(cache_dir, exist_ok=True)
     files = find_meshes(input_dir)
     name_of = fragment_names(files)
-    jobs = [(f, name_of[f], os.path.join(cache_dir, name_of[f] + ".npz"), target_faces) for f in files]
+    jobs = [(f, name_of[f], os.path.join(cache_dir, name_of[f] + ".npz"), target_faces, _md_kw(Params())) for f in files]
     with ProcessPoolExecutor(max_workers=min(workers, len(jobs)), initializer=_init_worker, initargs=(log.getEffectiveLevel(),)) as ex:
         caches = list(ex.map(_preprocess_one, jobs))
     frags = {}

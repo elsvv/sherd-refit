@@ -27,13 +27,20 @@ def write_report(out_dir, frag_stats, thickness, cands, poses, groups, used, rej
     lines = ["# Reassembly report", ""]
     lines.append(f"Wall thickness (collection median): {thickness:.2f} units. All distances below are in units of thickness (t).")
     lines.append("")
+    lines.append("Every distance threshold is `max(k t, m res)`, with `res` the median edge length of the "
+                 "working mesh (column `edge`). The `tight` distance and the `gap` limit a pair was actually "
+                 "judged by are listed per join below; they equal the `k t` form on any mesh with enough "
+                 "edges across the wall.")
+    lines.append("")
     lines.append("## Fragments")
     lines.append("")
-    lines.append("| fragment | faces (orig) | thickness | thickness/median | fracture area % | watertight | extent |")
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append("| fragment | faces (orig) | thickness | thickness/median | edge | edges per t | fracture area % | watertight | extent |")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
     for s in frag_stats:
         flag = "" if abs(s["thickness"] / thickness - 1) < 0.4 else " **(differs)**"
+        res = s.get("resolution", 0.0)
         lines.append(f"| {s['name']} | {s['faces']} ({s['orig_faces']}) | {s['thickness']:.2f}{flag} | {s['thickness']/thickness:.2f} | "
+                     f"{res:.3f} | {s['thickness']/res if res else 0:.1f} | "
                      f"{100*s['fracture_area_fraction']:.1f} | {s['watertight']} | {' x '.join(f'{x:.0f}' for x in s['extent'])} |")
     lines.append("")
     lines.append("## Assembly")
@@ -47,11 +54,12 @@ def write_report(out_dir, frag_stats, thickness, cands, poses, groups, used, rej
     lines.append("")
     lines.append("## Joins used")
     lines.append("")
-    lines.append("| A | B | score | seam (t) | tight A/B | gap (t) | contact (t²) | shell cont. | normal agr. | penetration |")
-    lines.append("|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("| A | B | score | seam (t) | tight A/B | tight at (t) | gap (t) | gap limit (t) | contact (t²) | shell cont. | normal agr. | penetration |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for c in used:
         s = c.scores
-        lines.append(f"| {c.a} | {c.b} | {c.score:.2f} | {s['seam']:.1f} | {s['tightA']:.2f} / {s['tightB']:.2f} | {s['gap']:.3f} | "
+        lines.append(f"| {c.a} | {c.b} | {c.score:.2f} | {s['seam']:.1f} | {s['tightA']:.2f} / {s['tightB']:.2f} | "
+                     f"{s.get('tight_delta', 0):.3f} | {s['gap']:.3f} | {s.get('gap_limit', 0):.3f} | "
                      f"{s['contact']:.1f} | {s['cont']:.3f} | {s['cont_n']:.2f} | {s['pen']:.4f} |")
     if rejected:
         lines.append("")
@@ -62,20 +70,22 @@ def write_report(out_dir, frag_stats, thickness, cands, poses, groups, used, rej
     lines.append("")
     lines.append("## Best candidate per pair")
     lines.append("")
-    legend = "Acceptance requires tight ≥ {min_tight}, gap ≤ {max_gap}, penetration ≤ {max_pen}, seam ≥ {min_seam}, normal agreement ≥ {min_cont_n}.".format(**params)
+    legend = ("Acceptance requires tight ≥ {min_tight}, gap ≤ max({max_gap} t, {gap_res} res), penetration ≤ {max_pen}, "
+              "seam ≥ {min_seam}, normal agreement ≥ {min_cont_n}; tight counts points within "
+              "max({tight_delta} t, {tight_res} res).").format(**params)
     if params.get("early_reject_tight", 0.0) > 0:
         legend += " n/a = not computed: the candidate was rejected early (tight below {early_reject_tight}).".format(**params)
     lines.append(legend)
     lines.append("")
-    lines.append("| A | B | accepted | score | seam (t) | tight A/B | gap (t) | penetration | normal agr. |")
-    lines.append("|---|---|---|---|---|---|---|---|---|")
+    lines.append("| A | B | accepted | score | seam (t) | tight A/B | tight at (t) | gap (t) | gap limit (t) | penetration | normal agr. |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
     for (a, b), cs in sorted(by_pair.items()):
         c = max(cs, key=lambda c: c.score); s = c.scores
         partial = s.get("partial", 0.0) > 0
         pen_txt = "n/a" if partial else f"{s['pen']:.4f}"
         cn_txt = "n/a" if partial else f"{s['cont_n']:.2f}"
         lines.append(f"| {a} | {b} | {'yes' if c.accepted else 'no'} | {c.score:.2f} | {s['seam']:.1f} | {s['tightA']:.2f} / {s['tightB']:.2f} | "
-                     f"{s['gap']:.3f} | {pen_txt} | {cn_txt} |")
+                     f"{s.get('tight_delta', 0):.3f} | {s['gap']:.3f} | {s.get('gap_limit', 0):.3f} | {pen_txt} | {cn_txt} |")
     lines.append("")
     lines.append("## Timing")
     lines.append("")

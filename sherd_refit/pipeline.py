@@ -123,7 +123,9 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
         if abs(fr.thick / thick - 1) > 0.4:
             log.warning("%s: thickness %.2f differs from collection median %.2f by more than 40%%", fr.name, fr.thick, thick)
     timings["preprocess"] = time.time() - t0
-    log.info("preprocessing done in %.1fs; collection thickness %.2f", timings["preprocess"], thick)
+    res = float(np.median([fr.res for fr in frags.values()]))
+    log.info("preprocessing done in %.1fs; collection thickness %.2f, working-mesh edge %.3f (%.1f edges per t)",
+             timings["preprocess"], thick, res, thick / max(res, 1e-9))
 
     # 2. pairwise matching
     t0 = time.time()
@@ -174,7 +176,7 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
     if refine and any(len(g) > 1 for g in groups):
         from .refine import refine_joins
         t0 = time.time()
-        poses = refine_joins(frags, meshes, poses, groups, used, thick)
+        poses = refine_joins(frags, meshes, poses, groups, used, thick, p)
         timings["refine"] = time.time() - t0
     poses = recenter(poses, md, groups)
     t0 = time.time()
@@ -231,6 +233,7 @@ def segment_only(input_dir: str, out_dir: str, target_faces: int = 200000, worke
     for c in caches:
         fr = Fragment.load(c); frags[fr.name] = fr
     for fr in frags.values():
-        log.info("%s: thickness %.2f, fracture area %.1f%%", fr.name, fr.thick, 100 * fr.fracture_area / fr.area)
+        log.info("%s: thickness %.2f, edge %.3f (%.1f per t), fracture area %.1f%%",
+                 fr.name, fr.thick, fr.res, fr.thick / max(fr.res, 1e-9), 100 * fr.fracture_area / fr.area)
     write_previews(out_dir, frags, {n: np.eye(4) for n in frags}, [[n] for n in frags])
     return frags

@@ -13,14 +13,14 @@ import open3d as o3d
 from scipy.spatial import cKDTree
 
 from .geometry import (threads, apply_transform, ball_matrix, drop_small_components, face_adjacency,
-                       face_geometry, sample_on_faces, smoothed_normals)
+                       face_geometry, median_edge, sample_on_faces, smoothed_normals)
 
 log = logging.getLogger("sherd_refit")
 
 MESH_EXT = (".ply", ".obj", ".stl", ".off")
 FACES_PER_T2 = 600      # working-mesh faces per t^2 of surface (~12 edges across the wall)
 MIN_FACES = 50000
-CACHE_VERSION = 2       # bump when preprocessing/segmentation changes so stale caches are recomputed
+CACHE_VERSION = 3       # bump when preprocessing/segmentation changes so stale caches are recomputed
 
 
 def load_mesh(path: str) -> o3d.geometry.TriangleMesh:
@@ -132,6 +132,7 @@ class Fragment:
     F: np.ndarray
     frac: np.ndarray
     thick: float
+    res: float                  # median edge length of this working mesh (the resolution unit)
     watertight: bool
     n_orig_vertices: int
     n_orig_faces: int
@@ -175,9 +176,11 @@ class Fragment:
         if not watertight:
             log.warning("%s: working mesh has %d boundary edges; penetration tests will be skipped for it", name, n_boundary)
         FN, A, C = face_geometry(V, F)
+        res = median_edge(V, F)
         scene = o3d.t.geometry.RaycastingScene()
         scene.add_triangles(o3d.t.geometry.TriangleMesh(o3d.core.Tensor(V.astype(np.float32)), o3d.core.Tensor(F.astype(np.uint32))))
-        log.info("%s: %d faces (from %d, budget %d), thickness %.2f, watertight=%s (%.1fs)", name, len(F), n_orig_f, target, thick, watertight, time.time() - t0)
+        log.info("%s: %d faces (from %d, budget %d), thickness %.2f, edge %.3f (%.1f per t), watertight=%s (%.1fs)",
+                 name, len(F), n_orig_f, target, thick, res, thick / max(res, 1e-9), watertight, time.time() - t0)
 
         # segmentation (smooth fields are evaluated on a t/8 grid and looked up per face)
         ctree = cKDTree(C)
@@ -197,15 +200,15 @@ class Fragment:
         frac = refine_boundary(frac, fa, fb, C, FN, A, thick, grid)
         frac = drop_small_components(frac, True, 0.5 * thick ** 2, fa, fb, A)
         log.info("%s: fracture area fraction raw %.3f -> final %.3f (%.1fs)", name, raw_frac, A[frac].sum() / A.sum(), time.time() - t0)
-        fr = cls(name=name, path=os.path.abspath(path), V=V, F=F, frac=frac, thick=float(thick), watertight=watertight,
-                 n_orig_vertices=n_orig_v, n_orig_faces=n_orig_f, target_faces=int(target_faces))
+        fr = cls(name=name, path=os.path.abspath(path), V=V, F=F, frac=frac, thick=float(thick), res=float(res),
+                 watertight=watertight, n_orig_vertices=n_orig_v, n_orig_faces=n_orig_f, target_faces=int(target_faces))
         fr.FN, fr.A, fr.C, fr.scene = FN, A, C, scene
         return fr
 
     # ---------- cache ----------
     def save(self, path: str):
         np.savez_compressed(path, name=self.name, path=self.path, V=self.V, F=self.F, frac=self.frac, thick=self.thick,
-                            watertight=self.watertight, n_orig_vertices=self.n_orig_vertices, n_orig_faces=self.n_orig_faces,
+                            res=self.res, watertight=self.watertight, n_orig_vertices=self.n_orig_vertices, n_orig_faces=self.n_orig_faces,
                             target_faces=self.target_faces, cache_version=self.cache_version,
                             mtime=os.path.getmtime(self.path) if os.path.exists(self.path) else 0.0)
 
@@ -213,7 +216,7 @@ class Fragment:
     def load(cls, path: str) -> "Fragment":
         d = np.load(path, allow_pickle=False)
         fr = cls(name=str(d["name"]), path=str(d["path"]), V=d["V"], F=d["F"], frac=d["frac"], thick=float(d["thick"]),
-                 watertight=bool(d["watertight"]), n_orig_vertices=int(d["n_orig_vertices"]), n_orig_faces=int(d["n_orig_faces"]),
+                 res=float(d["res"]), watertight=bool(d["watertight"]), n_orig_vertices=int(d["n_orig_vertices"]), n_orig_faces=int(d["n_orig_faces"]),
                  target_faces=int(d["target_faces"]) if "target_faces" in d else 0,
                  cache_version=int(d["cache_version"]) if "cache_version" in d else 0)
         fr.cache_mtime = float(d["mtime"]) if "mtime" in d else 0.0
@@ -242,7 +245,7 @@ class Fragment:
     def stats(self) -> dict:
         ext = self.V.max(0) - self.V.min(0)
         return dict(name=self.name, faces=int(len(self.F)), orig_faces=self.n_orig_faces, orig_vertices=self.n_orig_vertices,
-                    thickness=self.thick, watertight=self.watertight, extent=[float(x) for x in ext],
+                    thickness=self.thick, resolution=self.res, watertight=self.watertight, extent=[float(x) for x in ext],
                     area=self.area, fracture_area_fraction=self.fracture_area / self.area)
 
 

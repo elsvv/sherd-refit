@@ -8,18 +8,22 @@ import numpy as np
 
 from .fragment import MatchData
 from .geometry import apply_transform, rotation_angle_deg
-from .matching import Candidate, Params
+from .matching import Candidate, Params, Scales
 
 log = logging.getLogger("sherd_refit")
 
 
 def _penetration(A: MatchData, B: MatchData, T_ab: np.ndarray, t: float, p: Params) -> float:
-    """Fraction of surface samples of either fragment inside the other, given b->a transform."""
+    """Fraction of surface samples of either fragment inside the other, given b->a transform.
+
+    The depth counted is the pair's own `pen` scale, the same one the matcher used.
+    """
     if not (A.fr.watertight and B.fr.watertight):
         return 0.0
+    depth = Scales.for_fragments(p, t, A, B).pen
     sdA = A.signed_distance(apply_transform(T_ab, B.S))
     sdB = B.signed_distance(apply_transform(np.linalg.inv(T_ab), A.S))
-    return float(max((sdA < -p.pen_delta * t).mean(), (sdB < -p.pen_delta * t).mean()))
+    return float(max((sdA < -depth).mean(), (sdB < -depth).mean()))
 
 
 def assemble(md: dict[str, MatchData], cands: list[Candidate], t: float, p: Params,

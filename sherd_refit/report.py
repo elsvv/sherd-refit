@@ -62,14 +62,18 @@ def write_report(out_dir, frag_stats, thickness, cands, poses, groups, used, rej
     lines.append("")
     lines.append("## Best candidate per pair")
     lines.append("")
-    lines.append("Acceptance requires tight ≥ {min_tight}, gap ≤ {max_gap}, penetration ≤ {max_pen}, seam ≥ {min_seam}, normal agreement ≥ {min_cont_n}.".format(**params))
+    lines.append("Acceptance requires tight ≥ {min_tight}, gap ≤ {max_gap}, penetration ≤ {max_pen}, seam ≥ {min_seam}, normal agreement ≥ {min_cont_n}. "
+                 "n/a = not computed: the candidate was rejected early (tight below {early_reject_tight}).".format(**params))
     lines.append("")
     lines.append("| A | B | accepted | score | seam (t) | tight A/B | gap (t) | penetration | normal agr. |")
     lines.append("|---|---|---|---|---|---|---|---|---|")
     for (a, b), cs in sorted(by_pair.items()):
         c = max(cs, key=lambda c: c.score); s = c.scores
+        partial = s.get("partial", 0.0) > 0
+        pen_txt = "n/a" if partial else f"{s['pen']:.4f}"
+        cn_txt = "n/a" if partial else f"{s['cont_n']:.2f}"
         lines.append(f"| {a} | {b} | {'yes' if c.accepted else 'no'} | {c.score:.2f} | {s['seam']:.1f} | {s['tightA']:.2f} / {s['tightB']:.2f} | "
-                     f"{s['gap']:.3f} | {s['pen']:.4f} | {s['cont_n']:.2f} |")
+                     f"{s['gap']:.3f} | {pen_txt} | {cn_txt} |")
     lines.append("")
     lines.append("## Timing")
     lines.append("")

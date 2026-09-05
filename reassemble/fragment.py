@@ -145,9 +145,9 @@ class Fragment:
 
     # ---------- construction ----------
     @classmethod
-    def from_mesh_file(cls, path: str, target_faces: int = 200000, seed: int = 0) -> "Fragment":
+    def from_mesh_file(cls, path: str, target_faces: int = 200000, seed: int = 0, name: str | None = None) -> "Fragment":
         t0 = time.time()
-        name = os.path.splitext(os.path.basename(path))[0]
+        name = name or os.path.splitext(os.path.basename(path))[0]
         m = load_mesh(path)
         n_orig_v, n_orig_f = len(m.vertices), len(m.triangles)
         m = largest_component(m)
@@ -287,7 +287,9 @@ class MatchData:
             self.brk_sub = np.zeros(0, int)
         # fracture points and shell margin for ICP
         d_brk = self.brk_tree.query(self.S, workers=threads())[0] if self.brk_tree is not None else np.full(len(self.S), np.inf)
-        self.margin = (~self.S_frac) & (d_brk < 1.5 * t)
+        # shell margin for ICP / continuity: shell points near the seam, excluding a thin band next to the
+        # breakline where crease faces misclassified as shell would otherwise dominate the nearest-neighbour test
+        self.margin = (~self.S_frac) & (d_brk > 0.12 * t) & (d_brk < 1.5 * t)
         self.pc_reg = _pc(np.concatenate([self.S[self.S_frac], self.S[self.margin]]), np.concatenate([self.SN[self.S_frac], self.SN[self.margin]]))
         self.pc_frac = _pc(self.S[self.S_frac], self.SN[self.S_frac])
         self.pc_brk = _pc(P[self.brk_sub], ns[self.brk_sub])

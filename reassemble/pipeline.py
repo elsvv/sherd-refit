@@ -41,17 +41,26 @@ def _init_worker(level):
     logging.basicConfig(level=level, format="%(asctime)s %(levelname)s [worker] %(message)s", datefmt="%H:%M:%S", force=True)
 
 
+def fragment_names(files: list[str]) -> dict[str, str]:
+    """Unique fragment name per file: the stem, or the full basename when stems collide (x.ply + x.obj)."""
+    stems = [os.path.splitext(os.path.basename(f))[0] for f in files]
+    out = {}
+    for f, s in zip(files, stems):
+        out[f] = s if stems.count(s) == 1 else os.path.basename(f).replace(".", "_")
+    return out
+
+
 def _preprocess_one(args):
-    path, cache_path, target_faces = args
+    path, name, cache_path, target_faces = args
     if os.path.exists(cache_path):
         try:
             fr = Fragment.load(cache_path)
-            if fr.cache_valid_for(path, target_faces):
+            if fr.cache_valid_for(path, target_faces) and fr.name == name:
                 return cache_path
             log.info("%s: cache is stale (settings or file changed), recomputing", fr.name)
         except Exception as e:      # unreadable cache: recompute
             log.warning("%s: cannot read cache (%s), recomputing", cache_path, e)
-    fr = Fragment.from_mesh_file(path, target_faces=target_faces)
+    fr = Fragment.from_mesh_file(path, target_faces=target_faces, name=name)
     fr.save(cache_path)
     return cache_path
 
@@ -80,12 +89,13 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
 
     # 1. preprocessing
     t0 = time.time()
-    jobs = [(f, os.path.join(cache_dir, os.path.splitext(os.path.basename(f))[0] + ".npz"), target_faces) for f in files]
+    name_of = fragment_names(files)
+    jobs = [(f, name_of[f], os.path.join(cache_dir, name_of[f] + ".npz"), target_faces) for f in files]
     with ProcessPoolExecutor(max_workers=min(workers, len(jobs)), initializer=_init_worker, initargs=(log.getEffectiveLevel(),)) as ex:
         caches = list(ex.map(_preprocess_one, jobs))
-    frags = {}
+    frags, cache_of = {}, {}
     for c in caches:
-        fr = Fragment.load(c); frags[fr.name] = fr
+        fr = Fragment.load(c); frags[fr.name] = fr; cache_of[fr.name] = c
     names = list(frags)
     thick = float(np.median([fr.thick for fr in frags.values()]))
     for fr in frags.values():
@@ -105,7 +115,6 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
             pairs.append((a, b))
     if skipped:
         log.info("%d pairs skipped because wall thickness differs by more than 50%%", len(skipped))
-    cache_of = {fr.name: c for fr, c in zip(frags.values(), caches)}
     jobs = [(cache_of[a], cache_of[b], thick, asdict(p), keep_per_pair) for a, b in pairs]
     cands: list[Candidate] = []
     if workers > 1 and len(jobs) > 1:
@@ -178,7 +187,8 @@ def segment_only(input_dir: str, out_dir: str, target_faces: int = 200000, worke
     os.makedirs(out_dir, exist_ok=True)
     cache_dir = os.path.join(out_dir, "cache"); os.makedirs(cache_dir, exist_ok=True)
     files = find_meshes(input_dir)
-    jobs = [(f, os.path.join(cache_dir, os.path.splitext(os.path.basename(f))[0] + ".npz"), target_faces) for f in files]
+    name_of = fragment_names(files)
+    jobs = [(f, name_of[f], os.path.join(cache_dir, name_of[f] + ".npz"), target_faces) for f in files]
     with ProcessPoolExecutor(max_workers=min(workers, len(jobs)), initializer=_init_worker, initargs=(log.getEffectiveLevel(),)) as ex:
         caches = list(ex.map(_preprocess_one, jobs))
     frags = {}

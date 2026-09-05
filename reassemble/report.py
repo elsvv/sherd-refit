@@ -21,7 +21,6 @@ def write_transforms(path, poses, groups, thickness, params):
 
 
 def write_report(out_dir, frag_stats, thickness, cands, poses, groups, used, rejected, timings, params):
-    used_ids = {id(c) for c in used}
     by_pair = {}
     for c in cands:
         by_pair.setdefault((c.a, c.b), []).append(c)

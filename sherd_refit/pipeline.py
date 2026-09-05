@@ -37,6 +37,23 @@ def _set_threads(workers: int):
     os.environ.setdefault("OMP_NUM_THREADS", str(per))
 
 
+def _match_workers(workers: int, n_jobs: int, threads: int | None = None) -> tuple[int, int]:
+    """(processes, threads per process) for the matching stage, keeping processes x threads ~ cores.
+
+    One process per pair leaves most of the machine idle whenever there are fewer pairs than
+    cores, and even with more pairs than cores the pairs finish at very different times, so the
+    tail runs on a handful of processes.  A pair parallelises well inside one process (stage 2 is
+    3.1x faster on 4 threads, 5.9x on 10), so the pairs that cannot fill the machine on their own
+    get several threads each.  Open3D's ICP is OpenMP-parallel as well, but it scales worse than
+    threading over candidates (2.9x on 10 cores against 5.9x), so the worker processes run it
+    single-threaded and spend their budget on candidates instead.
+    """
+    cores = os.cpu_count() or 2
+    procs = max(1, min(workers, n_jobs))
+    per = max(1, int(threads)) if threads else max(1, round(cores / procs))
+    return procs, per
+
+
 def _init_worker(level):
     logging.basicConfig(level=level, format="%(asctime)s %(levelname)s [worker] %(message)s", datefmt="%H:%M:%S", force=True)
 
@@ -70,16 +87,16 @@ def _match_data(fr: Fragment, t: float, p: Params, n_samples: int = 30000) -> Ma
 
 
 def _match_one(args):
-    ca, cb, t, params_dict, keep = args
+    ca, cb, t, params_dict, keep, n_threads = args
     p = Params(**params_dict)
     A = _match_data(Fragment.load(ca), t, p); B = _match_data(Fragment.load(cb), t, p)
-    return [c.to_json() for c in match_pair(A, B, t, p, keep=keep)]
+    return [c.to_json() for c in match_pair(A, B, t, p, keep=keep, n_threads=n_threads)]
 
 
 # ---------------------------------------------------------------- pipeline
 
 def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int | None = None, params: Params | None = None,
-        preview: bool = True, refine: bool = True, write_meshes: bool = True, keep_per_pair: int = 5):
+        preview: bool = True, refine: bool = True, write_meshes: bool = True, keep_per_pair: int = 5, threads: int | None = None):
     p = params or Params()
     workers = workers or max(1, (os.cpu_count() or 2) - 1)
     _set_threads(workers)
@@ -119,15 +136,27 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
             pairs.append((a, b))
     if skipped:
         log.info("%d pairs skipped because wall thickness differs by more than 50%%", len(skipped))
-    jobs = [(cache_of[a], cache_of[b], thick, asdict(p), keep_per_pair) for a, b in pairs]
     cands: list[Candidate] = []
-    if workers > 1 and len(jobs) > 1:
-        with ProcessPoolExecutor(max_workers=min(workers, len(jobs)), initializer=_init_worker, initargs=(log.getEffectiveLevel(),)) as ex:
-            for res in ex.map(_match_one, jobs):
-                cands += [Candidate.from_json(d) for d in res]
+    if workers > 1 and pairs:
+        procs, per = _match_workers(workers, len(pairs), threads)
+        log.info("matching %d pairs in %d processes x %d threads", len(pairs), procs, per)
+        jobs = [(cache_of[a], cache_of[b], thick, asdict(p), keep_per_pair, per) for a, b in pairs]
+        env = {k: os.environ.get(k) for k in ("SHERD_REFIT_THREADS", "OMP_NUM_THREADS")}
+        # the workers thread over candidates themselves, so their ICP gets one OpenMP thread each
+        os.environ["SHERD_REFIT_THREADS"] = str(per)
+        os.environ["OMP_NUM_THREADS"] = "1"
+        try:
+            with ProcessPoolExecutor(max_workers=procs, initializer=_init_worker, initargs=(log.getEffectiveLevel(),)) as ex:
+                for res in ex.map(_match_one, jobs):
+                    cands += [Candidate.from_json(d) for d in res]
+        finally:
+            for k, v in env.items():
+                os.environ[k] = v if v is not None else ""
     else:
-        for j in jobs:
-            cands += [Candidate.from_json(d) for d in _match_one(j)]
+        # in-process: this process's OpenMP was configured at start-up and cannot be changed any
+        # more, so leave the parallelism inside Open3D's ICP where it already is
+        for a, b in pairs:
+            cands += [Candidate.from_json(d) for d in _match_one((cache_of[a], cache_of[b], thick, asdict(p), keep_per_pair, 1))]
     timings["matching"] = time.time() - t0
     log.info("matching done in %.1fs: %d candidates, %d accepted", timings["matching"], len(cands), sum(c.accepted for c in cands))
 

@@ -2,15 +2,44 @@
 from __future__ import annotations
 
 import os
+import threading
+from contextlib import contextmanager
 
 import numpy as np
 from scipy import sparse
 from scipy.spatial import cKDTree
 
+_tls = threading.local()
+
 
 def threads() -> int:
-    """Threads for KD-tree queries; the pipeline sets SHERD_REFIT_THREADS per worker to avoid oversubscription."""
+    """Threads for KD-tree queries; the pipeline sets SHERD_REFIT_THREADS per worker to avoid
+    oversubscription, and `single_threaded` pins them to one inside a thread pool."""
+    if getattr(_tls, "single", False):
+        return 1
     return int(os.environ.get("SHERD_REFIT_THREADS", "-1"))
+
+
+def worker_threads() -> int:
+    """Thread budget of this process for parallelism inside one pair.
+
+    SHERD_REFIT_THREADS is set by the pipeline for its worker processes; when it is unset (a
+    library call outside the pipeline) the answer is 1, because nothing has capped OpenMP and
+    Open3D's ICP is already using every core on its own.
+    """
+    n = int(os.environ.get("SHERD_REFIT_THREADS", "0"))
+    return max(1, n)
+
+
+@contextmanager
+def single_threaded():
+    """Force KD-tree queries made in this thread to use a single worker."""
+    prev = getattr(_tls, "single", False)
+    _tls.single = True
+    try:
+        yield
+    finally:
+        _tls.single = prev
 
 
 def face_geometry(V: np.ndarray, F: np.ndarray):

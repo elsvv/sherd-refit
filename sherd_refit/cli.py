@@ -16,6 +16,7 @@ def build_parser():
     r.add_argument("--out", required=True, help="output directory")
     r.add_argument("--target-faces", type=int, default=200000, help="working-mesh face budget per fragment")
     r.add_argument("--workers", type=int, default=None, help="parallel processes (default: cores-1)")
+    r.add_argument("--threads", type=int, default=None, help="threads per matching process (default: cores / processes)")
     r.add_argument("--candidates", type=int, default=40, help="candidates refined with full ICP per pair")
     r.add_argument("--stage1", type=int, default=400, help="hypotheses refined with breakline ICP per pair")
     r.add_argument("--min-tight", type=float, default=0.25, help="min tight-contact fraction to accept a join")
@@ -47,7 +48,7 @@ def main(argv=None):
                    min_seam=args.min_seam, early_reject_tight=args.early_reject_tight,
                    margin_points=args.margin_points, pen_samples=args.pen_samples)
         pipeline.run(args.input_dir, args.out, target_faces=args.target_faces, workers=args.workers, params=p,
-                     preview=not args.no_preview, refine=not args.no_refine, write_meshes=not args.no_meshes)
+                     preview=not args.no_preview, refine=not args.no_refine, write_meshes=not args.no_meshes, threads=args.threads)
     elif args.cmd == "segment":
         pipeline.segment_only(args.input_dir, args.out, target_faces=args.target_faces, workers=args.workers)
     return 0

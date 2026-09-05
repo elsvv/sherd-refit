@@ -106,7 +106,9 @@ Two fragments only (one pair, so one process with ten threads): that pair went f
 5.1 s**. This was the worst case before — a two- or three-fragment set used one core out of ten.
 
 Determinism: results keep the job order (`ThreadPoolExecutor.map`), so ranking, `keep` and the
-`Candidate` objects do not depend on the thread count. `match_pair(A, B, t, p, keep=5)` still
+`Candidate` objects do not depend on the thread count.  Two full runs of the real set produce
+byte-identical `groups`, `candidates`, `joins_used` and `joins_rejected` in `report.json`,
+transform matrices included. `match_pair(A, B, t, p, keep=5)` still
 works exactly as before and stays single-threaded outside the pipeline, because nothing has
 capped OpenMP there. KD-tree queries inside a pool are pinned to one worker each
 (`geometry.single_threaded`) so that scipy's threads do not multiply with the pool's.
@@ -132,6 +134,7 @@ default flags):
 | assembly, s | 0.9 | 0.9 | 0.9 | 0.9 |
 | refine, s | 6.0 | 6.0 | 11.4 | 9.6 |
 | wall clock | 2:14.1 | 2:08.9 | **1:23.5** | **1:22.9** |
+| (a later run of the same code, lighter machine load) | 1:57.6 | | 1:11.0 | |
 | CPU (user), s | 578.7 | 579.7 | 417.6 | 426.5 |
 
 Matching **94.2 s → 41.3 s (2.3x)**, whole run **131.5 s → 83.2 s (1.6x)**, and 27 % less CPU

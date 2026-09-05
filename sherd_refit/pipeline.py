@@ -18,7 +18,7 @@ from .matching import Candidate, Params, match_pair
 from .render import PALETTE, principal_views, render_views
 from .report import write_placed_meshes, write_report, write_transforms
 
-log = logging.getLogger("reassemble")
+log = logging.getLogger("sherd_refit")
 
 
 def find_meshes(input_dir: str) -> list[str]:
@@ -33,7 +33,7 @@ def find_meshes(input_dir: str) -> list[str]:
 def _set_threads(workers: int):
     """Give each worker process a fair share of the cores (inherited by spawned workers)."""
     per = max(1, (os.cpu_count() or 2) // max(1, workers))
-    os.environ["REASSEMBLE_THREADS"] = str(per)
+    os.environ["SHERD_REFIT_THREADS"] = str(per)
     os.environ.setdefault("OMP_NUM_THREADS", str(per))
 
 

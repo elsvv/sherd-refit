@@ -10,7 +10,7 @@ from .fragment import MatchData
 from .geometry import apply_transform, rotation_angle_deg
 from .matching import Candidate, Params
 
-log = logging.getLogger("reassemble")
+log = logging.getLogger("sherd_refit")
 
 
 def _penetration(A: MatchData, B: MatchData, T_ab: np.ndarray, t: float, p: Params) -> float:

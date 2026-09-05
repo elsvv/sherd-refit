@@ -15,7 +15,7 @@ from scipy.spatial import cKDTree
 from .geometry import (threads, apply_transform, ball_matrix, drop_small_components, face_adjacency,
                        face_geometry, sample_on_faces, smoothed_normals)
 
-log = logging.getLogger("reassemble")
+log = logging.getLogger("sherd_refit")
 
 MESH_EXT = (".ply", ".obj", ".stl", ".off")
 FACES_PER_T2 = 600      # working-mesh faces per t^2 of surface (~12 edges across the wall)

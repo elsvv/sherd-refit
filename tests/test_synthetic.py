@@ -15,10 +15,10 @@ import open3d as o3d
 import pytest
 from scipy.spatial import cKDTree
 
-from reassemble import assembly, matching, pipeline
-from reassemble.fragment import Fragment, MatchData
-from reassemble.geometry import apply_transform, face_geometry, rotation_angle_deg
-from reassemble.matching import Params
+from sherd_refit import assembly, matching, pipeline
+from sherd_refit.fragment import Fragment, MatchData
+from sherd_refit.geometry import apply_transform, face_geometry, rotation_angle_deg
+from sherd_refit.matching import Params
 
 # ---------------------------------------------------------------- slab geometry
 

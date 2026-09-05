@@ -12,7 +12,7 @@ from scipy.spatial import cKDTree
 from .fragment import MatchData
 from .geometry import threads, apply_transform, make_frames
 
-log = logging.getLogger("reassemble")
+log = logging.getLogger("sherd_refit")
 
 
 @dataclass

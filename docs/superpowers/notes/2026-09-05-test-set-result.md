@@ -1,6 +1,6 @@
 # test_fragments_1 — result of the fracture-surface pipeline
 
-**Date:** 2026-09-05. Command: `reassemble run input/test_fragments_1/fragments --out output/test_fragments_1`.
+**Date:** 2026-09-05. Command: `sherd-refit run input/test_fragments_1/fragments --out output/test_fragments_1`.
 Apple M2 Pro, 9 workers: preprocessing 18 s, matching 120 s, assembly + refinement + outputs 20 s.
 
 ## Result

@@ -140,9 +140,9 @@ spanning tree from the group's root. This removes the ~0.5-unit bias of decimati
 ## CLI
 
 ```
-reassemble run INPUT_DIR --out OUT_DIR [--target-faces 200000] [--workers N]
+sherd-refit run INPUT_DIR --out OUT_DIR [--target-faces 200000] [--workers N]
            [--candidates 40] [--min-tight 0.25] [--no-preview] [--no-refine]
-reassemble segment INPUT_DIR --out OUT_DIR       # only preprocessing + segmentation previews
+sherd-refit segment INPUT_DIR --out OUT_DIR       # only preprocessing + segmentation previews
 ```
 
 ## Error handling

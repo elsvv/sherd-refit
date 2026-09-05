@@ -1,8 +1,8 @@
-# reassemble — автоматическая сборка 3D-сканов керамических фрагментов
+# sherd-refit — автоматическая сборка 3D-сканов керамических фрагментов
 
 ## Что это и для чего
 
-`reassemble` — консольная программа, которая берёт папку со сканами фрагментов одного разбитого
+`sherd_refit` — консольная программа, которая берёт папку со сканами фрагментов одного разбитого
 керамического предмета и подбирает наиболее вероятную сборку: сопоставляет фрагменты по
 поверхностям излома и выдаёт для каждого жёсткое преобразование (поворот + перенос).
 Работает только на процессоре, без видеокарты и без графического интерфейса, на macOS и Linux.
@@ -24,7 +24,7 @@ uv venv --python 3.12 .venv && source .venv/bin/activate && uv pip install -e .
 python3.12 -m venv .venv && source .venv/bin/activate && pip install -e .
 ```
 
-Ставятся numpy, scipy, open3d, pillow и сама команда `reassemble`.
+Ставятся numpy, scipy, open3d, pillow и сама команда `sherd_refit`.
 
 Требования к данным:
 
@@ -40,7 +40,7 @@ python3.12 -m venv .venv && source .venv/bin/activate && pip install -e .
 ## Быстрый старт
 
 ```bash
-reassemble run input/test_fragments_1/fragments --out output/test_fragments_1
+sherd-refit run input/test_fragments_1/fragments --out output/test_fragments_1
 ```
 
 В папке `--out` появляется:
@@ -122,8 +122,8 @@ reassemble run input/test_fragments_1/fragments --out output/test_fragments_1
 ## Параметры CLI
 
 ```
-reassemble run INPUT_DIR --out OUT_DIR [опции]
-reassemble segment INPUT_DIR --out OUT_DIR [--target-faces N] [--workers N] [-v]
+sherd-refit run INPUT_DIR --out OUT_DIR [опции]
+sherd-refit segment INPUT_DIR --out OUT_DIR [--target-faces N] [--workers N] [-v]
 ```
 
 | флаг | по умолчанию | когда менять |
@@ -142,7 +142,7 @@ reassemble segment INPUT_DIR --out OUT_DIR [--target-faces N] [--workers N] [-v]
 | `--no-meshes` | выкл. | не писать меши, только отчёт и матрицы; удобно для быстрой проверки параметров |
 | `-v`, `--verbose` | выкл. | подробный лог по каждой паре |
 
-Подкоманда `reassemble segment` выполняет только предобработку и сегментацию: пишет кэш и
+Подкоманда `sherd-refit segment` выполняет только предобработку и сегментацию: пишет кэш и
 `preview_segmentation.png`, ничего не сопоставляя. Это самый быстрый способ проверить, что
 излом распознан правильно.
 
@@ -174,7 +174,7 @@ FY234104 – FY234094 – FY234021 в ряд, 094 посередине — и о
 - **Сначала откройте `preview_segmentation.png`.** Красным показана распознанная поверхность
   излома. Если излом не красный или красным залито пол-фрагмента, сегментация не удалась, и
   ничего дальше по цепочке работать не может. Проверять сегментацию отдельно:
-  `reassemble segment INPUT_DIR --out OUT_DIR`.
+  `sherd-refit segment INPUT_DIR --out OUT_DIR`.
 - **Сработанные, окатанные или обитые края излома** снижают плотность прилегания. Если в таблице
   Best candidate per pair видна пара с длинным швом и правдоподобной геометрией, но `tight` около
   0.2, попробуйте `--min-tight 0.2`, при необходимости вместе с `--max-gap 0.08`.
@@ -193,19 +193,19 @@ FY234104 – FY234094 – FY234021 в ряд, 094 посередине — и о
 
 Состав пакета:
 
-- `reassemble/cli.py` — разбор аргументов, подкоманды `run` и `segment`.
-- `reassemble/pipeline.py` — порядок стадий, пулы процессов, кэш, отрисовка превью.
-- `reassemble/fragment.py` — загрузка, прореживание, оценка толщины, сегментация, линии излома
+- `sherd_refit/cli.py` — разбор аргументов, подкоманды `run` и `segment`.
+- `sherd_refit/pipeline.py` — порядок стадий, пулы процессов, кэш, отрисовка превью.
+- `sherd_refit/fragment.py` — загрузка, прореживание, оценка толщины, сегментация, линии излома
   (классы `Fragment` и `MatchData`).
-- `reassemble/geometry.py` — мелкие геометрические утилиты: нормали граней, смежность,
+- `sherd_refit/geometry.py` — мелкие геометрические утилиты: нормали граней, смежность,
   окрестности, выборка точек по поверхности.
-- `reassemble/matching.py` — гипотезы, ICP, проверка кандидатов; класс `Params` собирает все
+- `sherd_refit/matching.py` — гипотезы, ICP, проверка кандидатов; класс `Params` собирает все
   пороги в одном месте.
-- `reassemble/assembly.py` — жадная глобальная сборка с проверками проникновения и
+- `sherd_refit/assembly.py` — жадная глобальная сборка с проверками проникновения и
   согласованности.
-- `reassemble/refine.py` — доводка стыков на полном разрешении.
-- `reassemble/render.py` — программный рендер точек в PNG без GPU и без дисплея.
-- `reassemble/report.py` — запись `transforms.json`, `report.md`, `report.json` и мешей.
+- `sherd_refit/refine.py` — доводка стыков на полном разрешении.
+- `sherd_refit/render.py` — программный рендер точек в PNG без GPU и без дисплея.
+- `sherd_refit/report.py` — запись `transforms.json`, `report.md`, `report.json` и мешей.
 
 Тесты: `uv pip install -e ".[dev]"`, затем `pytest -q` (около 3 минут, 30 тестов).
 `tests/test_geometry.py` — модульные тесты геометрических функций; `tests/test_synthetic.py` —

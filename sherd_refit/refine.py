@@ -11,7 +11,7 @@ from .fragment import Fragment, load_mesh
 from .geometry import threads, apply_transform
 from .matching import Candidate
 
-log = logging.getLogger("reassemble")
+log = logging.getLogger("sherd_refit")
 
 
 def fracture_cloud(fr: Fragment, mesh: o3d.geometry.TriangleMesh, t: float, max_points: int = 150000):

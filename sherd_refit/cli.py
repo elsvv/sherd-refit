@@ -1,4 +1,4 @@
-"""Command-line interface: `reassemble run INPUT_DIR --out OUT_DIR`."""
+"""Command-line interface: `sherd-refit run INPUT_DIR --out OUT_DIR`."""
 from __future__ import annotations
 
 import argparse
@@ -9,7 +9,7 @@ from .matching import Params
 
 
 def build_parser():
-    ap = argparse.ArgumentParser(prog="reassemble", description="Reassemble 3D-scanned fragments of a broken ceramic object.")
+    ap = argparse.ArgumentParser(prog="sherd-refit", description="Reassemble 3D-scanned fragments of a broken ceramic object.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="full pipeline: segment, match, assemble, write outputs")
     r.add_argument("input_dir")

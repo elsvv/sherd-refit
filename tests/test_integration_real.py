@@ -9,7 +9,7 @@ import os
 
 import pytest
 
-from reassemble import pipeline
+from sherd_refit import pipeline
 
 REAL_DIR = "/Users/vaceslaveliseev/@dev/ceramic-reassembling/input/test_fragments_1/fragments"
 TRUE_JOINS = {frozenset({"FY234021_reduced", "FY234094_reduced"}),

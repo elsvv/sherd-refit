@@ -9,8 +9,8 @@ from scipy.spatial import cKDTree
 
 
 def threads() -> int:
-    """Threads for KD-tree queries; the pipeline sets REASSEMBLE_THREADS per worker to avoid oversubscription."""
-    return int(os.environ.get("REASSEMBLE_THREADS", "-1"))
+    """Threads for KD-tree queries; the pipeline sets SHERD_REFIT_THREADS per worker to avoid oversubscription."""
+    return int(os.environ.get("SHERD_REFIT_THREADS", "-1"))
 
 
 def face_geometry(V: np.ndarray, F: np.ndarray):

@@ -1,4 +1,4 @@
-"""Unit tests for the geometry helpers (reassemble.geometry)."""
+"""Unit tests for the geometry helpers (sherd_refit.geometry)."""
 from __future__ import annotations
 
 import numpy as np
@@ -6,7 +6,7 @@ import open3d as o3d
 import pytest
 from scipy import sparse
 
-from reassemble.geometry import (apply_transform, ball_matrix, components_of, drop_small_components,
+from sherd_refit.geometry import (apply_transform, ball_matrix, components_of, drop_small_components,
                                  face_adjacency, face_geometry, make_frames, rotation_angle_deg,
                                  sample_on_faces, smoothed_normals)
 

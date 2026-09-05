@@ -20,7 +20,7 @@ log = logging.getLogger("sherd_refit")
 MESH_EXT = (".ply", ".obj", ".stl", ".off")
 FACES_PER_T2 = 600      # working-mesh faces per t^2 of surface (~12 edges across the wall)
 MIN_FACES = 50000
-CACHE_VERSION = 4       # bump when preprocessing/segmentation changes so stale caches are recomputed
+CACHE_VERSION = 5       # bump when preprocessing/segmentation changes so stale caches are recomputed
 
 
 def load_mesh(path: str) -> o3d.geometry.TriangleMesh:
@@ -86,8 +86,45 @@ def estimate_thickness(scene, C, FN, rng, n=20000):
     return (_hist_mode(far) if len(far) >= 100 else raw), raw
 
 
-def classify_faces(scene, C, FN, NS, thick, n_faces):
-    """Shell test: cone of 7 rays around -NS; shell if >= 5 rays hit the far wall at 0.5..1.8 t from behind."""
+@dataclass
+class SegParams:
+    """Knobs of the shell/fracture segmentation.
+
+    The defaults are what the pipeline ships; every one of them was measured against the
+    Structure-from-Sherds++ surface ground truth (`tools/eval_segmentation.py`) before being set.
+    """
+    smooth_res: float = 0.0         # NS smoothing radius is max(t/3, smooth_res * res)
+    votes: int = 5                  # cone rays out of 7 that must reach the far wall
+    votes_coarse: int = 4           # ... on a mesh coarser than `coarse_at` wall thicknesses
+    coarse_at: float = 0.1
+    smoothed_hit_normal: bool = False   # judge the hit face by its smoothed normal, not its raw one
+    boundary_angle: float = 25.0        # shell growth stops beyond this angle from the shell's normal
+    boundary_angle_auto: bool = False   # ... or beyond the shell's own normal noise plus 15 degrees
+
+    # Measured against the SfS++ surface ground truth with `tools/eval_segmentation.py`, on pots A
+    # and B (full resolution) and C, G and H (decimated).  Only the vote count earned its place:
+    # asking 4 of 7 rays instead of 5 once the mesh is coarser than 0.1 t raises the precision of
+    # the fracture mask on every pot (A 0.524 to 0.546, B 0.483 to 0.502, C 0.610 to 0.631,
+    # G 0.474 to 0.497, H 0.520 to 0.544) and cuts the shell area wrongly called fracture by a
+    # fifth, for one to three points of recall.  Being conditional on the resolution, it leaves
+    # the terracotta (0.058 t per edge) untouched.  3 of 7 is better still on precision but pays
+    # four points of recall on pot G, and three rays is a thin majority to trust.
+    #
+    # The other three candidates did not survive measurement.  Judging the hit face by its
+    # smoothed normal moves nothing (under 0.005 on all five pots).  Widening the smoothing radius
+    # to max(t/3, 3 res) makes it worse on all three decimated pots (C 0.610 to 0.599, G 0.474 to
+    # 0.455, H 0.520 to 0.513).  Raising the boundary-refinement angle to the shell's own normal
+    # noise plus 15 degrees is a no-op: after three Taubin iterations that noise is 1 to 10
+    # degrees, so the rule never clears the 25 degrees already in use.
+
+
+def classify_faces(scene, C, FN, NS, thick, n_faces, votes=5, hit_normals=None):
+    """Shell test: cone of 7 rays around -NS; shell if enough rays hit the far wall from behind.
+
+    "From behind" is judged by `hit_normals` (the raw face normals by default): the face the ray
+    lands on must point the way the ray travels.
+    """
+    hit_normals = FN if hit_normals is None else hit_normals
     n = NS
     a = np.where((np.abs(n[:, 0]) < 0.9)[:, None], np.array([[1.0, 0, 0]]), np.array([[0, 1.0, 0]]))
     e1 = np.cross(n, a); e1 /= np.linalg.norm(e1, axis=1, keepdims=True); e2 = np.cross(n, e1)
@@ -105,9 +142,9 @@ def classify_faces(scene, C, FN, NS, thick, n_faces):
         dh = ans["t_hit"].numpy(); prim = ans["primitive_ids"].numpy()
         ok = np.isfinite(dh) & (prim < n_faces) & (dh > 0.1 * thick)
         al = np.full(len(C), -1.0)
-        al[ok] = np.einsum("ij,ij->i", FN[prim[ok]], dvec[ok])
+        al[ok] = np.einsum("ij,ij->i", hit_normals[prim[ok]], dvec[ok])
         good += (ok & (dh / thick > 0.5) & (dh / thick < 1.8) & (al > 0.7)).astype(int)
-    return good >= 5
+    return good >= votes
 
 
 def closed_enough(F, max_boundary_fraction=0.002):
@@ -153,6 +190,41 @@ def refine_boundary(frac, fa, fb, C, FN, A, thick, grid, max_passes=60, angle_de
     return frac
 
 
+def segment_faces(F, FN, A, C, scene, thick, res, sp: SegParams | None = None):
+    """Split the working mesh into shell and fracture; returns the fracture mask and diagnostics.
+
+    Kept separate from `Fragment.from_mesh_file` so that a segmentation variant can be tried on an
+    already decimated mesh without paying for the decimation again.
+    """
+    sp = sp or SegParams()
+    ctree = cKDTree(C)
+    grid = coarse_grid(C, thick / 8.0)
+    rep, near = grid
+    radius = max(thick / 3.0, sp.smooth_res * res)
+    W = ball_matrix(C, C[rep], radius, tree=ctree)
+    NS_g, _ = smoothed_normals(W, FN, A)
+    NS = NS_g[near]
+    votes = sp.votes_coarse if res > sp.coarse_at * thick else sp.votes
+    shell = classify_faces(scene, C, FN, NS, thick, len(F), votes=votes,
+                           hit_normals=NS if sp.smoothed_hit_normal else FN)
+    frac = ~shell
+    raw_frac = float(A[frac].sum() / A.sum())
+    Wm = ball_matrix(C, C[rep], thick / 4.0, tree=ctree)
+    frac = (np.asarray(Wm @ (A * frac)).ravel() > 0.5 * np.asarray(Wm @ A).ravel())[near]
+    fa, fb, _ = face_adjacency(F)
+    frac = drop_small_components(frac, True, 0.5 * thick ** 2, fa, fb, A)
+    frac = drop_small_components(frac, False, 2.0 * thick ** 2, fa, fb, A)
+    angle = sp.boundary_angle
+    if sp.boundary_angle_auto and (~frac).any():
+        # how far the shell's own faces already stray from their smoothed normal: on a coarse mesh
+        # the triangles are noisy, and a fixed 25 degrees stops the growth inside that noise
+        cos = np.clip(np.einsum("ij,ij->i", FN[~frac], NS[~frac]), -1.0, 1.0)
+        angle = max(angle, float(np.degrees(np.median(np.arccos(cos)))) + 15.0)
+    frac = refine_boundary(frac, fa, fb, C, FN, A, thick, grid, angle_deg=angle)
+    frac = drop_small_components(frac, True, 0.5 * thick ** 2, fa, fb, A)
+    return frac, dict(raw_fraction=raw_frac, votes=votes, smooth_radius=radius, boundary_angle=angle)
+
+
 @dataclass
 class Fragment:
     """Working-resolution fragment with segmentation and breakline data (cache-able)."""
@@ -177,7 +249,8 @@ class Fragment:
 
     # ---------- construction ----------
     @classmethod
-    def from_mesh_file(cls, path: str, target_faces: int = 200000, seed: int = 0, name: str | None = None) -> "Fragment":
+    def from_mesh_file(cls, path: str, target_faces: int = 200000, seed: int = 0, name: str | None = None,
+                       seg: SegParams | None = None) -> "Fragment":
         t0 = time.time()
         name = name or os.path.splitext(os.path.basename(path))[0]
         m = load_mesh(path)
@@ -217,23 +290,10 @@ class Fragment:
                  name, len(F), n_orig_f, target, thick, res, thick / max(res, 1e-9), watertight, time.time() - t0)
 
         # segmentation (smooth fields are evaluated on a t/8 grid and looked up per face)
-        ctree = cKDTree(C)
-        grid = coarse_grid(C, thick / 8.0)
-        rep, near = grid
-        W = ball_matrix(C, C[rep], thick / 3.0, tree=ctree)
-        NS_g, _ = smoothed_normals(W, FN, A)
-        NS = NS_g[near]
-        shell = classify_faces(scene, C, FN, NS, thick, len(F))
-        frac = ~shell
-        raw_frac = float(A[frac].sum() / A.sum())
-        Wm = ball_matrix(C, C[rep], thick / 4.0, tree=ctree)
-        frac = (np.asarray(Wm @ (A * frac)).ravel() > 0.5 * np.asarray(Wm @ A).ravel())[near]
-        fa, fb, _ = face_adjacency(F)
-        frac = drop_small_components(frac, True, 0.5 * thick ** 2, fa, fb, A)
-        frac = drop_small_components(frac, False, 2.0 * thick ** 2, fa, fb, A)
-        frac = refine_boundary(frac, fa, fb, C, FN, A, thick, grid)
-        frac = drop_small_components(frac, True, 0.5 * thick ** 2, fa, fb, A)
-        log.info("%s: fracture area fraction raw %.3f -> final %.3f (%.1fs)", name, raw_frac, A[frac].sum() / A.sum(), time.time() - t0)
+        frac, info = segment_faces(F, FN, A, C, scene, thick, res, seg)
+        log.info("%s: fracture area fraction raw %.3f -> final %.3f; %d/7 votes, boundary %.0f deg (%.1fs)",
+                 name, info["raw_fraction"], A[frac].sum() / A.sum(), info["votes"], info["boundary_angle"],
+                 time.time() - t0)
         fr = cls(name=name, path=os.path.abspath(path), V=V, F=F, frac=frac, thick=float(thick), res=float(res),
                  watertight=watertight, n_orig_vertices=n_orig_v, n_orig_faces=n_orig_f, target_faces=int(target_faces),
                  thick_mode=float(thick_mode))

@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+output/
+out*/
+.DS_Store
+.pytest_cache/
+
+# large data folders (remove these lines to track them)
+input/
+papers/

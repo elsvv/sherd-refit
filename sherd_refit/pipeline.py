@@ -151,7 +151,10 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
                     cands += [Candidate.from_json(d) for d in res]
         finally:
             for k, v in env.items():
-                os.environ[k] = v if v is not None else ""
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
     else:
         # in-process: this process's OpenMP was configured at start-up and cannot be changed any
         # more, so leave the parallelism inside Open3D's ICP where it already is

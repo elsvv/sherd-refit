@@ -11,7 +11,7 @@ import pytest
 
 from sherd_refit import pipeline
 
-REAL_DIR = "/Users/vaceslaveliseev/@dev/ceramic-reassembling/input/test_fragments_1/fragments"
+REAL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "input", "test_fragments_1", "fragments")
 TRUE_JOINS = {frozenset({"FY234021_reduced", "FY234094_reduced"}),
               frozenset({"FY234094_reduced", "FY234104_reduced"})}
 LEFTOVER = "FY234007_reduced"

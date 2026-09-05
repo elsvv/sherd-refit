@@ -13,22 +13,26 @@ from .matching import Candidate, Params, Scales
 log = logging.getLogger("sherd_refit")
 
 
-def _penetration(A: MatchData, B: MatchData, T_ab: np.ndarray, t: float, p: Params) -> float:
+def _penetration(A: MatchData, B: MatchData, T_ab: np.ndarray, p: Params) -> float:
     """Fraction of surface samples of either fragment inside the other, given b->a transform.
 
     The depth counted is the pair's own `pen` scale, the same one the matcher used.
     """
     if not (A.fr.watertight and B.fr.watertight):
         return 0.0
-    depth = Scales.for_fragments(p, t, A, B).pen
+    depth = Scales.for_fragments(p, A, B).pen
     sdA = A.signed_distance(apply_transform(T_ab, B.S_pen))
     sdB = B.signed_distance(apply_transform(np.linalg.inv(T_ab), A.S_pen))
     return float(max((sdA < -depth).mean(), (sdB < -depth).mean()))
 
 
-def assemble(md: dict[str, MatchData], cands: list[Candidate], t: float, p: Params,
+def assemble(md: dict[str, MatchData], cands: list[Candidate], p: Params,
              rot_tol_deg: float = 10.0, trans_tol: float = 0.5):
     """Greedy assembly.
+
+    Pose disagreements are measured in wall thicknesses, and the thickness used is the median over
+    the group the fragment is joining, not over the whole collection: a collection may hold pots
+    of very different walls, and then the collection median describes none of them.
 
     Returns (poses, groups, used, rejected) where poses maps name -> 4x4 world transform,
     groups is a list of lists of names (size >= 2 first, then singletons), used is the list of
@@ -45,6 +49,9 @@ def assemble(md: dict[str, MatchData], cands: list[Candidate], t: float, p: Para
     groups: list[list[str]] = []
     used, rejected = [], []
 
+    def group_thickness(names) -> float:
+        return float(np.median([md[n].fr.thick for n in names]))
+
     def rel(c: Candidate, x: str):
         """Transform of fragment x's partner into x's frame, from candidate c (T maps b -> a)."""
         return c.T if x == c.a else np.linalg.inv(c.T)
@@ -58,10 +65,11 @@ def assemble(md: dict[str, MatchData], cands: list[Candidate], t: float, p: Para
             if other == placed:
                 continue
             T_rel = np.linalg.inv(poses[other]) @ T_new       # new -> other
-            pen = _penetration(md[other], md[new], T_rel, t, p)
+            pen = _penetration(md[other], md[new], T_rel, p)
             if pen > p.max_pen:
                 return None, f"penetrates {other} ({pen:.3f})"
         # consistency with other accepted joins between `new` and the group
+        tg = group_thickness(groups[g] + [new])
         for c2 in accepted:
             if c2 is c or new not in (c2.a, c2.b):
                 continue
@@ -70,7 +78,7 @@ def assemble(md: dict[str, MatchData], cands: list[Candidate], t: float, p: Para
                 continue
             T_alt = poses[other] @ rel(c2, other)
             D = np.linalg.inv(T_alt) @ T_new
-            ang, dist = rotation_angle_deg(D[:3, :3]), np.linalg.norm(D[:3, 3]) / t
+            ang, dist = rotation_angle_deg(D[:3, :3]), np.linalg.norm(D[:3, 3]) / tg
             if ang > rot_tol_deg or dist > trans_tol:
                 # the two joins disagree; keep the stronger one, reject this placement if c is weaker
                 if c2.score > c.score:
@@ -87,7 +95,8 @@ def assemble(md: dict[str, MatchData], cands: list[Candidate], t: float, p: Para
                 if group_of[c.a] == group_of[c.b]:
                     # loop-closing edge inside a group: keep it only if it agrees with the placed poses
                     D = np.linalg.inv(poses[c.a] @ c.T) @ poses[c.b]
-                    ang, dist = rotation_angle_deg(D[:3, :3]), np.linalg.norm(D[:3, 3]) / t
+                    tg = group_thickness(groups[group_of[c.a]])
+                    ang, dist = rotation_angle_deg(D[:3, :3]), np.linalg.norm(D[:3, 3]) / tg
                     if ang <= rot_tol_deg and dist <= trans_tol:
                         used.append(c)
                     else:

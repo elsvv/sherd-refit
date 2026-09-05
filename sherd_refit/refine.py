@@ -14,7 +14,7 @@ from .matching import Candidate, Params, Scales
 log = logging.getLogger("sherd_refit")
 
 
-def fracture_cloud(fr: Fragment, mesh: o3d.geometry.TriangleMesh, t: float, max_points: int = 150000):
+def fracture_cloud(fr: Fragment, mesh: o3d.geometry.TriangleMesh, max_points: int = 150000):
     """Original-resolution vertices lying on the working mesh's fracture faces (nearest centroid).
 
     A vertex can sit up to about half an edge from the nearest face centroid, so the acceptance
@@ -24,7 +24,7 @@ def fracture_cloud(fr: Fragment, mesh: o3d.geometry.TriangleMesh, t: float, max_
     mesh.compute_vertex_normals()
     V = np.asarray(mesh.vertices); N = np.asarray(mesh.vertex_normals)
     d, j = cKDTree(fr.C).query(V, workers=threads())
-    sel = fr.frac[j] & (d < max(0.15 * t, 1.5 * fr.res))
+    sel = fr.frac[j] & (d < max(0.15 * fr.thick, 1.5 * fr.res))
     idx = np.where(sel)[0]
     if len(idx) > max_points:
         idx = np.random.default_rng(0).choice(idx, max_points, replace=False)
@@ -34,11 +34,11 @@ def fracture_cloud(fr: Fragment, mesh: o3d.geometry.TriangleMesh, t: float, max_
 
 
 def refine_joins(frags: dict[str, Fragment], meshes: dict[str, o3d.geometry.TriangleMesh], poses: dict[str, np.ndarray],
-                 groups: list[list[str]], used: list[Candidate], t: float, p: Params | None = None) -> dict[str, np.ndarray]:
+                 groups: list[list[str]], used: list[Candidate], p: Params | None = None) -> dict[str, np.ndarray]:
     """Re-run point-to-plane ICP on full-resolution fracture vertices for every join used by the
     assembly, propagating corrections outward from each group's first fragment."""
     p = p or Params()
-    clouds = {n: fracture_cloud(frags[n], meshes[n], t) for n in frags if len(np.asarray(meshes[n].vertices))}
+    clouds = {n: fracture_cloud(frags[n], meshes[n]) for n in frags if len(np.asarray(meshes[n].vertices))}
     poses = dict(poses)
     est = o3d.pipelines.registration.TransformationEstimationPointToPlane()
     for g in groups:
@@ -54,13 +54,13 @@ def refine_joins(frags: dict[str, Fragment], meshes: dict[str, o3d.geometry.Tria
             src = o3d.geometry.PointCloud(clouds[moving]); src.transform(poses[moving])
             tgt = o3d.geometry.PointCloud(clouds[fixed]); tgt.transform(poses[fixed])
             T = np.eye(4)
-            sc = Scales.for_fragments(p, t, frags[fixed], frags[moving])
+            sc = Scales.for_fragments(p, frags[fixed], frags[moving])
             for dist in (sc.icp_dist(0.05), sc.icp_dist(0.02)):
                 r = o3d.pipelines.registration.registration_icp(src, tgt, dist, T, est, o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=40))
                 T = r.transformation
             # apply the correction to `moving` and everything already hanging off it (none yet: tree order)
             poses[moving] = T @ poses[moving]
-            log.info("refine %s -> %s: fitness %.3f rmse %.3f t", moving, fixed, r.fitness, r.inlier_rmse / t)
+            log.info("refine %s -> %s: fitness %.3f rmse %.3f t", moving, fixed, r.fitness, r.inlier_rmse / sc.t)
             done.add(moving)
             edges.remove(step)
     return poses

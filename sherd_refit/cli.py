@@ -23,6 +23,7 @@ def build_parser():
     r.add_argument("--max-gap", type=float, default=Params.max_gap, help="k for the max median fracture gap; the pair's limit is max(k t, m res)")
     r.add_argument("--max-pen", type=float, default=Params.max_pen, help="max penetrating surface fraction")
     r.add_argument("--min-seam", type=float, default=Params.min_seam, help="min seam length (in t)")
+    r.add_argument("--thick-ratio", type=float, default=Params.thick_ratio, help="skip a pair whose wall thicknesses differ by more than this factor")
     r.add_argument("--early-reject-tight", type=float, default=Params.early_reject_tight, help="skip the fracture-only ICPs and the costly verification below this tight-contact fraction")
     r.add_argument("--margin-points", type=int, default=Params.margin_points, help="shell-margin points kept per fragment for ICP and the continuity test")
     r.add_argument("--surface-points", type=int, default=Params.surface_points, help="whole-surface samples per fragment (penetration test and shell margin)")
@@ -46,7 +47,7 @@ def main(argv=None):
     from . import pipeline
     if args.cmd == "run":
         p = Params(stage1=args.stage1, stage2=args.candidates, min_tight=args.min_tight, max_gap=args.max_gap, max_pen=args.max_pen,
-                   min_seam=args.min_seam, early_reject_tight=args.early_reject_tight,
+                   min_seam=args.min_seam, thick_ratio=args.thick_ratio, early_reject_tight=args.early_reject_tight,
                    margin_points=args.margin_points, surface_points=args.surface_points, frac_per_t2=args.frac_density)
         pipeline.run(args.input_dir, args.out, target_faces=args.target_faces, workers=args.workers, params=p,
                      preview=not args.no_preview, refine=not args.no_refine, write_meshes=not args.no_meshes, threads=args.threads)

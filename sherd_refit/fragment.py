@@ -20,7 +20,7 @@ log = logging.getLogger("sherd_refit")
 MESH_EXT = (".ply", ".obj", ".stl", ".off")
 FACES_PER_T2 = 600      # working-mesh faces per t^2 of surface (~12 edges across the wall)
 MIN_FACES = 50000
-CACHE_VERSION = 3       # bump when preprocessing/segmentation changes so stale caches are recomputed
+CACHE_VERSION = 4       # bump when preprocessing/segmentation changes so stale caches are recomputed
 
 
 def load_mesh(path: str) -> o3d.geometry.TriangleMesh:
@@ -44,16 +44,46 @@ def largest_component(m: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh
     return m
 
 
-def estimate_thickness(scene, C, FN, rng, n=20000):
-    idx = rng.choice(len(C), min(n, len(C)), replace=False)
-    rays = np.concatenate([C[idx] - FN[idx] * 1e-3, -FN[idx]], 1).astype(np.float32)
-    d = scene.cast_rays(o3d.core.Tensor(rays))["t_hit"].numpy()
-    d = d[np.isfinite(d)]
-    if len(d) < 100:
-        return None
+def _hist_mode(d):
     hist, edges = np.histogram(d, bins=60, range=(0, np.percentile(d, 90)))
     k = int(np.argmax(hist))
     return float(0.5 * (edges[k] + edges[k + 1]))
+
+
+def estimate_thickness(scene, C, FN, rng, n=20000):
+    """Wall thickness from rays cast inward from random faces, as (robust estimate, plain mode).
+
+    A hit counts only when the face it lands on looks back along the ray (its normal points the
+    way the ray travels, cos > 0.7): that is the opposite wall seen from behind, and it drops the
+    rays that run along a rim, down a lip or into the fracture surface.  About a third of the rays
+    go that way on this data.
+
+    Taking the mode of the *lower* part of what survives was tried against a fragment carrying a
+    pot's mouth and does not work, in either direction.  On the terracotta the wall sits at the
+    top of the aligned distances -- FY234007's aligned hits run 21.6 at the 5th percentile to
+    41.7 at the 90th with the wall at 39 -- because the low tail is oblique rays near the crease,
+    not a thinner wall; truncating at the 60th percentile cuts the peak off and the estimate falls
+    to 29.3, a 25 % error on the one number every threshold is expressed in.  And on the fragment
+    it was meant to rescue it changes almost nothing: pot A piece 01 is genuinely mostly collar,
+    its aligned hits start at 4.6 against the pot's 3.5 mm wall, and the estimate moves only from
+    6.01 to 5.84.  What actually stops a rim from distorting a comparison is using `min(t_A, t_B)`
+    for the pair (see `Scales`) and letting the wall-ratio filter be loose enough to keep the pair
+    at all.
+
+    Both numbers are returned; the report prints the unfiltered mode beside the estimate so that a
+    fragment whose two values disagree is visible.
+    """
+    idx = rng.choice(len(C), min(n, len(C)), replace=False)
+    dvec = -FN[idx]
+    rays = np.concatenate([C[idx] + dvec * 1e-3, dvec], 1).astype(np.float32)
+    ans = scene.cast_rays(o3d.core.Tensor(rays))
+    d = ans["t_hit"].numpy(); prim = ans["primitive_ids"].numpy()
+    ok = np.isfinite(d) & (prim < len(FN))
+    if ok.sum() < 100:
+        return None, None
+    raw = _hist_mode(d[ok])
+    far = d[ok][np.einsum("ij,ij->i", FN[prim[ok]], dvec[ok]) > 0.7]
+    return (_hist_mode(far) if len(far) >= 100 else raw), raw
 
 
 def classify_faces(scene, C, FN, NS, thick, n_faces):
@@ -137,6 +167,7 @@ class Fragment:
     n_orig_vertices: int
     n_orig_faces: int
     target_faces: int = 0
+    thick_mode: float = 0.0     # plain mode over every inward ray; `thick` is the robust version
     cache_version: int = CACHE_VERSION
     # derived (filled by `finalize`)
     FN: np.ndarray = field(default=None, repr=False)
@@ -158,10 +189,13 @@ class Fragment:
         FN0, A0, C0 = face_geometry(V0, F0)
         scene0 = o3d.t.geometry.RaycastingScene()
         scene0.add_triangles(o3d.t.geometry.TriangleMesh(o3d.core.Tensor(V0.astype(np.float32)), o3d.core.Tensor(F0.astype(np.uint32))))
-        thick = estimate_thickness(scene0, C0, FN0, rng)
+        thick, thick_mode = estimate_thickness(scene0, C0, FN0, rng)
         if thick is None or thick <= 0:
             thick = float(np.min(m.get_oriented_bounding_box().extent) / 10.0)
             log.warning("%s: thickness estimate failed, using OBB fallback %.2f", name, thick)
+        thick_mode = thick if not thick_mode else thick_mode
+        if thick_mode > 1.15 * thick:
+            log.info("%s: wall %.2f, but the plain ray mode says %.2f -- a rim or a collar", name, thick, thick_mode)
         target = int(np.clip(FACES_PER_T2 * A0.sum() / thick ** 2, MIN_FACES, target_faces))
         del scene0, V0, F0, FN0, A0, C0
         if len(m.triangles) > target:
@@ -201,7 +235,8 @@ class Fragment:
         frac = drop_small_components(frac, True, 0.5 * thick ** 2, fa, fb, A)
         log.info("%s: fracture area fraction raw %.3f -> final %.3f (%.1fs)", name, raw_frac, A[frac].sum() / A.sum(), time.time() - t0)
         fr = cls(name=name, path=os.path.abspath(path), V=V, F=F, frac=frac, thick=float(thick), res=float(res),
-                 watertight=watertight, n_orig_vertices=n_orig_v, n_orig_faces=n_orig_f, target_faces=int(target_faces))
+                 watertight=watertight, n_orig_vertices=n_orig_v, n_orig_faces=n_orig_f, target_faces=int(target_faces),
+                 thick_mode=float(thick_mode))
         fr.FN, fr.A, fr.C, fr.scene = FN, A, C, scene
         return fr
 
@@ -209,7 +244,7 @@ class Fragment:
     def save(self, path: str):
         np.savez_compressed(path, name=self.name, path=self.path, V=self.V, F=self.F, frac=self.frac, thick=self.thick,
                             res=self.res, watertight=self.watertight, n_orig_vertices=self.n_orig_vertices, n_orig_faces=self.n_orig_faces,
-                            target_faces=self.target_faces, cache_version=self.cache_version,
+                            target_faces=self.target_faces, thick_mode=self.thick_mode, cache_version=self.cache_version,
                             mtime=os.path.getmtime(self.path) if os.path.exists(self.path) else 0.0)
 
     @classmethod
@@ -218,6 +253,7 @@ class Fragment:
         fr = cls(name=str(d["name"]), path=str(d["path"]), V=d["V"], F=d["F"], frac=d["frac"], thick=float(d["thick"]),
                  res=float(d["res"]), watertight=bool(d["watertight"]), n_orig_vertices=int(d["n_orig_vertices"]), n_orig_faces=int(d["n_orig_faces"]),
                  target_faces=int(d["target_faces"]) if "target_faces" in d else 0,
+                 thick_mode=float(d["thick_mode"]) if "thick_mode" in d else 0.0,
                  cache_version=int(d["cache_version"]) if "cache_version" in d else 0)
         fr.cache_mtime = float(d["mtime"]) if "mtime" in d else 0.0
         fr.FN, fr.A, fr.C = face_geometry(fr.V, fr.F)
@@ -270,7 +306,8 @@ class Fragment:
     def stats(self) -> dict:
         ext = self.V.max(0) - self.V.min(0)
         return dict(name=self.name, faces=int(len(self.F)), orig_faces=self.n_orig_faces, orig_vertices=self.n_orig_vertices,
-                    thickness=self.thick, resolution=self.res, watertight=self.watertight, extent=[float(x) for x in ext],
+                    thickness=self.thick, thickness_mode=self.thick_mode, resolution=self.res,
+                    watertight=self.watertight, extent=[float(x) for x in ext],
                     area=self.area, fracture_area_fraction=self.fracture_area / self.area)
 
 

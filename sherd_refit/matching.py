@@ -68,6 +68,7 @@ class Params:
     min_seam: float = 3.0
     min_cont_n: float = 0.8
     early_reject_tight: float = 0.0     # >0: skip the fracture-only ICPs and the costly verification below this
+    thick_ratio: float = 2.5            # a pair whose walls differ by more than this is not matched at all
     margin_points: int = 6000           # shell-margin points kept for the pc_reg ICP and the continuity test
     surface_points: int = 20000         # whole-surface samples per fragment (penetration test and shell margin)
     frac_per_t2: float = 150.0          # fracture samples per t^2 of fracture area
@@ -113,10 +114,14 @@ class Scales:
                    icp=f(p.icp_delta, p.icp_res) / (p.icp_delta * t))
 
     @classmethod
-    def for_fragments(cls, p: Params, t: float, a, b) -> "Scales":
-        """Scales for the pair (a, b), given as `MatchData` or `Fragment`, at wall thickness `t`."""
-        res = max(getattr(a, "fr", a).res, getattr(b, "fr", b).res)
-        return cls.for_pair(p, t, res)
+    def for_fragments(cls, p: Params, a, b) -> "Scales":
+        """Scales for the pair (a, b), given as `MatchData` or `Fragment`.
+
+        The pair supplies both numbers itself; no collection-wide thickness is involved, because a
+        collection can hold walls of 2.4 mm and 13.5 mm at once and its median describes neither.
+        """
+        fa, fb = getattr(a, "fr", a), getattr(b, "fr", b)
+        return cls.for_pair(p, min(fa.thick, fb.thick), max(fa.res, fb.res))
 
     def icp_dist(self, k: float) -> float:
         """One rung of the ICP ladder, `k * t`, stretched by the resolution floor.
@@ -370,7 +375,7 @@ def _stage2(A: MatchData, B: MatchData, T0: np.ndarray, sc: Scales, p: Params, b
     return c
 
 
-def match_pair(A: MatchData, B: MatchData, t: float, p: Params, keep: int = 5, n_threads: int | None = None) -> list[Candidate]:
+def match_pair(A: MatchData, B: MatchData, p: Params, keep: int = 5, n_threads: int | None = None) -> list[Candidate]:
     """Return the best `keep` candidates (b -> a) for the pair, best first.
 
     `n_threads` threads are used inside the pair (default: this process's SHERD_REFIT_THREADS
@@ -381,7 +386,7 @@ def match_pair(A: MatchData, B: MatchData, t: float, p: Params, keep: int = 5, n
     rng = np.random.default_rng(p.seed)
     if not (A.has_frac and B.has_frac) or A.brk_tree is None or B.brk_tree is None:
         return []
-    sc = Scales.for_fragments(p, t, A, B)
+    sc = Scales.for_fragments(p, A, B)
     R, tr = hypotheses(A, B, p)
     if len(R) == 0:
         log.info("%s-%s: no hypotheses", A.name, B.name)

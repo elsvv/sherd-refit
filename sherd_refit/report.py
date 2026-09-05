@@ -34,12 +34,13 @@ def write_report(out_dir, frag_stats, thickness, cands, poses, groups, used, rej
     lines.append("")
     lines.append("## Fragments")
     lines.append("")
-    lines.append("| fragment | faces (orig) | thickness | thickness/median | edge | edges per t | fracture area % | watertight | extent |")
-    lines.append("|---|---|---|---|---|---|---|---|---|")
+    lines.append("| fragment | faces (orig) | thickness | ray mode | thickness/median | edge | edges per t | fracture area % | watertight | extent |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|")
     for s in frag_stats:
         flag = "" if abs(s["thickness"] / thickness - 1) < 0.4 else " **(differs)**"
         res = s.get("resolution", 0.0)
-        lines.append(f"| {s['name']} | {s['faces']} ({s['orig_faces']}) | {s['thickness']:.2f}{flag} | {s['thickness']/thickness:.2f} | "
+        lines.append(f"| {s['name']} | {s['faces']} ({s['orig_faces']}) | {s['thickness']:.2f}{flag} | "
+                     f"{s.get('thickness_mode', 0):.2f} | {s['thickness']/thickness:.2f} | "
                      f"{res:.3f} | {s['thickness']/res if res else 0:.1f} | "
                      f"{100*s['fracture_area_fraction']:.1f} | {s['watertight']} | {' x '.join(f'{x:.0f}' for x in s['extent'])} |")
     lines.append("")

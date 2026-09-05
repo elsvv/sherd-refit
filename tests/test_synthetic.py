@@ -168,7 +168,7 @@ def md(frags, thickness):
 
 @pytest.fixture(scope="module")
 def cands(md, thickness):
-    return matching.match_pair(md["pieceA"], md["pieceB"], thickness, Params(), keep=5)
+    return matching.match_pair(md["pieceA"], md["pieceB"], Params(), keep=5)
 
 
 def pose_error(T_est, T_true, points):
@@ -237,7 +237,7 @@ def test_candidates_are_ranked_by_score(cands):
 # ---------------------------------------------------------------- C: assembly
 
 def test_assemble_places_both_fragments(pair, md, thickness, cands):
-    poses, groups, used, rejected = assembly.assemble(md, cands, thickness, Params())
+    poses, groups, used, rejected = assembly.assemble(md, cands, Params())
     assert len(groups) == 1
     assert set(groups[0]) == {"pieceA", "pieceB"}
     assert len(used) == 1

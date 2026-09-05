@@ -249,7 +249,8 @@ class Fragment:
 class MatchData:
     """Runtime structures for matching one fragment: breakline with frames, samples, KD-trees, point clouds."""
 
-    def __init__(self, fr: Fragment, t: float, seed: int = 0, n_samples: int = 30000):
+    def __init__(self, fr: Fragment, t: float, seed: int = 0, n_samples: int = 30000,
+                 margin_points: int = 6000, pen_samples: int = 10000):
         self.fr = fr
         self.name = fr.name
         self.t = t
@@ -290,16 +291,34 @@ class MatchData:
         # shell margin for ICP / continuity: shell points near the seam, excluding a thin band next to the
         # breakline where crease faces misclassified as shell would otherwise dominate the nearest-neighbour test
         self.margin = (~self.S_frac) & (d_brk > 0.12 * t) & (d_brk < 1.5 * t)
-        self.pc_reg = _pc(np.concatenate([self.S[self.S_frac], self.S[self.margin]]), np.concatenate([self.SN[self.S_frac], self.SN[self.margin]]))
-        self.pc_frac = _pc(self.S[self.S_frac], self.SN[self.S_frac])
+        # Point sets used by ICP and verification, materialised once.  The margin holds about
+        # 13k of the 30k samples and dominates the cost of the pc_reg ICP, so it is thinned to
+        # `margin_points`: a uniform random subset of an area-weighted sample is still
+        # area-weighted.  Penetration only needs a few thousand points to resolve a 0.005
+        # fraction, so it gets its own fixed subset of the full surface samples.  Both subsets
+        # come from the seeded rng, so two runs see the same points.
+        self.Pf, self.Nf = self.S[self.S_frac], self.SN[self.S_frac]
+        self.margin_idx = _subsample(np.where(self.margin)[0], margin_points, rng)
+        self.Pm, self.Nm = self.S[self.margin_idx], self.SN[self.margin_idx]
+        self.S_pen = self.S[_subsample(np.arange(len(self.S)), pen_samples, rng)]
+        self.pc_reg = _pc(np.concatenate([self.Pf, self.Pm]), np.concatenate([self.Nf, self.Nm]))
+        self.pc_frac = _pc(self.Pf, self.Nf)
         self.pc_brk = _pc(P[self.brk_sub], ns[self.brk_sub])
         self.pc_brk_full = _pc(P, ns)
-        self.tree_frac = cKDTree(self.S[self.S_frac]) if self.S_frac.any() else None
-        self.tree_margin = cKDTree(self.S[self.margin]) if self.margin.any() else None
+        self.tree_frac = cKDTree(self.Pf) if len(self.Pf) else None
+        self.tree_margin = cKDTree(self.Pm) if len(self.Pm) else None
         self.frac_area = fr.fracture_area
 
     def signed_distance(self, Q):
         return self.fr.signed_distance(Q)
+
+
+def _subsample(idx: np.ndarray, n: int, rng) -> np.ndarray:
+    """A deterministic random subset of `idx` with at most n entries (sorted, so the order of the
+    underlying samples is preserved)."""
+    if n <= 0 or len(idx) <= n:
+        return idx
+    return np.sort(rng.choice(idx, n, replace=False))
 
 
 def _pc(P, N):

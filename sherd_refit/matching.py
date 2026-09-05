@@ -30,6 +30,8 @@ class Params:
     max_pen: float = 0.005
     min_seam: float = 3.0
     min_cont_n: float = 0.8
+    margin_points: int = 6000       # shell-margin points kept for the pc_reg ICP and the continuity test
+    pen_samples: int = 10000        # surface samples used by the penetration test
     seed: int = 0
 
 
@@ -130,7 +132,7 @@ def verify(A: MatchData, B: MatchData, T: np.ndarray, t: float, p: Params) -> di
     s = {}
     Tinv = np.linalg.inv(T)
     # fracture contact, tight fraction and gap
-    PBf = apply_transform(T, B.S[B.S_frac]); PAf = A.S[A.S_frac]
+    PBf = apply_transform(T, B.Pf); PAf = A.Pf
     d1, _ = A.tree_frac.query(PBf, workers=threads())
     d2, _ = cKDTree(PBf).query(PAf, workers=threads())
     for tag, d, area in (("A", d2, A.frac_area), ("B", d1, B.frac_area)):
@@ -153,12 +155,12 @@ def verify(A: MatchData, B: MatchData, T: np.ndarray, t: float, p: Params) -> di
     else:
         s["seam"] = 0.0
     # shell continuity across the seam
-    if A.tree_margin is not None and B.margin.any():
-        PBm = apply_transform(T, B.S[B.margin]); NBm = B.SN[B.margin] @ T[:3, :3].T
+    if A.tree_margin is not None and len(B.Pm):
+        PBm = apply_transform(T, B.Pm); NBm = B.Nm @ T[:3, :3].T
         dm, jm = A.tree_margin.query(PBm, workers=threads())
         near = dm < 0.5 * t
         if near.sum() > 20:
-            Am = A.S[A.margin][jm[near]]; An = A.SN[A.margin][jm[near]]
+            Am = A.Pm[jm[near]]; An = A.Nm[jm[near]]
             s["cont"] = float(np.median(np.abs(np.einsum("ij,ij->i", PBm[near] - Am, An))) / t)
             s["cont_n"] = float(np.median(np.einsum("ij,ij->i", NBm[near], An)))
         else:
@@ -167,7 +169,7 @@ def verify(A: MatchData, B: MatchData, T: np.ndarray, t: float, p: Params) -> di
         s["cont"], s["cont_n"] = 1.0, -1.0
     # penetration (both directions)
     if A.fr.watertight and B.fr.watertight:
-        sdA = A.signed_distance(apply_transform(T, B.S)); sdB = B.signed_distance(apply_transform(Tinv, A.S))
+        sdA = A.signed_distance(apply_transform(T, B.S_pen)); sdB = B.signed_distance(apply_transform(Tinv, A.S_pen))
         s["pen"] = float(max((sdA < -p.pen_delta * t).mean(), (sdB < -p.pen_delta * t).mean()))
         s["pen_depth"] = float(max(-sdA.min(), -sdB.min()) / t)
     else:

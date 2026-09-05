@@ -22,6 +22,8 @@ def build_parser():
     r.add_argument("--max-gap", type=float, default=0.065, help="max median fracture gap (in t) to accept a join")
     r.add_argument("--max-pen", type=float, default=0.005, help="max penetrating surface fraction")
     r.add_argument("--min-seam", type=float, default=3.0, help="min seam length (in t)")
+    r.add_argument("--margin-points", type=int, default=Params.margin_points, help="shell-margin points kept per fragment for ICP and the continuity test")
+    r.add_argument("--pen-samples", type=int, default=Params.pen_samples, help="surface samples per fragment used by the penetration test")
     r.add_argument("--no-preview", action="store_true")
     r.add_argument("--no-refine", action="store_true", help="skip full-resolution refinement")
     r.add_argument("--no-meshes", action="store_true", help="do not write placed/merged meshes")
@@ -40,7 +42,8 @@ def main(argv=None):
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
     from . import pipeline
     if args.cmd == "run":
-        p = Params(stage1=args.stage1, stage2=args.candidates, min_tight=args.min_tight, max_gap=args.max_gap, max_pen=args.max_pen, min_seam=args.min_seam)
+        p = Params(stage1=args.stage1, stage2=args.candidates, min_tight=args.min_tight, max_gap=args.max_gap, max_pen=args.max_pen,
+                   min_seam=args.min_seam, margin_points=args.margin_points, pen_samples=args.pen_samples)
         pipeline.run(args.input_dir, args.out, target_faces=args.target_faces, workers=args.workers, params=p,
                      preview=not args.no_preview, refine=not args.no_refine, write_meshes=not args.no_meshes)
     elif args.cmd == "segment":

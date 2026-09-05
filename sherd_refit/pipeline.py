@@ -65,10 +65,14 @@ def _preprocess_one(args):
     return cache_path
 
 
+def _match_data(fr: Fragment, t: float, p: Params, n_samples: int = 30000) -> MatchData:
+    return MatchData(fr, t, seed=p.seed, n_samples=n_samples, margin_points=p.margin_points, pen_samples=p.pen_samples)
+
+
 def _match_one(args):
     ca, cb, t, params_dict, keep = args
     p = Params(**params_dict)
-    A = MatchData(Fragment.load(ca), t, seed=p.seed); B = MatchData(Fragment.load(cb), t, seed=p.seed)
+    A = _match_data(Fragment.load(ca), t, p); B = _match_data(Fragment.load(cb), t, p)
     return [c.to_json() for c in match_pair(A, B, t, p, keep=keep)]
 
 
@@ -129,7 +133,7 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
 
     # 3. assembly
     t0 = time.time()
-    md = {n: MatchData(frags[n], thick, seed=p.seed, n_samples=15000) for n in names}
+    md = {n: _match_data(frags[n], thick, p, n_samples=15000) for n in names}
     poses, groups, used, rejected = assemble(md, cands, thick, p)
     timings["assembly"] = time.time() - t0
 

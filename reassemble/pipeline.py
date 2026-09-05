@@ -44,9 +44,13 @@ def _init_worker(level):
 def _preprocess_one(args):
     path, cache_path, target_faces = args
     if os.path.exists(cache_path):
-        fr = Fragment.load(cache_path)
-        if fr.path == os.path.abspath(path):
-            return cache_path
+        try:
+            fr = Fragment.load(cache_path)
+            if fr.cache_valid_for(path, target_faces):
+                return cache_path
+            log.info("%s: cache is stale (settings or file changed), recomputing", fr.name)
+        except Exception as e:      # unreadable cache: recompute
+            log.warning("%s: cannot read cache (%s), recomputing", cache_path, e)
     fr = Fragment.from_mesh_file(path, target_faces=target_faces)
     fr.save(cache_path)
     return cache_path
@@ -92,7 +96,15 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
 
     # 2. pairwise matching
     t0 = time.time()
-    pairs = list(itertools.combinations(names, 2))
+    pairs, skipped = [], []
+    for a, b in itertools.combinations(names, 2):
+        ratio = frags[a].thick / frags[b].thick
+        if ratio > 1.5 or ratio < 1 / 1.5:
+            skipped.append((a, b))            # walls too different to be one object
+        else:
+            pairs.append((a, b))
+    if skipped:
+        log.info("%d pairs skipped because wall thickness differs by more than 50%%", len(skipped))
     cache_of = {fr.name: c for fr, c in zip(frags.values(), caches)}
     jobs = [(cache_of[a], cache_of[b], thick, asdict(p), keep_per_pair) for a, b in pairs]
     cands: list[Candidate] = []

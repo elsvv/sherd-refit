@@ -18,6 +18,9 @@ from .geometry import (threads, apply_transform, ball_matrix, drop_small_compone
 log = logging.getLogger("reassemble")
 
 MESH_EXT = (".ply", ".obj", ".stl", ".off")
+FACES_PER_T2 = 600      # working-mesh faces per t^2 of surface (~12 edges across the wall)
+MIN_FACES = 50000
+CACHE_VERSION = 2       # bump when preprocessing/segmentation changes so stale caches are recomputed
 
 
 def load_mesh(path: str) -> o3d.geometry.TriangleMesh:
@@ -132,6 +135,8 @@ class Fragment:
     watertight: bool
     n_orig_vertices: int
     n_orig_faces: int
+    target_faces: int = 0
+    cache_version: int = CACHE_VERSION
     # derived (filled by `finalize`)
     FN: np.ndarray = field(default=None, repr=False)
     A: np.ndarray = field(default=None, repr=False)
@@ -146,8 +151,20 @@ class Fragment:
         m = load_mesh(path)
         n_orig_v, n_orig_f = len(m.vertices), len(m.triangles)
         m = largest_component(m)
-        if len(m.triangles) > target_faces:
-            m = m.simplify_quadric_decimation(target_number_of_triangles=target_faces)
+        rng = np.random.default_rng(seed)
+        # wall thickness from the original mesh, then a face budget that keeps ~12 edges across the wall
+        V0 = np.asarray(m.vertices, dtype=np.float64); F0 = np.asarray(m.triangles, dtype=np.int64)
+        FN0, A0, C0 = face_geometry(V0, F0)
+        scene0 = o3d.t.geometry.RaycastingScene()
+        scene0.add_triangles(o3d.t.geometry.TriangleMesh(o3d.core.Tensor(V0.astype(np.float32)), o3d.core.Tensor(F0.astype(np.uint32))))
+        thick = estimate_thickness(scene0, C0, FN0, rng)
+        if thick is None or thick <= 0:
+            thick = float(np.min(m.get_oriented_bounding_box().extent) / 10.0)
+            log.warning("%s: thickness estimate failed, using OBB fallback %.2f", name, thick)
+        target = int(np.clip(FACES_PER_T2 * A0.sum() / thick ** 2, MIN_FACES, target_faces))
+        del scene0, V0, F0, FN0, A0, C0
+        if len(m.triangles) > target:
+            m = m.simplify_quadric_decimation(target_number_of_triangles=target)
             m.remove_degenerate_triangles(); m.remove_duplicated_vertices(); m.remove_unreferenced_vertices()
         m = m.filter_smooth_taubin(number_of_iterations=3)
         m.remove_degenerate_triangles(); m.remove_unreferenced_vertices()
@@ -160,13 +177,7 @@ class Fragment:
         FN, A, C = face_geometry(V, F)
         scene = o3d.t.geometry.RaycastingScene()
         scene.add_triangles(o3d.t.geometry.TriangleMesh(o3d.core.Tensor(V.astype(np.float32)), o3d.core.Tensor(F.astype(np.uint32))))
-        rng = np.random.default_rng(seed)
-        thick = estimate_thickness(scene, C, FN, rng)
-        if thick is None or thick <= 0:
-            obb = m.get_oriented_bounding_box()
-            thick = float(np.min(obb.extent) / 10.0)
-            log.warning("%s: thickness estimate failed, using OBB fallback %.2f", name, thick)
-        log.info("%s: %d faces (from %d), thickness %.2f, watertight=%s (%.1fs)", name, len(F), n_orig_f, thick, watertight, time.time() - t0)
+        log.info("%s: %d faces (from %d, budget %d), thickness %.2f, watertight=%s (%.1fs)", name, len(F), n_orig_f, target, thick, watertight, time.time() - t0)
 
         # segmentation (smooth fields are evaluated on a t/8 grid and looked up per face)
         ctree = cKDTree(C)
@@ -187,26 +198,36 @@ class Fragment:
         frac = drop_small_components(frac, True, 0.5 * thick ** 2, fa, fb, A)
         log.info("%s: fracture area fraction raw %.3f -> final %.3f (%.1fs)", name, raw_frac, A[frac].sum() / A.sum(), time.time() - t0)
         fr = cls(name=name, path=os.path.abspath(path), V=V, F=F, frac=frac, thick=float(thick), watertight=watertight,
-                 n_orig_vertices=n_orig_v, n_orig_faces=n_orig_f)
+                 n_orig_vertices=n_orig_v, n_orig_faces=n_orig_f, target_faces=int(target_faces))
         fr.FN, fr.A, fr.C, fr.scene = FN, A, C, scene
         return fr
 
     # ---------- cache ----------
     def save(self, path: str):
         np.savez_compressed(path, name=self.name, path=self.path, V=self.V, F=self.F, frac=self.frac, thick=self.thick,
-                            watertight=self.watertight, n_orig_vertices=self.n_orig_vertices, n_orig_faces=self.n_orig_faces)
+                            watertight=self.watertight, n_orig_vertices=self.n_orig_vertices, n_orig_faces=self.n_orig_faces,
+                            target_faces=self.target_faces, cache_version=self.cache_version,
+                            mtime=os.path.getmtime(self.path) if os.path.exists(self.path) else 0.0)
 
     @classmethod
     def load(cls, path: str) -> "Fragment":
         d = np.load(path, allow_pickle=False)
         fr = cls(name=str(d["name"]), path=str(d["path"]), V=d["V"], F=d["F"], frac=d["frac"], thick=float(d["thick"]),
-                 watertight=bool(d["watertight"]), n_orig_vertices=int(d["n_orig_vertices"]), n_orig_faces=int(d["n_orig_faces"]))
+                 watertight=bool(d["watertight"]), n_orig_vertices=int(d["n_orig_vertices"]), n_orig_faces=int(d["n_orig_faces"]),
+                 target_faces=int(d["target_faces"]) if "target_faces" in d else 0,
+                 cache_version=int(d["cache_version"]) if "cache_version" in d else 0)
+        fr.cache_mtime = float(d["mtime"]) if "mtime" in d else 0.0
         fr.FN, fr.A, fr.C = face_geometry(fr.V, fr.F)
         fr.scene = o3d.t.geometry.RaycastingScene()
         fr.scene.add_triangles(o3d.t.geometry.TriangleMesh(o3d.core.Tensor(fr.V.astype(np.float32)), o3d.core.Tensor(fr.F.astype(np.uint32))))
         return fr
 
     # ---------- queries ----------
+    def cache_valid_for(self, path: str, target_faces: int) -> bool:
+        """True if this cached fragment was computed from `path` with the same settings and file version."""
+        same_file = self.path == os.path.abspath(path) and os.path.exists(path) and abs(getattr(self, "cache_mtime", 0.0) - os.path.getmtime(path)) < 1.0
+        return same_file and self.target_faces == int(target_faces) and self.cache_version == CACHE_VERSION
+
     def signed_distance(self, Q: np.ndarray) -> np.ndarray:
         return self.scene.compute_signed_distance(o3d.core.Tensor(Q.astype(np.float32))).numpy()
 

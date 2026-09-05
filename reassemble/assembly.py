@@ -81,7 +81,13 @@ def assemble(md: dict[str, MatchData], cands: list[Candidate], t: float, p: Para
             if a_in and b_in:
                 remaining.remove(c)
                 if group_of[c.a] == group_of[c.b]:
-                    used.append(c)      # loop-closing edge inside a group; consistency was checked at placement
+                    # loop-closing edge inside a group: keep it only if it agrees with the placed poses
+                    D = np.linalg.inv(poses[c.a] @ c.T) @ poses[c.b]
+                    ang, dist = rotation_angle_deg(D[:3, :3]), np.linalg.norm(D[:3, 3]) / t
+                    if ang <= rot_tol_deg and dist <= trans_tol:
+                        used.append(c)
+                    else:
+                        rejected.append((c, f"inconsistent with the assembled poses ({ang:.1f} deg, {dist:.2f} t)"))
                 else:
                     rejected.append((c, "would merge two groups (not supported)"))
                 continue

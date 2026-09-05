@@ -30,6 +30,7 @@ class Params:
     max_pen: float = 0.005
     min_seam: float = 3.0
     min_cont_n: float = 0.8
+    early_reject_tight: float = 0.12    # skip the fracture-only ICPs and the costly verification below this
     margin_points: int = 6000       # shell-margin points kept for the pc_reg ICP and the continuity test
     pen_samples: int = 10000        # surface samples used by the penetration test
     seed: int = 0
@@ -127,11 +128,9 @@ def brk_score(A: MatchData, B: MatchData, T, delta):
 
 # ---------------------------------------------------------------- verification
 
-def verify(A: MatchData, B: MatchData, T: np.ndarray, t: float, p: Params) -> dict:
-    """All verification scores for the transform T (b -> a)."""
+def fracture_scores(A: MatchData, B: MatchData, T: np.ndarray, t: float, p: Params) -> dict:
+    """Tight-contact fraction, median gap and contact area from the facing fracture points."""
     s = {}
-    Tinv = np.linalg.inv(T)
-    # fracture contact, tight fraction and gap
     PBf = apply_transform(T, B.Pf); PAf = A.Pf
     d1, _ = A.tree_frac.query(PBf, workers=threads())
     d2, _ = cKDTree(PBf).query(PAf, workers=threads())
@@ -145,36 +144,58 @@ def verify(A: MatchData, B: MatchData, T: np.ndarray, t: float, p: Params) -> di
             s["contact" + tag] = float((d < 2 * p.tight_delta * t).mean() * area / t ** 2)
     s["tight"] = min(s["tightA"], s["tightB"]); s["gap"] = max(s["gapA"], s["gapB"])
     s["contact"] = min(s["contactA"], s["contactB"])
-    # seam length along A's breakline
+    return s
+
+
+def _seam_score(A: MatchData, B: MatchData, T: np.ndarray, t: float) -> dict:
+    """Length of A's breakline (in t) covered by B's breakline with agreeing shell normals."""
     PBb = apply_transform(T, B.brk_P); NBb = B.brk_ns @ T[:3, :3].T
     dA, jA = cKDTree(PBb).query(A.brk_P, workers=threads())
     seamA = (dA < 0.12 * t) & (np.einsum("ij,ij->i", A.brk_ns, NBb[jA]) > 0.7)
-    if seamA.any():
-        vox = np.unique(np.floor(A.brk_P[seamA] / (t / 3.0)).astype(int), axis=0)
-        s["seam"] = float(len(vox) / 3.0)
-    else:
-        s["seam"] = 0.0
-    # shell continuity across the seam
+    if not seamA.any():
+        return dict(seam=0.0)
+    vox = np.unique(np.floor(A.brk_P[seamA] / (t / 3.0)).astype(int), axis=0)
+    return dict(seam=float(len(vox) / 3.0))
+
+
+def _continuity_scores(A: MatchData, B: MatchData, T: np.ndarray, t: float) -> dict:
+    """Step height and normal agreement of the outer shell across the seam."""
     if A.tree_margin is not None and len(B.Pm):
         PBm = apply_transform(T, B.Pm); NBm = B.Nm @ T[:3, :3].T
         dm, jm = A.tree_margin.query(PBm, workers=threads())
         near = dm < 0.5 * t
         if near.sum() > 20:
             Am = A.Pm[jm[near]]; An = A.Nm[jm[near]]
-            s["cont"] = float(np.median(np.abs(np.einsum("ij,ij->i", PBm[near] - Am, An))) / t)
-            s["cont_n"] = float(np.median(np.einsum("ij,ij->i", NBm[near], An)))
-        else:
-            s["cont"], s["cont_n"] = 1.0, -1.0
-    else:
-        s["cont"], s["cont_n"] = 1.0, -1.0
-    # penetration (both directions)
-    if A.fr.watertight and B.fr.watertight:
-        sdA = A.signed_distance(apply_transform(T, B.S_pen)); sdB = B.signed_distance(apply_transform(Tinv, A.S_pen))
-        s["pen"] = float(max((sdA < -p.pen_delta * t).mean(), (sdB < -p.pen_delta * t).mean()))
-        s["pen_depth"] = float(max(-sdA.min(), -sdB.min()) / t)
-    else:
-        s["pen"], s["pen_depth"] = 0.0, 0.0
-        s["pen_unavailable"] = 1.0
+            return dict(cont=float(np.median(np.abs(np.einsum("ij,ij->i", PBm[near] - Am, An))) / t),
+                        cont_n=float(np.median(np.einsum("ij,ij->i", NBm[near], An))))
+    return dict(cont=1.0, cont_n=-1.0)
+
+
+def _penetration_scores(A: MatchData, B: MatchData, T: np.ndarray, t: float, p: Params) -> dict:
+    """Fraction of surface samples of either fragment inside the other, and the deepest excursion."""
+    if not (A.fr.watertight and B.fr.watertight):
+        return dict(pen=0.0, pen_depth=0.0, pen_unavailable=1.0)
+    sdA = A.signed_distance(apply_transform(T, B.S_pen))
+    sdB = B.signed_distance(apply_transform(np.linalg.inv(T), A.S_pen))
+    return dict(pen=float(max((sdA < -p.pen_delta * t).mean(), (sdB < -p.pen_delta * t).mean())),
+                pen_depth=float(max(-sdA.min(), -sdB.min()) / t))
+
+
+def verify(A: MatchData, B: MatchData, T: np.ndarray, t: float, p: Params, full: bool = True,
+           frac: dict | None = None) -> dict:
+    """All verification scores for the transform T (b -> a).
+
+    With `full=False` only the cheap half is computed (fracture contact and seam length); shell
+    continuity and penetration are marked as not computed (`cont_n = -1`, `pen = 0`, `partial = 1`),
+    which also makes the candidate fail `accept`.  `frac` passes in fracture scores already
+    computed for this very transform.
+    """
+    s = dict(frac) if frac is not None else fracture_scores(A, B, T, t, p)
+    s.update(_seam_score(A, B, T, t))
+    if not full:
+        return dict(s, cont=1.0, cont_n=-1.0, pen=0.0, pen_depth=0.0, partial=1.0)
+    s.update(_continuity_scores(A, B, T, t))
+    s.update(_penetration_scores(A, B, T, t, p))
     return s
 
 
@@ -184,6 +205,32 @@ def accept(s: dict, p: Params) -> bool:
 
 
 # ---------------------------------------------------------------- driver
+
+def _stage2(A: MatchData, B: MatchData, T0: np.ndarray, t: float, p: Params, brk: float) -> Candidate:
+    """Refine one stage-1 pose with the full ICP chain and verify it.
+
+    After the two ICPs on fracture + shell margin the tight-contact fraction is already close to
+    its final value, so a candidate far below `min_tight` cannot be rescued by the two
+    fracture-only ICPs.  Such candidates skip those ICPs and the expensive half of the
+    verification; they keep their cheap scores (so they still show up in the report) and can
+    never be accepted.
+    """
+    T = _icp(B.pc_reg, A.pc_reg, T0, 0.2 * t, 30)
+    T = _icp(B.pc_reg, A.pc_reg, T, 0.08 * t, 30)
+    frac = fracture_scores(A, B, T, t, p)
+    if frac["tight"] >= p.early_reject_tight:
+        T = _icp(B.pc_frac, A.pc_frac, T, 0.08 * t, 30)
+        T = _icp(B.pc_frac, A.pc_frac, T, 0.04 * t, 30)
+        s = verify(A, B, T, t, p)
+        accepted = accept(s, p)
+    else:
+        s = verify(A, B, T, t, p, full=False, frac=frac)
+        accepted = False
+    s["brk"] = brk
+    c = Candidate(A.name, B.name, T, s)
+    c.accepted = accepted
+    return c
+
 
 def match_pair(A: MatchData, B: MatchData, t: float, p: Params, keep: int = 5) -> list[Candidate]:
     """Return the best `keep` candidates (b -> a) for the pair, best first."""
@@ -197,6 +244,7 @@ def match_pair(A: MatchData, B: MatchData, t: float, p: Params, keep: int = 5) -
         return []
     sc = coarse_score(A, B, R, tr, t, p, rng)
     kept = nms(np.argsort(sc)[::-1][:5000], R, tr, sc, t, p.stage1, 0.1)
+
     Ts, s1 = [], []
     for k in kept:
         T = np.eye(4); T[:3, :3] = R[k]; T[:3, 3] = tr[k]
@@ -209,15 +257,7 @@ def match_pair(A: MatchData, B: MatchData, t: float, p: Params, keep: int = 5) -
     s1 = np.array(s1)
     Rs = np.array([T[:3, :3] for T in Ts]); trs = np.array([T[:3, 3] for T in Ts])
     kept2 = nms(np.argsort(s1)[::-1], Rs, trs, s1, t, p.stage2, 0.05)
-    cands = []
-    for k in kept2:
-        T = _icp(B.pc_reg, A.pc_reg, Ts[k], 0.2 * t, 30)
-        T = _icp(B.pc_reg, A.pc_reg, T, 0.08 * t, 30)
-        T = _icp(B.pc_frac, A.pc_frac, T, 0.08 * t, 30)
-        T = _icp(B.pc_frac, A.pc_frac, T, 0.04 * t, 30)
-        s = verify(A, B, T, t, p); s["brk"] = float(s1[k])
-        c = Candidate(A.name, B.name, T, s); c.accepted = accept(s, p)
-        cands.append(c)
+    cands = [_stage2(A, B, Ts[k], t, p, float(s1[k])) for k in kept2]
     cands.sort(key=lambda c: -c.score)
     best = cands[0].scores if cands else {}
     log.info("%s-%s: %d hyp, %d/%d refined, best seam %.1f tight %.2f gap %.3f pen %.3f accepted=%s (%.1fs)",

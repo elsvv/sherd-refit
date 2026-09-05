@@ -188,7 +188,7 @@ FY234104 – FY234094 – FY234021 в ряд, 094 посередине — и о
 |---|---|---|---|
 | `input/test_fragments_1` | 4 фрагмента толстостенной терракоты (сканы музея) | ручная сборка 3 из 4 | у музея |
 | `input/sfspp/pot_A..J`, `mixed_all` | 164 реальных скана фрагментов 10 горшков (Structure-from-Sherds++, CC BY-NC-SA 4.0) | позы и соседства | `download.sh` из репозитория SfS++, затем `python tools/stage_sfspp.py` |
-| `input/synthetic_pingsdorf_{20,60,170}` | настоящий фотограмметрический скан горшка ~900 г. н.э., разбитый на 20/60/170 фрагментов с износом кромок, недостающими и чужими кусками | точные позы, соседства, принадлежность предмету | [Release benchmark-data-v1](https://github.com/elsvv/sherd-refit/releases/tag/benchmark-data-v1) или `python tools/fetch_sources.py` + `python tools/make_synthetic.py` |
+| `input/synthetic_pingsdorf_{20,60,170}` | настоящий фотограмметрический скан горшка ~900 г. н.э., разбитый на 20/60/170 фрагментов с износом кромок, недостающими и чужими кусками | точные позы, соседства, принадлежность предмету | `python tools/fetch_sources.py` (скачивает сканы с Zenodo), затем `python tools/make_synthetic.py` |
 
 Исходные сканы сосудов опубликованы LWL-Archäologie für Westfalen на Zenodo под лицензией
 CC BY 4.0 (автор моделей: LWL-Archäologie für Westfalen / Florian Westphal): горшок

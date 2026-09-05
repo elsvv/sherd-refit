@@ -31,9 +31,9 @@ class Params:
     max_pen: float = 0.005
     min_seam: float = 3.0
     min_cont_n: float = 0.8
-    early_reject_tight: float = 0.12    # skip the fracture-only ICPs and the costly verification below this
-    margin_points: int = 6000       # shell-margin points kept for the pc_reg ICP and the continuity test
-    pen_samples: int = 10000        # surface samples used by the penetration test
+    early_reject_tight: float = 0.0     # >0: skip the fracture-only ICPs and the costly verification below this
+    margin_points: int = 6000           # shell-margin points kept for the pc_reg ICP and the continuity test
+    pen_samples: int = 0                # >0: surface samples used by the penetration test (0 = all of them)
     seed: int = 0
 
 
@@ -237,26 +237,28 @@ def _map(fn, jobs: list, n_threads: int) -> list:
 def _stage2(A: MatchData, B: MatchData, T0: np.ndarray, t: float, p: Params, brk: float) -> Candidate:
     """Refine one stage-1 pose with the full ICP chain and verify it.
 
-    After the two ICPs on fracture + shell margin the tight-contact fraction is already close to
-    its final value, so a candidate far below `min_tight` cannot be rescued by the two
-    fracture-only ICPs.  Such candidates skip those ICPs and the expensive half of the
-    verification; they keep their cheap scores (so they still show up in the report) and can
-    never be accepted.
+    With `Params.early_reject_tight > 0` a cheap tight-contact estimate is taken after the two
+    ICPs on fracture + shell margin, and a candidate below the threshold skips the two
+    fracture-only ICPs and the expensive half of the verification; it keeps its cheap scores (so
+    it still shows up in the report), is marked `partial`, and can never be accepted.  This is
+    off by default: measured on the test set, the estimate can still rise by 0.09 during the two
+    remaining ICPs, so a threshold safe against the 0.25 acceptance limit saves almost nothing.
+    See docs/superpowers/notes/2026-09-05-performance.md.
     """
     T = _icp(B.pc_reg, A.pc_reg, T0, 0.2 * t, 30)
     T = _icp(B.pc_reg, A.pc_reg, T, 0.08 * t, 30)
-    frac = fracture_scores(A, B, T, t, p)
-    if frac["tight"] >= p.early_reject_tight:
-        T = _icp(B.pc_frac, A.pc_frac, T, 0.08 * t, 30)
-        T = _icp(B.pc_frac, A.pc_frac, T, 0.04 * t, 30)
-        s = verify(A, B, T, t, p)
-        accepted = accept(s, p)
-    else:
-        s = verify(A, B, T, t, p, full=False, frac=frac)
-        accepted = False
+    if p.early_reject_tight > 0.0:
+        frac = fracture_scores(A, B, T, t, p)
+        if frac["tight"] < p.early_reject_tight:
+            s = verify(A, B, T, t, p, full=False, frac=frac)
+            s["brk"] = brk
+            return Candidate(A.name, B.name, T, s)          # accepted stays False
+    T = _icp(B.pc_frac, A.pc_frac, T, 0.08 * t, 30)
+    T = _icp(B.pc_frac, A.pc_frac, T, 0.04 * t, 30)
+    s = verify(A, B, T, t, p)
     s["brk"] = brk
     c = Candidate(A.name, B.name, T, s)
-    c.accepted = accepted
+    c.accepted = accept(s, p)
     return c
 
 

@@ -250,7 +250,7 @@ class MatchData:
     """Runtime structures for matching one fragment: breakline with frames, samples, KD-trees, point clouds."""
 
     def __init__(self, fr: Fragment, t: float, seed: int = 0, n_samples: int = 30000,
-                 margin_points: int = 6000, pen_samples: int = 10000):
+                 margin_points: int = 6000, pen_samples: int = 0):
         self.fr = fr
         self.name = fr.name
         self.t = t
@@ -294,13 +294,15 @@ class MatchData:
         # Point sets used by ICP and verification, materialised once.  The margin holds about
         # 13k of the 30k samples and dominates the cost of the pc_reg ICP, so it is thinned to
         # `margin_points`: a uniform random subset of an area-weighted sample is still
-        # area-weighted.  Penetration only needs a few thousand points to resolve a 0.005
-        # fraction, so it gets its own fixed subset of the full surface samples.  Both subsets
-        # come from the seeded rng, so two runs see the same points.
+        # area-weighted, and the true joins' scores move by less than the sampling noise of the
+        # metric itself.  The penetration test keeps every sample by default (`pen_samples = 0`):
+        # with 10k samples its value shifts by up to 0.001, a fifth of the 0.005 threshold, which
+        # is enough to move a candidate across it.  Subsets come from the seeded rng, so two runs
+        # see the same points.
         self.Pf, self.Nf = self.S[self.S_frac], self.SN[self.S_frac]
         self.margin_idx = _subsample(np.where(self.margin)[0], margin_points, rng)
         self.Pm, self.Nm = self.S[self.margin_idx], self.SN[self.margin_idx]
-        self.S_pen = self.S[_subsample(np.arange(len(self.S)), pen_samples, rng)]
+        self.S_pen = self.S[_subsample(np.arange(len(self.S)), pen_samples, rng)] if pen_samples else self.S
         self.pc_reg = _pc(np.concatenate([self.Pf, self.Pm]), np.concatenate([self.Nf, self.Nm]))
         self.pc_frac = _pc(self.Pf, self.Nf)
         self.pc_brk = _pc(P[self.brk_sub], ns[self.brk_sub])

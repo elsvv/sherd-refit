@@ -278,7 +278,7 @@ class MatchData:
     """Runtime structures for matching one fragment: breakline with frames, samples, KD-trees, point clouds."""
 
     def __init__(self, fr: Fragment, t: float, seed: int = 0, surface_points: int = 20000,
-                 frac_per_t2: float = 150.0, min_frac_points: int = 5000, max_frac_points: int = 60000,
+                 frac_per_t2: float = 50.0, min_frac_points: int = 4000, max_frac_points: int = 10000,
                  margin_points: int = 6000):
         self.fr = fr
         self.name = fr.name
@@ -290,13 +290,13 @@ class MatchData:
         self.SN = FN[sp]
         self.S_frac = frac[sp]
         self.S_pen = self.S
-        # Fracture samples, drawn on the fracture faces alone at a density fixed in units of `t`.
-        # `gap` and `tight` are nearest-neighbour distances between two independent samples of the
-        # same surface, so their floor is the sample spacing, about 0.5 / sqrt(density).  A flat
-        # count per fragment made that floor grow with the fragment's area-to-wall ratio -- 0.043 t
-        # on the thick terracotta against 0.075 t on a pot A sherd, which is most of why the true
-        # joins of the pots could not reach the gap threshold.  At a fixed density the floor is the
-        # same 0.041 t everywhere.  The cap keeps the KD-tree queries affordable on large sherds.
+        # Fracture samples, drawn on the fracture faces alone at a density fixed in units of `t`,
+        # so that a big sherd and a small one are described equally finely.  Since `tight` and
+        # `gap` are measured against the other fragment's triangles rather than against its
+        # samples, the count no longer sets a floor under them -- it only sets the noise of the
+        # fractions and the cost of the ICP, and the scores are already flat from 40 per t^2
+        # upward (measured on the terracotta: `tight` moves by 0.01 between 40 and 150).  The
+        # bounds keep small sherds usable and large ones affordable.
         n_frac = int(np.clip(frac_per_t2 * float(A[frac].sum()) / t ** 2, min_frac_points, max_frac_points))
         self.Pf, fp = sample_on_faces(V, F, A, frac, n_frac, rng)
         self.Nf = FN[fp]

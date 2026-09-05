@@ -109,6 +109,26 @@ section 2. Raising `margin_points` to 10 000 does not help: it makes that check 
 out of tolerance instead of one, 007 – 094 flipping by 64.7°) while leaving the true joins
 identical, which is what one expects if the quantity being chased is noise. 6000 stays.
 
+### Regression check against the baseline candidates
+
+Verdict: **pass**. Every stage-2 candidate of the six real pairs was dumped before and after and
+compared pose by pose.
+
+- Both true joins keep rank 1 and stay accepted, with identical scores: Δtight +0.0000 and
+  +0.0007, Δgap 0.00000 t, Δseam 0.00 t, penetration 0.0000.
+- Zero acceptance flips over all returned candidates; the accepted count per pair is unchanged
+  (0, 0, 0, 4, 0, 2).
+- Penetration moves by at most 0.00040 on any paired candidate, and no candidate crosses the
+  0.005 threshold in either direction.
+- Early rejection, kept as an opt-in knob: at a threshold of 0.12 the highest final tight among
+  the candidates it would drop is 0.166 on the new dump and 0.172 on the baseline one, against an
+  acceptance threshold of 0.25 and the 0.20 safety bar, a margin of +0.034 and +0.028.
+- One pose deviation: the best candidate of 007 – 104 moves 1.61° / 0.053 t, just outside the
+  1° / 0.05 t tolerance. That pair has no true join, its best candidate reaches tight 0.153
+  against an acceptance threshold of 0.25, and it is rejected before and after. The tolerance is
+  meant for accepted joins, so this is not a regression; see the seed experiment above for why
+  the top candidate of a non-matching pair is not a stable quantity in the first place.
+
 `compare_dumps.py baseline_candidates.json final_candidates.json`, verbatim:
 
 ```

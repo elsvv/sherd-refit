@@ -94,16 +94,23 @@ def coarse_score(A: MatchData, B: MatchData, R, tr, t, p: Params, rng):
 
 
 def nms(order, R, tr, sc, t, topk, floor, rot_tol=2.9):
-    kept = []
+    """Greedy non-maximum suppression over poses: walk `order`, keeping a pose unless an already
+    kept one is within 0.5 t of it and points nearly the same way.
+
+    The translation test is evaluated against all kept poses at once, which is what makes this
+    loop cheap; the rotation test then runs only for the few poses that are close in translation,
+    with the same arithmetic as before.
+    """
+    kept: list[int] = []
+    kept_tr = np.empty((max(topk, 1), 3))
     for k in order:
         if sc[k] < floor:
             break
-        dup = False
-        for kk in kept:
-            if np.linalg.norm(tr[k] - tr[kk]) < 0.5 * t and np.trace(R[k].T @ R[kk]) > rot_tol:
-                dup = True
-                break
+        n = len(kept)
+        dup = n > 0 and any(np.trace(R[k].T @ R[kept[i]]) > rot_tol
+                            for i in np.flatnonzero(np.linalg.norm(tr[k] - kept_tr[:n], axis=1) < 0.5 * t))
         if not dup:
+            kept_tr[n] = tr[k]
             kept.append(k)
         if len(kept) >= topk:
             break

@@ -278,7 +278,7 @@ class MatchData:
     """Runtime structures for matching one fragment: breakline with frames, samples, KD-trees, point clouds."""
 
     def __init__(self, fr: Fragment, t: float, seed: int = 0, surface_points: int = 20000,
-                 frac_per_t2: float = 50.0, min_frac_points: int = 4000, max_frac_points: int = 10000,
+                 frac_per_t2: float = 150.0, min_frac_points: int = 5000, max_frac_points: int = 12000,
                  margin_points: int = 6000):
         self.fr = fr
         self.name = fr.name
@@ -293,10 +293,14 @@ class MatchData:
         # Fracture samples, drawn on the fracture faces alone at a density fixed in units of `t`,
         # so that a big sherd and a small one are described equally finely.  Since `tight` and
         # `gap` are measured against the other fragment's triangles rather than against its
-        # samples, the count no longer sets a floor under them -- it only sets the noise of the
-        # fractions and the cost of the ICP, and the scores are already flat from 40 per t^2
-        # upward (measured on the terracotta: `tight` moves by 0.01 between 40 and 150).  The
-        # bounds keep small sherds usable and large ones affordable.
+        # samples, the count no longer sets a floor under them: at a fixed pose the scores are flat
+        # in it (pot A at its ground-truth poses moves from tight 0.19 to 0.20 between 50 and 150
+        # per t^2).  What the count still buys is the ICP, which averages over that many
+        # correspondences -- at 50 per t^2 pot A ends at 5 of 8 fragments placed and at 150 it
+        # ends at 7 of 8, on identical thresholds.  Since the cost of the ICP is what grows, the
+        # upper bound is what keeps it affordable: uncapped, the largest sherds take 23k-49k
+        # points and matching runs 45 % to 226 % longer per pot; at 12k it is within 30 % of what
+        # the flat 30 000-sample scheme cost, with the same result.
         n_frac = int(np.clip(frac_per_t2 * float(A[frac].sum()) / t ** 2, min_frac_points, max_frac_points))
         self.Pf, fp = sample_on_faces(V, F, A, frac, n_frac, rng)
         self.Nf = FN[fp]

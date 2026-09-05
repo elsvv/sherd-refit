@@ -70,9 +70,9 @@ class Params:
     early_reject_tight: float = 0.0     # >0: skip the fracture-only ICPs and the costly verification below this
     margin_points: int = 6000           # shell-margin points kept for the pc_reg ICP and the continuity test
     surface_points: int = 20000         # whole-surface samples per fragment (penetration test and shell margin)
-    frac_per_t2: float = 50.0           # fracture samples per t^2 of fracture area
-    min_frac_points: int = 4000
-    max_frac_points: int = 10000
+    frac_per_t2: float = 150.0          # fracture samples per t^2 of fracture area
+    min_frac_points: int = 5000
+    max_frac_points: int = 12000
     seed: int = 0
 
 

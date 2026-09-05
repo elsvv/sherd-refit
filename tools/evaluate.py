@@ -77,10 +77,14 @@ def centroids(input_dir, names):
     except ImportError:
         return {}
     by_stem = {}
-    for f in sorted(os.listdir(input_dir)):
-        stem, ext = os.path.splitext(f)
-        if ext.lower() in MESH_EXT:
-            by_stem.setdefault(stem, os.path.join(input_dir, f))
+    # the meshes sit next to ground_truth.json, or one level down in fragments/ (synthetic sets)
+    for d in (input_dir, os.path.join(input_dir, "fragments")):
+        if not os.path.isdir(d):
+            continue
+        for f in sorted(os.listdir(d)):
+            stem, ext = os.path.splitext(f)
+            if ext.lower() in MESH_EXT:
+                by_stem.setdefault(stem, os.path.join(d, f))
     out = {}
     for n in names:
         p = by_stem.get(n)

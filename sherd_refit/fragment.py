@@ -13,14 +13,14 @@ import open3d as o3d
 from scipy.spatial import cKDTree
 
 from .geometry import (threads, apply_transform, ball_matrix, drop_small_components, face_adjacency,
-                       face_geometry, sample_on_faces, smoothed_normals)
+                       face_geometry, median_edge, sample_on_faces, smoothed_normals)
 
 log = logging.getLogger("sherd_refit")
 
 MESH_EXT = (".ply", ".obj", ".stl", ".off")
 FACES_PER_T2 = 600      # working-mesh faces per t^2 of surface (~12 edges across the wall)
 MIN_FACES = 50000
-CACHE_VERSION = 2       # bump when preprocessing/segmentation changes so stale caches are recomputed
+CACHE_VERSION = 5       # bump when preprocessing/segmentation changes so stale caches are recomputed
 
 
 def load_mesh(path: str) -> o3d.geometry.TriangleMesh:
@@ -44,20 +44,87 @@ def largest_component(m: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh
     return m
 
 
-def estimate_thickness(scene, C, FN, rng, n=20000):
-    idx = rng.choice(len(C), min(n, len(C)), replace=False)
-    rays = np.concatenate([C[idx] - FN[idx] * 1e-3, -FN[idx]], 1).astype(np.float32)
-    d = scene.cast_rays(o3d.core.Tensor(rays))["t_hit"].numpy()
-    d = d[np.isfinite(d)]
-    if len(d) < 100:
-        return None
+def _hist_mode(d):
     hist, edges = np.histogram(d, bins=60, range=(0, np.percentile(d, 90)))
     k = int(np.argmax(hist))
     return float(0.5 * (edges[k] + edges[k + 1]))
 
 
-def classify_faces(scene, C, FN, NS, thick, n_faces):
-    """Shell test: cone of 7 rays around -NS; shell if >= 5 rays hit the far wall at 0.5..1.8 t from behind."""
+def estimate_thickness(scene, C, FN, rng, n=20000):
+    """Wall thickness from rays cast inward from random faces, as (robust estimate, plain mode).
+
+    A hit counts only when the face it lands on looks back along the ray (its normal points the
+    way the ray travels, cos > 0.7): that is the opposite wall seen from behind, and it drops the
+    rays that run along a rim, down a lip or into the fracture surface.  About a third of the rays
+    go that way on this data.
+
+    Taking the mode of the *lower* part of what survives was tried against a fragment carrying a
+    pot's mouth and does not work, in either direction.  On the terracotta the wall sits at the
+    top of the aligned distances -- FY234007's aligned hits run 21.6 at the 5th percentile to
+    41.7 at the 90th with the wall at 39 -- because the low tail is oblique rays near the crease,
+    not a thinner wall; truncating at the 60th percentile cuts the peak off and the estimate falls
+    to 29.3, a 25 % error on the one number every threshold is expressed in.  And on the fragment
+    it was meant to rescue it changes almost nothing: pot A piece 01 is genuinely mostly collar,
+    its aligned hits start at 4.6 against the pot's 3.5 mm wall, and the estimate moves only from
+    6.01 to 5.84.  What actually stops a rim from distorting a comparison is using `min(t_A, t_B)`
+    for the pair (see `Scales`) and letting the wall-ratio filter be loose enough to keep the pair
+    at all.
+
+    Both numbers are returned; the report prints the unfiltered mode beside the estimate so that a
+    fragment whose two values disagree is visible.
+    """
+    idx = rng.choice(len(C), min(n, len(C)), replace=False)
+    dvec = -FN[idx]
+    rays = np.concatenate([C[idx] + dvec * 1e-3, dvec], 1).astype(np.float32)
+    ans = scene.cast_rays(o3d.core.Tensor(rays))
+    d = ans["t_hit"].numpy(); prim = ans["primitive_ids"].numpy()
+    ok = np.isfinite(d) & (prim < len(FN))
+    if ok.sum() < 100:
+        return None, None
+    raw = _hist_mode(d[ok])
+    far = d[ok][np.einsum("ij,ij->i", FN[prim[ok]], dvec[ok]) > 0.7]
+    return (_hist_mode(far) if len(far) >= 100 else raw), raw
+
+
+@dataclass
+class SegParams:
+    """Knobs of the shell/fracture segmentation.
+
+    The defaults are what the pipeline ships; every one of them was measured against the
+    Structure-from-Sherds++ surface ground truth (`tools/eval_segmentation.py`) before being set.
+    """
+    smooth_res: float = 0.0         # NS smoothing radius is max(t/3, smooth_res * res)
+    votes: int = 5                  # cone rays out of 7 that must reach the far wall
+    votes_coarse: int = 4           # ... on a mesh coarser than `coarse_at` wall thicknesses
+    coarse_at: float = 0.1
+    smoothed_hit_normal: bool = False   # judge the hit face by its smoothed normal, not its raw one
+    boundary_angle: float = 25.0        # shell growth stops beyond this angle from the shell's normal
+    boundary_angle_auto: bool = False   # ... or beyond the shell's own normal noise plus 15 degrees
+
+    # Measured against the SfS++ surface ground truth with `tools/eval_segmentation.py`, on pots A
+    # and B (full resolution) and C, G and H (decimated).  Only the vote count earned its place:
+    # asking 4 of 7 rays instead of 5 once the mesh is coarser than 0.1 t raises the precision of
+    # the fracture mask on every pot (A 0.524 to 0.546, B 0.483 to 0.502, C 0.610 to 0.631,
+    # G 0.474 to 0.497, H 0.520 to 0.544) and cuts the shell area wrongly called fracture by a
+    # fifth, for one to three points of recall.  Being conditional on the resolution, it leaves
+    # the terracotta (0.058 t per edge) untouched.  3 of 7 is better still on precision but pays
+    # four points of recall on pot G, and three rays is a thin majority to trust.
+    #
+    # The other three candidates did not survive measurement.  Judging the hit face by its
+    # smoothed normal moves nothing (under 0.005 on all five pots).  Widening the smoothing radius
+    # to max(t/3, 3 res) makes it worse on all three decimated pots (C 0.610 to 0.599, G 0.474 to
+    # 0.455, H 0.520 to 0.513).  Raising the boundary-refinement angle to the shell's own normal
+    # noise plus 15 degrees is a no-op: after three Taubin iterations that noise is 1 to 10
+    # degrees, so the rule never clears the 25 degrees already in use.
+
+
+def classify_faces(scene, C, FN, NS, thick, n_faces, votes=5, hit_normals=None):
+    """Shell test: cone of 7 rays around -NS; shell if enough rays hit the far wall from behind.
+
+    "From behind" is judged by `hit_normals` (the raw face normals by default): the face the ray
+    lands on must point the way the ray travels.
+    """
+    hit_normals = FN if hit_normals is None else hit_normals
     n = NS
     a = np.where((np.abs(n[:, 0]) < 0.9)[:, None], np.array([[1.0, 0, 0]]), np.array([[0, 1.0, 0]]))
     e1 = np.cross(n, a); e1 /= np.linalg.norm(e1, axis=1, keepdims=True); e2 = np.cross(n, e1)
@@ -75,9 +142,9 @@ def classify_faces(scene, C, FN, NS, thick, n_faces):
         dh = ans["t_hit"].numpy(); prim = ans["primitive_ids"].numpy()
         ok = np.isfinite(dh) & (prim < n_faces) & (dh > 0.1 * thick)
         al = np.full(len(C), -1.0)
-        al[ok] = np.einsum("ij,ij->i", FN[prim[ok]], dvec[ok])
+        al[ok] = np.einsum("ij,ij->i", hit_normals[prim[ok]], dvec[ok])
         good += (ok & (dh / thick > 0.5) & (dh / thick < 1.8) & (al > 0.7)).astype(int)
-    return good >= 5
+    return good >= votes
 
 
 def closed_enough(F, max_boundary_fraction=0.002):
@@ -123,6 +190,41 @@ def refine_boundary(frac, fa, fb, C, FN, A, thick, grid, max_passes=60, angle_de
     return frac
 
 
+def segment_faces(F, FN, A, C, scene, thick, res, sp: SegParams | None = None):
+    """Split the working mesh into shell and fracture; returns the fracture mask and diagnostics.
+
+    Kept separate from `Fragment.from_mesh_file` so that a segmentation variant can be tried on an
+    already decimated mesh without paying for the decimation again.
+    """
+    sp = sp or SegParams()
+    ctree = cKDTree(C)
+    grid = coarse_grid(C, thick / 8.0)
+    rep, near = grid
+    radius = max(thick / 3.0, sp.smooth_res * res)
+    W = ball_matrix(C, C[rep], radius, tree=ctree)
+    NS_g, _ = smoothed_normals(W, FN, A)
+    NS = NS_g[near]
+    votes = sp.votes_coarse if res > sp.coarse_at * thick else sp.votes
+    shell = classify_faces(scene, C, FN, NS, thick, len(F), votes=votes,
+                           hit_normals=NS if sp.smoothed_hit_normal else FN)
+    frac = ~shell
+    raw_frac = float(A[frac].sum() / A.sum())
+    Wm = ball_matrix(C, C[rep], thick / 4.0, tree=ctree)
+    frac = (np.asarray(Wm @ (A * frac)).ravel() > 0.5 * np.asarray(Wm @ A).ravel())[near]
+    fa, fb, _ = face_adjacency(F)
+    frac = drop_small_components(frac, True, 0.5 * thick ** 2, fa, fb, A)
+    frac = drop_small_components(frac, False, 2.0 * thick ** 2, fa, fb, A)
+    angle = sp.boundary_angle
+    if sp.boundary_angle_auto and (~frac).any():
+        # how far the shell's own faces already stray from their smoothed normal: on a coarse mesh
+        # the triangles are noisy, and a fixed 25 degrees stops the growth inside that noise
+        cos = np.clip(np.einsum("ij,ij->i", FN[~frac], NS[~frac]), -1.0, 1.0)
+        angle = max(angle, float(np.degrees(np.median(np.arccos(cos)))) + 15.0)
+    frac = refine_boundary(frac, fa, fb, C, FN, A, thick, grid, angle_deg=angle)
+    frac = drop_small_components(frac, True, 0.5 * thick ** 2, fa, fb, A)
+    return frac, dict(raw_fraction=raw_frac, votes=votes, smooth_radius=radius, boundary_angle=angle)
+
+
 @dataclass
 class Fragment:
     """Working-resolution fragment with segmentation and breakline data (cache-able)."""
@@ -132,10 +234,12 @@ class Fragment:
     F: np.ndarray
     frac: np.ndarray
     thick: float
+    res: float                  # median edge length of this working mesh (the resolution unit)
     watertight: bool
     n_orig_vertices: int
     n_orig_faces: int
     target_faces: int = 0
+    thick_mode: float = 0.0     # plain mode over every inward ray; `thick` is the robust version
     cache_version: int = CACHE_VERSION
     # derived (filled by `finalize`)
     FN: np.ndarray = field(default=None, repr=False)
@@ -145,7 +249,8 @@ class Fragment:
 
     # ---------- construction ----------
     @classmethod
-    def from_mesh_file(cls, path: str, target_faces: int = 200000, seed: int = 0, name: str | None = None) -> "Fragment":
+    def from_mesh_file(cls, path: str, target_faces: int = 200000, seed: int = 0, name: str | None = None,
+                       seg: SegParams | None = None) -> "Fragment":
         t0 = time.time()
         name = name or os.path.splitext(os.path.basename(path))[0]
         m = load_mesh(path)
@@ -157,10 +262,13 @@ class Fragment:
         FN0, A0, C0 = face_geometry(V0, F0)
         scene0 = o3d.t.geometry.RaycastingScene()
         scene0.add_triangles(o3d.t.geometry.TriangleMesh(o3d.core.Tensor(V0.astype(np.float32)), o3d.core.Tensor(F0.astype(np.uint32))))
-        thick = estimate_thickness(scene0, C0, FN0, rng)
+        thick, thick_mode = estimate_thickness(scene0, C0, FN0, rng)
         if thick is None or thick <= 0:
             thick = float(np.min(m.get_oriented_bounding_box().extent) / 10.0)
             log.warning("%s: thickness estimate failed, using OBB fallback %.2f", name, thick)
+        thick_mode = thick if not thick_mode else thick_mode
+        if thick_mode > 1.15 * thick:
+            log.info("%s: wall %.2f, but the plain ray mode says %.2f -- a rim or a collar", name, thick, thick_mode)
         target = int(np.clip(FACES_PER_T2 * A0.sum() / thick ** 2, MIN_FACES, target_faces))
         del scene0, V0, F0, FN0, A0, C0
         if len(m.triangles) > target:
@@ -175,46 +283,37 @@ class Fragment:
         if not watertight:
             log.warning("%s: working mesh has %d boundary edges; penetration tests will be skipped for it", name, n_boundary)
         FN, A, C = face_geometry(V, F)
+        res = median_edge(V, F)
         scene = o3d.t.geometry.RaycastingScene()
         scene.add_triangles(o3d.t.geometry.TriangleMesh(o3d.core.Tensor(V.astype(np.float32)), o3d.core.Tensor(F.astype(np.uint32))))
-        log.info("%s: %d faces (from %d, budget %d), thickness %.2f, watertight=%s (%.1fs)", name, len(F), n_orig_f, target, thick, watertight, time.time() - t0)
+        log.info("%s: %d faces (from %d, budget %d), thickness %.2f, edge %.3f (%.1f per t), watertight=%s (%.1fs)",
+                 name, len(F), n_orig_f, target, thick, res, thick / max(res, 1e-9), watertight, time.time() - t0)
 
         # segmentation (smooth fields are evaluated on a t/8 grid and looked up per face)
-        ctree = cKDTree(C)
-        grid = coarse_grid(C, thick / 8.0)
-        rep, near = grid
-        W = ball_matrix(C, C[rep], thick / 3.0, tree=ctree)
-        NS_g, _ = smoothed_normals(W, FN, A)
-        NS = NS_g[near]
-        shell = classify_faces(scene, C, FN, NS, thick, len(F))
-        frac = ~shell
-        raw_frac = float(A[frac].sum() / A.sum())
-        Wm = ball_matrix(C, C[rep], thick / 4.0, tree=ctree)
-        frac = (np.asarray(Wm @ (A * frac)).ravel() > 0.5 * np.asarray(Wm @ A).ravel())[near]
-        fa, fb, _ = face_adjacency(F)
-        frac = drop_small_components(frac, True, 0.5 * thick ** 2, fa, fb, A)
-        frac = drop_small_components(frac, False, 2.0 * thick ** 2, fa, fb, A)
-        frac = refine_boundary(frac, fa, fb, C, FN, A, thick, grid)
-        frac = drop_small_components(frac, True, 0.5 * thick ** 2, fa, fb, A)
-        log.info("%s: fracture area fraction raw %.3f -> final %.3f (%.1fs)", name, raw_frac, A[frac].sum() / A.sum(), time.time() - t0)
-        fr = cls(name=name, path=os.path.abspath(path), V=V, F=F, frac=frac, thick=float(thick), watertight=watertight,
-                 n_orig_vertices=n_orig_v, n_orig_faces=n_orig_f, target_faces=int(target_faces))
+        frac, info = segment_faces(F, FN, A, C, scene, thick, res, seg)
+        log.info("%s: fracture area fraction raw %.3f -> final %.3f; %d/7 votes, boundary %.0f deg (%.1fs)",
+                 name, info["raw_fraction"], A[frac].sum() / A.sum(), info["votes"], info["boundary_angle"],
+                 time.time() - t0)
+        fr = cls(name=name, path=os.path.abspath(path), V=V, F=F, frac=frac, thick=float(thick), res=float(res),
+                 watertight=watertight, n_orig_vertices=n_orig_v, n_orig_faces=n_orig_f, target_faces=int(target_faces),
+                 thick_mode=float(thick_mode))
         fr.FN, fr.A, fr.C, fr.scene = FN, A, C, scene
         return fr
 
     # ---------- cache ----------
     def save(self, path: str):
         np.savez_compressed(path, name=self.name, path=self.path, V=self.V, F=self.F, frac=self.frac, thick=self.thick,
-                            watertight=self.watertight, n_orig_vertices=self.n_orig_vertices, n_orig_faces=self.n_orig_faces,
-                            target_faces=self.target_faces, cache_version=self.cache_version,
+                            res=self.res, watertight=self.watertight, n_orig_vertices=self.n_orig_vertices, n_orig_faces=self.n_orig_faces,
+                            target_faces=self.target_faces, thick_mode=self.thick_mode, cache_version=self.cache_version,
                             mtime=os.path.getmtime(self.path) if os.path.exists(self.path) else 0.0)
 
     @classmethod
     def load(cls, path: str) -> "Fragment":
         d = np.load(path, allow_pickle=False)
         fr = cls(name=str(d["name"]), path=str(d["path"]), V=d["V"], F=d["F"], frac=d["frac"], thick=float(d["thick"]),
-                 watertight=bool(d["watertight"]), n_orig_vertices=int(d["n_orig_vertices"]), n_orig_faces=int(d["n_orig_faces"]),
+                 res=float(d["res"]), watertight=bool(d["watertight"]), n_orig_vertices=int(d["n_orig_vertices"]), n_orig_faces=int(d["n_orig_faces"]),
                  target_faces=int(d["target_faces"]) if "target_faces" in d else 0,
+                 thick_mode=float(d["thick_mode"]) if "thick_mode" in d else 0.0,
                  cache_version=int(d["cache_version"]) if "cache_version" in d else 0)
         fr.cache_mtime = float(d["mtime"]) if "mtime" in d else 0.0
         fr.FN, fr.A, fr.C = face_geometry(fr.V, fr.F)
@@ -232,6 +331,31 @@ class Fragment:
         return self.scene.compute_signed_distance(o3d.core.Tensor(Q.astype(np.float32))).numpy()
 
     @property
+    def frac_scene(self):
+        """Raycasting scene over the fracture faces alone, built on first use.
+
+        `tight` and `gap` are distances to the other fragment's fracture *surface*.  Measuring them
+        against a point sample of that surface put a floor under them equal to the sample spacing;
+        measuring them against the triangles themselves removes the floor and leaves only the mesh
+        resolution, which the `res` terms of `Scales` already account for.  The scene covers the
+        fracture faces only: against the whole mesh a fragment laid flat on its neighbour's outer
+        shell would score perfect contact.
+        """
+        if getattr(self, "_frac_scene", None) is None:
+            idx = np.where(self.frac)[0]
+            Ff = self.F[idx] if len(idx) else self.F[:1]
+            sc = o3d.t.geometry.RaycastingScene()
+            sc.add_triangles(o3d.t.geometry.TriangleMesh(o3d.core.Tensor(self.V.astype(np.float32)),
+                                                         o3d.core.Tensor(Ff.astype(np.uint32))))
+            self._frac_scene = sc
+        return self._frac_scene
+
+    def fracture_distance(self, Q: np.ndarray) -> np.ndarray:
+        """Unsigned distance from each query point to this fragment's fracture surface."""
+        return self.frac_scene.compute_distance(
+            o3d.core.Tensor(np.ascontiguousarray(Q, dtype=np.float32))).numpy().astype(np.float64)
+
+    @property
     def fracture_area(self) -> float:
         return float(self.A[self.frac].sum())
 
@@ -242,24 +366,41 @@ class Fragment:
     def stats(self) -> dict:
         ext = self.V.max(0) - self.V.min(0)
         return dict(name=self.name, faces=int(len(self.F)), orig_faces=self.n_orig_faces, orig_vertices=self.n_orig_vertices,
-                    thickness=self.thick, watertight=self.watertight, extent=[float(x) for x in ext],
+                    thickness=self.thick, thickness_mode=self.thick_mode, resolution=self.res,
+                    watertight=self.watertight, extent=[float(x) for x in ext],
                     area=self.area, fracture_area_fraction=self.fracture_area / self.area)
 
 
 class MatchData:
     """Runtime structures for matching one fragment: breakline with frames, samples, KD-trees, point clouds."""
 
-    def __init__(self, fr: Fragment, t: float, seed: int = 0, n_samples: int = 30000,
-                 margin_points: int = 6000, pen_samples: int = 0):
+    def __init__(self, fr: Fragment, t: float, seed: int = 0, surface_points: int = 20000,
+                 frac_per_t2: float = 150.0, min_frac_points: int = 5000, max_frac_points: int = 12000,
+                 margin_points: int = 6000):
         self.fr = fr
         self.name = fr.name
         self.t = t
         rng = np.random.default_rng(seed)
         V, F, frac, FN, A, C = fr.V, fr.F, fr.frac, fr.FN, fr.A, fr.C
-        # surface samples
-        self.S, sp = sample_on_faces(V, F, A, np.ones(len(F), bool), n_samples, rng)
+        # Whole-surface samples: the penetration test and the shell margin live on these.
+        self.S, sp = sample_on_faces(V, F, A, np.ones(len(F), bool), surface_points, rng)
         self.SN = FN[sp]
         self.S_frac = frac[sp]
+        self.S_pen = self.S
+        # Fracture samples, drawn on the fracture faces alone at a density fixed in units of `t`,
+        # so that a big sherd and a small one are described equally finely.  Since `tight` and
+        # `gap` are measured against the other fragment's triangles rather than against its
+        # samples, the count no longer sets a floor under them: at a fixed pose the scores are flat
+        # in it (pot A at its ground-truth poses moves from tight 0.19 to 0.20 between 50 and 150
+        # per t^2).  What the count still buys is the ICP, which averages over that many
+        # correspondences -- at 50 per t^2 pot A ends at 5 of 8 fragments placed and at 150 it
+        # ends at 7 of 8, on identical thresholds.  Since the cost of the ICP is what grows, the
+        # upper bound is what keeps it affordable: uncapped, the largest sherds take 23k-49k
+        # points and matching runs 45 % to 226 % longer per pot; at 12k it is within 30 % of what
+        # the flat 30 000-sample scheme cost, with the same result.
+        n_frac = int(np.clip(frac_per_t2 * float(A[frac].sum()) / t ** 2, min_frac_points, max_frac_points))
+        self.Pf, fp = sample_on_faces(V, F, A, frac, n_frac, rng)
+        self.Nf = FN[fp]
         # breakline points: midpoints of edges between shell and fracture faces
         fa, fb, ke = face_adjacency(F)
         cross = frac[fa] != frac[fb]
@@ -291,20 +432,16 @@ class MatchData:
         # shell margin for ICP / continuity: shell points near the seam, excluding a thin band next to the
         # breakline where crease faces misclassified as shell would otherwise dominate the nearest-neighbour test
         self.margin = (~self.S_frac) & (d_brk > 0.12 * t) & (d_brk < 1.5 * t)
-        # Point sets used by ICP and verification, materialised once.  The margin holds about
-        # 13k of the 30k samples and dominates the cost of the pc_reg ICP, so it is thinned to
-        # `margin_points`: a uniform random subset of an area-weighted sample is still
+        # Point sets used by ICP and verification, materialised once.  The margin is the larger
+        # half of the whole-surface sample and dominates the cost of the pc_reg ICP, so it is
+        # thinned to `margin_points`: a uniform random subset of an area-weighted sample is still
         # area-weighted, and the true joins' scores move by less than the sampling noise of the
-        # metric itself.  The penetration test keeps every sample by default (`pen_samples = 0`):
-        # with 10k samples its value shifts by up to 0.001, a fifth of the 0.005 threshold, which
-        # is enough to move a candidate across it.  Subsets come from the seeded rng, so two runs
-        # see the same points.
-        self.Pf, self.Nf = self.S[self.S_frac], self.SN[self.S_frac]
+        # metric itself.  Subsets come from the seeded rng, so two runs see the same points.
         self.margin_idx = _subsample(np.where(self.margin)[0], margin_points, rng)
         self.Pm, self.Nm = self.S[self.margin_idx], self.SN[self.margin_idx]
-        self.S_pen = self.S[_subsample(np.arange(len(self.S)), pen_samples, rng)] if pen_samples else self.S
         self.pc_reg = _pc(np.concatenate([self.Pf, self.Pm]), np.concatenate([self.Nf, self.Nm]))
         self.pc_frac = _pc(self.Pf, self.Nf)
+        self.has_frac = len(self.Pf) > 0
         self.pc_brk = _pc(P[self.brk_sub], ns[self.brk_sub])
         self.pc_brk_full = _pc(P, ns)
         self.tree_frac = cKDTree(self.Pf) if len(self.Pf) else None
@@ -313,6 +450,9 @@ class MatchData:
 
     def signed_distance(self, Q):
         return self.fr.signed_distance(Q)
+
+    def fracture_distance(self, Q):
+        return self.fr.fracture_distance(Q)
 
 
 def _subsample(idx: np.ndarray, n: int, rng) -> np.ndarray:

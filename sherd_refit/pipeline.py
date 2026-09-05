@@ -82,15 +82,21 @@ def _preprocess_one(args):
     return cache_path
 
 
-def _match_data(fr: Fragment, t: float, p: Params, n_samples: int = 30000) -> MatchData:
-    return MatchData(fr, t, seed=p.seed, n_samples=n_samples, margin_points=p.margin_points, pen_samples=p.pen_samples)
+def _match_data(fr: Fragment, t: float, p: Params, surface_points: int | None = None) -> MatchData:
+    return MatchData(fr, t, seed=p.seed, surface_points=p.surface_points if surface_points is None else surface_points,
+                     frac_per_t2=p.frac_per_t2, min_frac_points=p.min_frac_points,
+                     max_frac_points=p.max_frac_points, margin_points=p.margin_points)
 
 
 def _match_one(args):
-    ca, cb, t, params_dict, keep, n_threads = args
+    """Match one pair.  Both `MatchData` are built at the pair's own wall thickness, `min(t_A,
+    t_B)`: the thicker of the two is often a rim, and the wall is the thinner one."""
+    ca, cb, params_dict, keep, n_threads = args
     p = Params(**params_dict)
-    A = _match_data(Fragment.load(ca), t, p); B = _match_data(Fragment.load(cb), t, p)
-    return [c.to_json() for c in match_pair(A, B, t, p, keep=keep, n_threads=n_threads)]
+    fa, fb = Fragment.load(ca), Fragment.load(cb)
+    t_pair = min(fa.thick, fb.thick)
+    A = _match_data(fa, t_pair, p); B = _match_data(fb, t_pair, p)
+    return [c.to_json() for c in match_pair(A, B, p, keep=keep, n_threads=n_threads)]
 
 
 # ---------------------------------------------------------------- pipeline
@@ -123,24 +129,26 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
         if abs(fr.thick / thick - 1) > 0.4:
             log.warning("%s: thickness %.2f differs from collection median %.2f by more than 40%%", fr.name, fr.thick, thick)
     timings["preprocess"] = time.time() - t0
-    log.info("preprocessing done in %.1fs; collection thickness %.2f", timings["preprocess"], thick)
+    res = float(np.median([fr.res for fr in frags.values()]))
+    log.info("preprocessing done in %.1fs; collection thickness %.2f, working-mesh edge %.3f (%.1f edges per t)",
+             timings["preprocess"], thick, res, thick / max(res, 1e-9))
 
     # 2. pairwise matching
     t0 = time.time()
     pairs, skipped = [], []
     for a, b in itertools.combinations(names, 2):
         ratio = frags[a].thick / frags[b].thick
-        if ratio > 1.5 or ratio < 1 / 1.5:
+        if ratio > p.thick_ratio or ratio < 1 / p.thick_ratio:
             skipped.append((a, b))            # walls too different to be one object
         else:
             pairs.append((a, b))
     if skipped:
-        log.info("%d pairs skipped because wall thickness differs by more than 50%%", len(skipped))
+        log.info("%d pairs skipped because wall thickness differs by more than %.1fx", len(skipped), p.thick_ratio)
     cands: list[Candidate] = []
     if workers > 1 and pairs:
         procs, per = _match_workers(workers, len(pairs), threads)
         log.info("matching %d pairs in %d processes x %d threads", len(pairs), procs, per)
-        jobs = [(cache_of[a], cache_of[b], thick, asdict(p), keep_per_pair, per) for a, b in pairs]
+        jobs = [(cache_of[a], cache_of[b], asdict(p), keep_per_pair, per) for a, b in pairs]
         env = {k: os.environ.get(k) for k in ("SHERD_REFIT_THREADS", "OMP_NUM_THREADS")}
         # the workers thread over candidates themselves, so their ICP gets one OpenMP thread each
         os.environ["SHERD_REFIT_THREADS"] = str(per)
@@ -159,14 +167,14 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
         # in-process: this process's OpenMP was configured at start-up and cannot be changed any
         # more, so leave the parallelism inside Open3D's ICP where it already is
         for a, b in pairs:
-            cands += [Candidate.from_json(d) for d in _match_one((cache_of[a], cache_of[b], thick, asdict(p), keep_per_pair, 1))]
+            cands += [Candidate.from_json(d) for d in _match_one((cache_of[a], cache_of[b], asdict(p), keep_per_pair, 1))]
     timings["matching"] = time.time() - t0
     log.info("matching done in %.1fs: %d candidates, %d accepted", timings["matching"], len(cands), sum(c.accepted for c in cands))
 
     # 3. assembly
     t0 = time.time()
-    md = {n: _match_data(frags[n], thick, p, n_samples=15000) for n in names}
-    poses, groups, used, rejected = assemble(md, cands, thick, p)
+    md = {n: _match_data(frags[n], thick, p, surface_points=15000) for n in names}
+    poses, groups, used, rejected = assemble(md, cands, p)
     timings["assembly"] = time.time() - t0
 
     # 4. full-resolution refinement + outputs
@@ -174,7 +182,7 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
     if refine and any(len(g) > 1 for g in groups):
         from .refine import refine_joins
         t0 = time.time()
-        poses = refine_joins(frags, meshes, poses, groups, used, thick)
+        poses = refine_joins(frags, meshes, poses, groups, used, p)
         timings["refine"] = time.time() - t0
     poses = recenter(poses, md, groups)
     t0 = time.time()
@@ -231,6 +239,7 @@ def segment_only(input_dir: str, out_dir: str, target_faces: int = 200000, worke
     for c in caches:
         fr = Fragment.load(c); frags[fr.name] = fr
     for fr in frags.values():
-        log.info("%s: thickness %.2f, fracture area %.1f%%", fr.name, fr.thick, 100 * fr.fracture_area / fr.area)
+        log.info("%s: thickness %.2f, edge %.3f (%.1f per t), fracture area %.1f%%",
+                 fr.name, fr.thick, fr.res, fr.thick / max(fr.res, 1e-9), 100 * fr.fracture_area / fr.area)
     write_previews(out_dir, frags, {n: np.eye(4) for n in frags}, [[n] for n in frags])
     return frags

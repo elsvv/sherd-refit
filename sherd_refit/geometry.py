@@ -50,6 +50,19 @@ def face_geometry(V: np.ndarray, F: np.ndarray):
     return FN, 0.5 * a2, V[F].mean(1)
 
 
+def median_edge(V: np.ndarray, F: np.ndarray) -> float:
+    """Median length of the mesh's unique edges: the pipeline's resolution unit `res`.
+
+    Every distance threshold is floored at a multiple of it, so that the pipeline never asks for a
+    precision the triangles cannot carry.  Unique edges, so the value does not depend on how many
+    faces happen to share one.
+    """
+    E = np.unique(np.sort(np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]]), 1), axis=0)
+    if len(E) == 0:
+        return 0.0
+    return float(np.median(np.linalg.norm(V[E[:, 0]] - V[E[:, 1]], axis=1)))
+
+
 def face_adjacency(F: np.ndarray):
     """Pairs (fa, fb) of faces sharing an edge, plus the shared edge (v0, v1) per pair."""
     E = np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])

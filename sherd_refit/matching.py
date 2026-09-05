@@ -18,23 +18,122 @@ log = logging.getLogger("sherd_refit")
 
 @dataclass
 class Params:
+    """Thresholds of the matcher.
+
+    Every distance threshold comes as a pair `(k, m)`: the distance used is `max(k * t, m * res)`,
+    with `t` the pair's wall thickness and `res` the pair's working-mesh resolution (see `Scales`).
+    `k * t` is the scale-free part -- a wall thickness means the same thing on a 39-unit terracotta
+    relief and on a 3.5 mm pot wall.  `m * res` is the resolution floor: it counts triangle edges,
+    and it stops the pipeline from demanding a precision the mesh cannot carry.  On a mesh with
+    more than `k / m` edges across the wall the first term wins and nothing changes.
+    """
     dihedral_tol: float = 40.0      # degrees, |dih_A + dih_B - 180| tolerance for a hypothesis
     coarse_delta: float = 0.15      # t, breakline proximity for the coarse score
     coarse_points: int = 60         # B breakline points used by the coarse score
     stage1: int = 400               # hypotheses refined with breakline ICP
     stage2: int = 40                # candidates refined with full ICP
-    tight_delta: float = 0.04       # t, distance for the tight-contact fraction
+    stage1_delta: float = 0.06      # t, breakline proximity when stage-1 poses are re-scored
+    tight_delta: float = 0.01       # t, distance for the tight-contact fraction
     facing_delta: float = 0.3       # t, fracture points considered "facing" the other fragment
+    seam_delta: float = 0.12        # t, breakline proximity counted as a shared seam
+    near_delta: float = 0.5         # t, shell-margin radius for the continuity test
     pen_delta: float = 0.06         # t, penetration depth counted
+    nms_delta: float = 0.5          # t, translation radius of the non-maximum suppression
+    icp_delta: float = 0.04         # t, finest rung of the ICP ladder (the whole ladder scales with it)
+    # `tight_delta` and `max_gap` are an order of magnitude below the rest because they are the
+    # only two distances measured point-to-*surface*; the others are point-to-point between
+    # samples, or breakline to breakline, and still carry a sample spacing inside them.
+    # Resolution floors, counted in working-mesh edges; `Scales` below turns them into distances.
+    # Each one is set just below `k / 0.058`, because 0.058 t is the coarsest working mesh the
+    # thick terracotta reference set produces: on that set every floor stays inactive and the
+    # pipeline behaves exactly as it did before they existed.  Raising them further does change
+    # it, and for the worse -- at `tight_res = 1.5` the tight-contact distance on the terracotta
+    # grows from 0.040 t to 0.087 t, the false pair 007-094 scores tight 0.56 instead of 0.14 and
+    # is accepted.  `facing_res` is the exception: it selects *which* points are compared rather
+    # than how precisely, and widening it drags far-away points into the median, so it is left at
+    # a value that never binds (on pot G a floor of 1.5 edges lifts the median gap of the true
+    # joins from 0.173 t to 0.220 t).  See docs/superpowers/notes/2026-09-05-thin-walls.md.
+    coarse_res: float = 2.3          # every floor below crosses over at ~15 edges per t
+    stage1_res: float = 0.9
+    tight_res: float = 0.15
+    facing_res: float = 1.0
+    gap_res: float = 0.45
+    seam_res: float = 1.8
+    near_res: float = 4.0
+    pen_res: float = 0.9
+    icp_res: float = 0.6
     min_tight: float = 0.25
-    max_gap: float = 0.065
+    max_gap: float = 0.03
     max_pen: float = 0.005
     min_seam: float = 3.0
     min_cont_n: float = 0.8
     early_reject_tight: float = 0.0     # >0: skip the fracture-only ICPs and the costly verification below this
+    thick_ratio: float = 2.5            # a pair whose walls differ by more than this is not matched at all
     margin_points: int = 6000           # shell-margin points kept for the pc_reg ICP and the continuity test
-    pen_samples: int = 0                # >0: surface samples used by the penetration test (0 = all of them)
+    surface_points: int = 20000         # whole-surface samples per fragment (penetration test and shell margin)
+    frac_per_t2: float = 150.0          # fracture samples per t^2 of fracture area
+    min_frac_points: int = 5000
+    max_frac_points: int = 12000
     seed: int = 0
+
+
+@dataclass(frozen=True)
+class Scales:
+    """Every distance the matcher uses, resolved once for one pair of fragments.
+
+    Built from the pair's wall thickness and mesh resolution, and passed down instead of a bare
+    `t`, so that the two-term rule of `Params` lives in exactly one place.
+
+    `t` is `min(t_A, t_B)`: a fragment carrying the pot's rim measures a thicker wall than the
+    body it broke off, and the wall is the thinner of the two.  `res` is `max(res_A, res_B)`: the
+    coarser of the two meshes is what limits how precisely the pair can be told to fit.
+    """
+    t: float
+    res: float
+    coarse: float
+    stage1: float
+    tight: float
+    facing: float
+    gap: float
+    seam: float
+    near: float
+    pen: float
+    nms: float
+    icp: float          # factor by which the whole ICP ladder is stretched (>= 1)
+
+    @classmethod
+    def for_pair(cls, p: Params, t: float, res: float) -> "Scales":
+        def f(k, m):
+            return max(k * t, m * res)
+        return cls(t=float(t), res=float(res),
+                   coarse=f(p.coarse_delta, p.coarse_res), stage1=f(p.stage1_delta, p.stage1_res),
+                   tight=f(p.tight_delta, p.tight_res), facing=f(p.facing_delta, p.facing_res),
+                   gap=f(p.max_gap, p.gap_res), seam=f(p.seam_delta, p.seam_res),
+                   near=f(p.near_delta, p.near_res), pen=f(p.pen_delta, p.pen_res),
+                   nms=p.nms_delta * t,
+                   icp=f(p.icp_delta, p.icp_res) / (p.icp_delta * t))
+
+    @classmethod
+    def for_fragments(cls, p: Params, a, b) -> "Scales":
+        """Scales for the pair (a, b), given as `MatchData` or `Fragment`.
+
+        The pair supplies both numbers itself; no collection-wide thickness is involved, because a
+        collection can hold walls of 2.4 mm and 13.5 mm at once and its median describes neither.
+        """
+        fa, fb = getattr(a, "fr", a), getattr(b, "fr", b)
+        return cls.for_pair(p, min(fa.thick, fb.thick), max(fa.res, fb.res))
+
+    def icp_dist(self, k: float) -> float:
+        """One rung of the ICP ladder, `k * t`, stretched by the resolution floor.
+
+        The ladder is stretched as a whole rather than floored rung by rung, so that its steps
+        keep their ratios and a coarse mesh cannot make the fine rung overtake the coarse one.
+        """
+        return k * self.t * self.icp
+
+    def limits(self) -> dict:
+        """The two acceptance limits that depend on the pair, in units of `t`, for the report."""
+        return dict(gap_limit=self.gap / self.t, tight_delta=self.tight / self.t)
 
 
 @dataclass
@@ -75,10 +174,10 @@ def hypotheses(A: MatchData, B: MatchData, p: Params):
     return R, tr
 
 
-def coarse_score(A: MatchData, B: MatchData, R, tr, t, p: Params, rng):
+def coarse_score(A: MatchData, B: MatchData, R, tr, sc: Scales, p: Params, rng):
     idx = rng.choice(B.brk_sub, min(p.coarse_points, len(B.brk_sub)), replace=False)
     Q, QN = B.brk_P[idx], B.brk_ns[idx]
-    delta = p.coarse_delta * t
+    delta = sc.coarse
     scores = np.zeros(len(R))
     chunk = 4000
     for s in range(0, len(R), chunk):
@@ -93,9 +192,9 @@ def coarse_score(A: MatchData, B: MatchData, R, tr, t, p: Params, rng):
     return scores
 
 
-def nms(order, R, tr, sc, t, topk, floor, rot_tol=2.9):
+def nms(order, R, tr, sc, trans_tol, topk, floor, rot_tol=2.9):
     """Greedy non-maximum suppression over poses: walk `order`, keeping a pose unless an already
-    kept one is within 0.5 t of it and points nearly the same way.
+    kept one is within `trans_tol` of it and points nearly the same way.
 
     The translation test is evaluated against all kept poses at once, which is what makes this
     loop cheap; the rotation test then runs only for the few poses that are close in translation,
@@ -108,7 +207,7 @@ def nms(order, R, tr, sc, t, topk, floor, rot_tol=2.9):
             break
         n = len(kept)
         dup = n > 0 and any(np.trace(R[k].T @ R[kept[i]]) > rot_tol
-                            for i in np.flatnonzero(np.linalg.norm(tr[k] - kept_tr[:n], axis=1) < 0.5 * t))
+                            for i in np.flatnonzero(np.linalg.norm(tr[k] - kept_tr[:n], axis=1) < trans_tol))
         if not dup:
             kept_tr[n] = tr[k]
             kept.append(k)
@@ -136,42 +235,54 @@ def brk_score(A: MatchData, B: MatchData, T, delta):
 
 # ---------------------------------------------------------------- verification
 
-def fracture_scores(A: MatchData, B: MatchData, T: np.ndarray, t: float, p: Params) -> dict:
-    """Tight-contact fraction, median gap and contact area from the facing fracture points."""
+def fracture_scores(A: MatchData, B: MatchData, T: np.ndarray, sc: Scales, p: Params) -> dict:
+    """Tight-contact fraction, median gap and contact area from the facing fracture points.
+
+    The distances are point-to-*surface*: each fragment's fracture samples are measured against the
+    other's fracture triangles, not against the other's sample cloud.  Two independent samples of
+    the same surface never land on each other, so the point-to-point form had a floor equal to the
+    sample spacing -- about `0.5 / sqrt(density)`, which grew with the fragment's area-to-wall
+    ratio and reached 0.075 t on a large pot A sherd against 0.043 t on the terracotta.  That floor
+    alone was enough to keep every true join of the thin pots away from the gap threshold, and the
+    synthetic benchmark shows the same thing on fragments that fit to 0.001 mm.  Against the
+    triangles the only floor left is the mesh resolution, which `Scales` already carries.
+    """
     s = {}
-    PBf = apply_transform(T, B.Pf); PAf = A.Pf
-    d1, _ = A.tree_frac.query(PBf, workers=threads())
-    d2, _ = cKDTree(PBf).query(PAf, workers=threads())
+    t = sc.t
+    d1 = A.fracture_distance(apply_transform(T, B.Pf))
+    d2 = B.fracture_distance(apply_transform(np.linalg.inv(T), A.Pf))
     for tag, d, area in (("A", d2, A.frac_area), ("B", d1, B.frac_area)):
-        face = d < p.facing_delta * t
+        face = d < sc.facing
         if face.sum() < 20:
             s["tight" + tag], s["gap" + tag], s["contact" + tag] = 0.0, 1.0, 0.0
         else:
-            s["tight" + tag] = float((d[face] < p.tight_delta * t).mean())
+            s["tight" + tag] = float((d[face] < sc.tight).mean())
             s["gap" + tag] = float(np.median(d[face]) / t)
-            s["contact" + tag] = float((d < 2 * p.tight_delta * t).mean() * area / t ** 2)
+            s["contact" + tag] = float((d < 2 * sc.tight).mean() * area / t ** 2)
     s["tight"] = min(s["tightA"], s["tightB"]); s["gap"] = max(s["gapA"], s["gapB"])
     s["contact"] = min(s["contactA"], s["contactB"])
     return s
 
 
-def _seam_score(A: MatchData, B: MatchData, T: np.ndarray, t: float) -> dict:
+def _seam_score(A: MatchData, B: MatchData, T: np.ndarray, sc: Scales) -> dict:
     """Length of A's breakline (in t) covered by B's breakline with agreeing shell normals."""
+    t = sc.t
     PBb = apply_transform(T, B.brk_P); NBb = B.brk_ns @ T[:3, :3].T
     dA, jA = cKDTree(PBb).query(A.brk_P, workers=threads())
-    seamA = (dA < 0.12 * t) & (np.einsum("ij,ij->i", A.brk_ns, NBb[jA]) > 0.7)
+    seamA = (dA < sc.seam) & (np.einsum("ij,ij->i", A.brk_ns, NBb[jA]) > 0.7)
     if not seamA.any():
         return dict(seam=0.0)
     vox = np.unique(np.floor(A.brk_P[seamA] / (t / 3.0)).astype(int), axis=0)
     return dict(seam=float(len(vox) / 3.0))
 
 
-def _continuity_scores(A: MatchData, B: MatchData, T: np.ndarray, t: float) -> dict:
+def _continuity_scores(A: MatchData, B: MatchData, T: np.ndarray, sc: Scales) -> dict:
     """Step height and normal agreement of the outer shell across the seam."""
+    t = sc.t
     if A.tree_margin is not None and len(B.Pm):
         PBm = apply_transform(T, B.Pm); NBm = B.Nm @ T[:3, :3].T
         dm, jm = A.tree_margin.query(PBm, workers=threads())
-        near = dm < 0.5 * t
+        near = dm < sc.near
         if near.sum() > 20:
             Am = A.Pm[jm[near]]; An = A.Nm[jm[near]]
             return dict(cont=float(np.median(np.abs(np.einsum("ij,ij->i", PBm[near] - Am, An))) / t),
@@ -179,17 +290,17 @@ def _continuity_scores(A: MatchData, B: MatchData, T: np.ndarray, t: float) -> d
     return dict(cont=1.0, cont_n=-1.0)
 
 
-def _penetration_scores(A: MatchData, B: MatchData, T: np.ndarray, t: float, p: Params) -> dict:
+def _penetration_scores(A: MatchData, B: MatchData, T: np.ndarray, sc: Scales, p: Params) -> dict:
     """Fraction of surface samples of either fragment inside the other, and the deepest excursion."""
     if not (A.fr.watertight and B.fr.watertight):
         return dict(pen=0.0, pen_depth=0.0, pen_unavailable=1.0)
     sdA = A.signed_distance(apply_transform(T, B.S_pen))
     sdB = B.signed_distance(apply_transform(np.linalg.inv(T), A.S_pen))
-    return dict(pen=float(max((sdA < -p.pen_delta * t).mean(), (sdB < -p.pen_delta * t).mean())),
-                pen_depth=float(max(-sdA.min(), -sdB.min()) / t))
+    return dict(pen=float(max((sdA < -sc.pen).mean(), (sdB < -sc.pen).mean())),
+                pen_depth=float(max(-sdA.min(), -sdB.min()) / sc.t))
 
 
-def verify(A: MatchData, B: MatchData, T: np.ndarray, t: float, p: Params, full: bool = True,
+def verify(A: MatchData, B: MatchData, T: np.ndarray, sc: Scales, p: Params, full: bool = True,
            frac: dict | None = None) -> dict:
     """All verification scores for the transform T (b -> a).
 
@@ -198,17 +309,19 @@ def verify(A: MatchData, B: MatchData, T: np.ndarray, t: float, p: Params, full:
     which also makes the candidate fail `accept`.  `frac` passes in fracture scores already
     computed for this very transform.
     """
-    s = dict(frac) if frac is not None else fracture_scores(A, B, T, t, p)
-    s.update(_seam_score(A, B, T, t))
+    s = dict(frac) if frac is not None else fracture_scores(A, B, T, sc, p)
+    s.update(_seam_score(A, B, T, sc))
+    s.update(sc.limits())
     if not full:
         return dict(s, cont=1.0, cont_n=-1.0, pen=0.0, pen_depth=0.0, partial=1.0)
-    s.update(_continuity_scores(A, B, T, t))
-    s.update(_penetration_scores(A, B, T, t, p))
+    s.update(_continuity_scores(A, B, T, sc))
+    s.update(_penetration_scores(A, B, T, sc, p))
     return s
 
 
-def accept(s: dict, p: Params) -> bool:
-    return (s["tight"] >= p.min_tight and s["gap"] <= p.max_gap and s["pen"] <= p.max_pen
+def accept(s: dict, p: Params, sc: Scales) -> bool:
+    """`gap` is reported in units of t, so it is compared against the pair's own gap limit."""
+    return (s["tight"] >= p.min_tight and s["gap"] * sc.t <= sc.gap and s["pen"] <= p.max_pen
             and s["seam"] >= p.min_seam and s["cont_n"] >= p.min_cont_n)
 
 
@@ -234,7 +347,7 @@ def _map(fn, jobs: list, n_threads: int) -> list:
         return list(ex.map(wrapped, jobs))
 
 
-def _stage2(A: MatchData, B: MatchData, T0: np.ndarray, t: float, p: Params, brk: float) -> Candidate:
+def _stage2(A: MatchData, B: MatchData, T0: np.ndarray, sc: Scales, p: Params, brk: float) -> Candidate:
     """Refine one stage-1 pose with the full ICP chain and verify it.
 
     With `Params.early_reject_tight > 0` a cheap tight-contact estimate is taken after the two
@@ -245,24 +358,24 @@ def _stage2(A: MatchData, B: MatchData, T0: np.ndarray, t: float, p: Params, brk
     remaining ICPs, so a threshold safe against the 0.25 acceptance limit saves almost nothing.
     See docs/superpowers/notes/2026-09-05-performance.md.
     """
-    T = _icp(B.pc_reg, A.pc_reg, T0, 0.2 * t, 30)
-    T = _icp(B.pc_reg, A.pc_reg, T, 0.08 * t, 30)
+    T = _icp(B.pc_reg, A.pc_reg, T0, sc.icp_dist(0.2), 30)
+    T = _icp(B.pc_reg, A.pc_reg, T, sc.icp_dist(0.08), 30)
     if p.early_reject_tight > 0.0:
-        frac = fracture_scores(A, B, T, t, p)
+        frac = fracture_scores(A, B, T, sc, p)
         if frac["tight"] < p.early_reject_tight:
-            s = verify(A, B, T, t, p, full=False, frac=frac)
+            s = verify(A, B, T, sc, p, full=False, frac=frac)
             s["brk"] = brk
             return Candidate(A.name, B.name, T, s)          # accepted stays False
-    T = _icp(B.pc_frac, A.pc_frac, T, 0.08 * t, 30)
-    T = _icp(B.pc_frac, A.pc_frac, T, 0.04 * t, 30)
-    s = verify(A, B, T, t, p)
+    T = _icp(B.pc_frac, A.pc_frac, T, sc.icp_dist(0.08), 30)
+    T = _icp(B.pc_frac, A.pc_frac, T, sc.icp_dist(0.04), 30)
+    s = verify(A, B, T, sc, p)
     s["brk"] = brk
     c = Candidate(A.name, B.name, T, s)
-    c.accepted = accept(s, p)
+    c.accepted = accept(s, p, sc)
     return c
 
 
-def match_pair(A: MatchData, B: MatchData, t: float, p: Params, keep: int = 5, n_threads: int | None = None) -> list[Candidate]:
+def match_pair(A: MatchData, B: MatchData, p: Params, keep: int = 5, n_threads: int | None = None) -> list[Candidate]:
     """Return the best `keep` candidates (b -> a) for the pair, best first.
 
     `n_threads` threads are used inside the pair (default: this process's SHERD_REFIT_THREADS
@@ -271,20 +384,21 @@ def match_pair(A: MatchData, B: MatchData, t: float, p: Params, keep: int = 5, n
     t0 = time.time()
     n_threads = worker_threads() if n_threads is None else max(1, n_threads)
     rng = np.random.default_rng(p.seed)
-    if A.tree_frac is None or B.tree_frac is None or A.brk_tree is None or B.brk_tree is None:
+    if not (A.has_frac and B.has_frac) or A.brk_tree is None or B.brk_tree is None:
         return []
+    sc = Scales.for_fragments(p, A, B)
     R, tr = hypotheses(A, B, p)
     if len(R) == 0:
         log.info("%s-%s: no hypotheses", A.name, B.name)
         return []
-    sc = coarse_score(A, B, R, tr, t, p, rng)
-    kept = nms(np.argsort(sc)[::-1][:5000], R, tr, sc, t, p.stage1, 0.1)
+    cs = coarse_score(A, B, R, tr, sc, p, rng)
+    kept = nms(np.argsort(cs)[::-1][:5000], R, tr, cs, sc.nms, p.stage1, 0.1)
 
     def stage1(k):
         T = np.eye(4); T[:3, :3] = R[k]; T[:3, 3] = tr[k]
-        T = _icp(B.pc_brk, A.pc_brk_full, T, 0.2 * t, 20, plane=False)
-        T = _icp(B.pc_brk, A.pc_brk_full, T, 0.08 * t, 20, plane=False)
-        return T, brk_score(A, B, T, 0.06 * t)
+        T = _icp(B.pc_brk, A.pc_brk_full, T, sc.icp_dist(0.2), 20, plane=False)
+        T = _icp(B.pc_brk, A.pc_brk_full, T, sc.icp_dist(0.08), 20, plane=False)
+        return T, brk_score(A, B, T, sc.stage1)
 
     out = _map(stage1, kept, n_threads)
     Ts = [o[0] for o in out]; s1 = [o[1] for o in out]
@@ -293,11 +407,13 @@ def match_pair(A: MatchData, B: MatchData, t: float, p: Params, keep: int = 5, n
         return []
     s1 = np.array(s1)
     Rs = np.array([T[:3, :3] for T in Ts]); trs = np.array([T[:3, 3] for T in Ts])
-    kept2 = nms(np.argsort(s1)[::-1], Rs, trs, s1, t, p.stage2, 0.05)
-    cands = _map(lambda k: _stage2(A, B, Ts[k], t, p, float(s1[k])), kept2, n_threads)
+    kept2 = nms(np.argsort(s1)[::-1], Rs, trs, s1, sc.nms, p.stage2, 0.05)
+    cands = _map(lambda k: _stage2(A, B, Ts[k], sc, p, float(s1[k])), kept2, n_threads)
     cands.sort(key=lambda c: -c.score)
     best = cands[0].scores if cands else {}
-    log.info("%s-%s: %d hyp, %d/%d refined (%d threads), best seam %.1f tight %.2f gap %.3f pen %.3f accepted=%s (%.1fs)",
-             A.name, B.name, len(R), len(kept), len(kept2), n_threads, best.get("seam", 0), best.get("tight", 0), best.get("gap", 0),
+    log.info("%s-%s: t %.2f res %.2f (%.1f edges per t); %d hyp, %d/%d refined (%d threads), "
+             "best seam %.1f tight %.2f (<%.3f t) gap %.3f (<%.3f t) pen %.3f accepted=%s (%.1fs)",
+             A.name, B.name, sc.t, sc.res, sc.t / max(sc.res, 1e-9), len(R), len(kept), len(kept2), n_threads,
+             best.get("seam", 0), best.get("tight", 0), sc.tight / sc.t, best.get("gap", 0), sc.gap / sc.t,
              best.get("pen", 0), cands[0].accepted if cands else False, time.time() - t0)
     return cands[:keep]

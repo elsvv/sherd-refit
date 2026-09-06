@@ -70,8 +70,9 @@ impl PointTree {
     /// find the true nearest however far away it is, and most of the millions of probe points a
     /// pair's hypotheses throw at a breakline are far away; with the radius the traversal prunes
     /// at the first node whose box is further than `radius` and a miss costs a handful of
-    /// comparisons. Measured on the coarse stage over synthetic_20's 190 pairs: 1.05 µs per query
-    /// unbounded against 0.10 µs bounded, the whole stage 1800 core-seconds against 178.
+    /// comparisons. Measured on the coarse stage over synthetic_20's 190 pairs and their 1.67 G
+    /// probe queries: **1.08 µs per query unbounded against 0.11 µs bounded**, the whole stage
+    /// 1 800 core-seconds against 178, with bit-identical scores.
     ///
     /// The radius test here is inclusive (`d ≤ r`), like [`PointTree::within`]; scipy's is
     /// exclusive, and R §5.2's caller applies that itself so that the rule is stated where it is

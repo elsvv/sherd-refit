@@ -70,8 +70,9 @@ is the row that found it.
 **The bounded query is not an optimisation, it is the algorithm.** R §5.2's radius is scipy's
 `distance_upper_bound`, and the port's first version asked `kiddo` for the unbounded nearest
 neighbour and then compared the distance itself. Most probe points of most poses land nowhere near
-A's breakline, and an unbounded search has to find the true nearest however far away it is: 1.05 µs
-per query against scipy's 0.22 µs, which made the port **slower than the reference** on this stage.
+A's breakline, and an unbounded search has to find the true nearest however far away it is:
+**1.08 µs per query against scipy's 0.22 µs**, which made the port *slower than the reference* on
+this stage.
 `PointTree::nearest_within` passes the radius into the traversal (`nearest_n(1).within(r²)`), and
 the coarse stage over synthetic_20's 190 pairs went from **1 800 core-seconds to 178** with
 bit-identical scores. scipy's bound is *exclusive* — a neighbour exactly at `delta` comes back as
@@ -97,7 +98,8 @@ All eight fixture sets were regenerated for it (`tools/dump_fixtures.py`, ≈ 20
 
 ## 4. Parity: injected — 6 086 of 6 086 on 358 pairs
 
-`sherd-refit-rs parity --fixtures output/fixtures/<set> --stage {hypotheses,coarse,nms} --injected`.
+`sherd-refit-rs parity --fixtures output/fixtures/<set> --stage hypotheses --stage coarse
+--stage nms --injected`.
 Each stage runs on the reference's own arrays at the pair's own `t`: `hyp.ia`/`hyp.ib` (in Open3D's
 hash order — PMC-4's first real exercise), `md.brk_*` from the fragment directory or from the
 `md_t/` rebuild the pair actually used, `scales.json`, `coarse.idx`, `nms1.order`.
@@ -199,10 +201,10 @@ is not a tolerance question.
 The counts agree far better than the row allows because, since T1, `t` is bit-identical on 41 of
 the 68 fixture fragments and within `7.1e-6` on the rest, so `brk_sub` is nearly the same subset
 and the dihedral filter is nearly the same filter. **The two sets whose counts move at all are
-exactly the two whose working meshes do** (PMC-2, the decimator): the worst native `res` is
-`7.0e-2` – `9.4e-2` on terracotta and up to `9.3e-2` on synthetic_20, against `1.8e-5` on pot_A and
-`1.2e-7` or less on pot_B, C, G and H — where the port's decimation lands on the reference's mesh
-and the hypothesis count follows it to four decimal places.
+exactly the two whose working meshes do** (PMC-2, the decimator): the worst *relative* deviation
+of `res` is 7.0–9.4 % on terracotta and up to 9.3 % on synthetic_20, against `1.8e-5` on pot_A and
+`1.2e-7` or less on pot_B, C, G and H — where the port's decimation lands on the reference's own
+mesh and the hypothesis count follows it to within 0.3 %.
 
 ## 7. Cost
 

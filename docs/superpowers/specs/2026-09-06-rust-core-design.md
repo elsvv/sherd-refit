@@ -750,8 +750,8 @@ therefore takes the worst case over the faces with `h ≥ 1000 ulp` — which bo
 rad = 0.057°, under the 0.1° gate *by construction* — and gates the share of samples left out at
 0.1 % (measured maximum 0.033 %).
 
-**The three pair rows of step C1 are met exactly, on 358 pairs of eight fixture sets** (`notes/
-2026-09-07-c1-hypotheses.md`). Injected: **6 086 comparisons, none failed** — the `(pa, pb)` set
+**The three pair rows of step C1 are met exactly, on 358 pairs of eight fixture sets**
+(`notes/2026-09-07-c1-hypotheses.md`). Injected: **6 086 comparisons, none failed** — the `(pa, pb)` set
 *and* its order are the reference's on every pair, the twelve fields of R §1.2 are bit-identical on
 every pair, the coarse score is bit-identical on **every one of the 38.1 million hypotheses of
 the eight sets**, and the NMS keeps the reference's 250 hypotheses in the reference's order. Native:
@@ -783,7 +783,7 @@ regression alarm on the size of the tie effect, not a parity claim.
 comparison): a terracotta pair of 35 374 hypotheses takes the reference 0.484 s and the port
 0.17 s; a synthetic_20 pair of 163 098 hypotheses takes 2.318 s and 0.80 s. With the default thread
 pool the port's two stages are 0.03 s and 0.12 s of wall clock. The port's first version was
-*slower* than the reference — 1.05 µs per breakline query against scipy's 0.22 — because it asked
+*slower* than the reference — 1.08 µs per breakline query against scipy's 0.22 — because it asked
 `kiddo` for the unbounded nearest neighbour and then discarded it; R §5.2's radius is
 `distance_upper_bound`, and passing it into the query (`PointTree::nearest_within`) took the
 coarse stage over synthetic_20 from 1 800 core-seconds to 178 with bit-identical scores.

@@ -21,7 +21,7 @@
 //! | module | R sections | filled in |
 //! |---|---|---|
 //! | [`io`] | §3.1, §11 | S2 |
-//! | [`mesh`] | §3.3 | S3 |
+//! | [`mesh`] | §3.1 (clean, components) S2; §3.3 (the rest) S3 | S2, S3 |
 //! | [`fragment`] | §3.2, §3.4–3.7 | S3, S4, phase 1b |
 //! | [`spatial`] | §3.2, §3.4.3, §6.1, §6.4 | phase 1b |
 //! | [`matching`] | §4–§7 | phase 1c |
@@ -30,10 +30,12 @@
 //!
 //! # State
 //!
-//! Phase 1a step S1 (this commit) is the scaffold: the cross-cutting types ([`Vec3f`],
-//! [`Params`], [`WorkingMesh`], [`Pose`], [`Error`]), the seeded RNG and the module tree. The
-//! algorithm modules are documented but empty; they are filled in step by step, each step gated
-//! on the fixtures under `fixtures/` and on `tools/compare_fixtures.py`.
+//! Phase 1a step S1 was the scaffold: the cross-cutting types ([`Vec3f`], [`Params`],
+//! [`WorkingMesh`], [`Pose`], [`Error`]), the seeded RNG and the module tree. Step S2 added the
+//! load stage — every reader of [`io`], the PLY writer of R §11.4, and R §3.1's cleaning and
+//! largest-component passes in [`mesh`]. The remaining algorithm modules are documented but
+//! empty; they are filled in step by step, each step gated on the fixtures under `fixtures/` and
+//! on `tools/compare_fixtures.py`.
 
 pub mod assembly;
 pub mod error;
@@ -55,6 +57,7 @@ pub mod vec3;
 
 pub use error::{Error, Result};
 pub use executor::Backend;
+pub use mesh::Mesh;
 pub use params::Params;
 pub use types::{Cloud, FaceLabel, FragId, Pose, SourceRef, WorkingMesh};
 pub use vec3::Vec3f;

@@ -561,8 +561,9 @@ table is the measured one and this line is the order of magnitude. For `mixed_al
 are dumped (≈ 0.6 GB). Fixtures are stored outside git (§10.5) and regenerated whenever the
 reference changes; the committed `fixtures/slab/dump` comes from
 **`9cbcbbc`** — step C1's two NMS walk orders, carrying R §3.2's deterministic ray set (task T1) and
-the sample uniforms of §10.2's D6 columns with it — and the seven `output/fixtures` sets from the
-commit that added it; each `manifest.json` records which.
+the sample uniforms of §10.2's D6 columns with it — and the seven `output/fixtures` sets from
+**`895a948`**, the last commit of that step; each `manifest.json` records which, and all eight say
+`dirty: false`.
 
 **`nms1.order` and `nms2.order` are inputs, not outputs, and step C1 added them for that reason.**
 R §5.3's suppression is a greedy walk over `np.argsort(score)[::-1]`, and numpy's `argsort` is an

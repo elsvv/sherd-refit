@@ -61,7 +61,15 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
             continue;
         }
         let theirs_hyp = pair.hypotheses()?;
+        if !theirs_hyp.describes(&fa, &fb) {
+            report.skip(&scope, "the dump's hypothesis indices do not describe its own breaklines");
+            continue;
+        }
         let idx = npy::read_indices(pair.file("coarse.idx.npy"))?;
+        if idx.iter().any(|&i| (i as usize) >= fb.len()) {
+            report.skip(&scope, "coarse.idx does not index B's breakline");
+            continue;
+        }
         let theirs = npy::read_f64(pair.file("coarse.cs.npy"))?;
         let sc = pair.scales()?;
 

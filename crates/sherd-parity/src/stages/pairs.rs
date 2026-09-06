@@ -87,6 +87,10 @@ pub struct MdUsed {
 }
 
 /// The reference's own hypothesis inputs and output indices (R §5.1).
+///
+/// Every stage that reads these indexes the frames with them, so [`RefHypotheses::describes`] is
+/// the reader check the writer cannot make: a dump whose arrays do not fit together is skipped
+/// with a reason rather than indexed off the end.
 #[derive(Clone, Debug)]
 pub struct RefHypotheses {
     /// `hyp.ia`: A's breakline subset, in the reference's own order (PMC-4).
@@ -97,6 +101,17 @@ pub struct RefHypotheses {
     pub pa: Vec<u32>,
     /// `hyp.pb`: position into `ib`.
     pub pb: Vec<u32>,
+}
+
+impl RefHypotheses {
+    /// True when `ia`/`ib` index those two breaklines and `pa`/`pb` index `ia`/`ib`.
+    pub fn describes(&self, a: &Frames, b: &Frames) -> bool {
+        self.pa.len() == self.pb.len()
+            && self.ia.iter().all(|&i| (i as usize) < a.len())
+            && self.ib.iter().all(|&i| (i as usize) < b.len())
+            && self.pa.iter().all(|&i| (i as usize) < self.ia.len())
+            && self.pb.iter().all(|&i| (i as usize) < self.ib.len())
+    }
 }
 
 impl Collection {
@@ -247,6 +262,15 @@ mod tests {
         // and `0.60 t`) and the subset (R §3.5.5's voxel is `0.5 t`).
         assert_eq!(own.p, fa.p);
         assert_ne!(own.ns, fa.ns, "a rebuild at another `t` moves the macro normals");
+
+        // The hypothesis indices of the dump address the arrays of the dump.
+        let hyp = pair.hypotheses().unwrap();
+        assert!(hyp.describes(&fa, &fb));
+        assert!(!hyp.describes(&fb, &fa) || fa.len() == fb.len());
+        let broken = super::RefHypotheses { pa: vec![u32::MAX], ..hyp.clone() };
+        assert!(!broken.describes(&fa, &fb), "a `pa` off the end of `ia`");
+        let broken = super::RefHypotheses { ia: vec![u32::MAX], ..hyp };
+        assert!(!broken.describes(&fa, &fb), "an `ia` off the end of the breakline");
 
         // A thickness nothing was built at resolves to nothing rather than to the nearest one.
         assert!(reference_frames(a, 1.0, used.surface_points).unwrap().is_none());

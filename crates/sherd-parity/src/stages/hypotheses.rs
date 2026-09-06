@@ -68,6 +68,10 @@ fn injected(collection: &Collection, report: &mut StageReport) -> Result<()> {
             continue;
         }
         let theirs = pair.hypotheses()?;
+        if !theirs.describes(&fa, &fb) {
+            report.skip(&scope, "the dump's hypothesis indices do not describe its own breaklines");
+            continue;
+        }
 
         // R §1.2 from the pair's own two numbers, against the reference's own resolution of it.
         let sc = Scales::for_pair(&params, used.t, used.res_a.max(used.res_b));
@@ -189,8 +193,12 @@ fn native_fragments(
 }
 
 /// How many hypotheses the reference kept for this pair.
+///
+/// Through the dtype-agnostic reader rather than `read::<i64>`: `hyp.pa` is `int64` in every dump
+/// written so far, and a native row that fails because a future sink narrowed it would be
+/// reporting the wrong thing.
 fn hypotheses_count(pair: &PairFixture) -> Result<usize> {
-    Ok(crate::npy::read::<i64>(pair.file("hyp.pa.npy"))?.len())
+    Ok(crate::npy::read_indices(pair.file("hyp.pa.npy"))?.len())
 }
 
 /// How many of R §1.2's twelve fields the port resolved differently, bit for bit.

@@ -102,7 +102,7 @@ Each stage runs on the reference's own arrays at the pair's own `t`: `hyp.ia`/`h
 hash order — PMC-4's first real exercise), `md.brk_*` from the fragment directory or from the
 `md_t/` rebuild the pair actually used, `scales.json`, `coarse.idx`, `nms1.order`.
 
-| set | pairs | hypotheses | hypotheses | coarse | nms |
+| set | pairs | hypotheses | `hypotheses` stage | `coarse` | `nms` |
 |---|---:|---:|---|---|---|
 | terracotta | 6 | 166 635 | 36/0, 0.03 | 30/0, 0.00 | 36/0, 0.67 |
 | pot_A | 28 | 3 893 002 | 168/0, 0.03 | 140/0, 0.00 | 168/0, 0.81 |
@@ -221,14 +221,16 @@ is the check that the timing harness is running the real thing). The port's figu
 reading the arrays off disk and building the hypothesis set *twice* — it is an upper bound on the
 two stages, and it is still 2.8–2.9× under the reference.
 
-R §13's cost table puts the coarse score at 14 % of a mid-size pair's 6.94 s. On that basis this
-step accounts for about a fifth of a pair, and the ICP ladder of C2 is two thirds of what remains.
+R §13's cost table puts the coarse score at 14 % of a mid-size pair's 6.94 s, with the hypotheses
+and the suppression inside its 0.03 s of "rest" — so this step is about a seventh of a pair, and
+the ICP ladder step C2 has to port is 75 % of the same table (stage 1 at 8 %, the two coarse
+stage-2 rungs at 41 %, the two fine ones at 26 %).
 
 Whole-set parity runs, for scale: `coarse --injected` over synthetic_20's 190 pairs and 27.8 M
 hypotheses is 22 s of wall clock (178 core-seconds); `hypotheses --injected` over the same is 3 s;
 native `hypotheses`, which preprocesses all twenty fragments from their files first, is 25 s.
 
-## 8. Tests (+26; 207 → 233 passing, 1 ignored)
+## 8. Tests (+27; 207 → 234 passing, 1 ignored)
 
 * **`Scales`**: the terracotta ratio (17.2 edges per `t`) leaves every floor inert and the slab's
   13.2 lifts all of them, the slab pair's twelve numbers are reproduced to the last bit from
@@ -261,10 +263,14 @@ native `hypotheses`, which preprocesses all twenty fragments from their files fi
   name); all nine stages pass on the slab in both modes, with `coarse` and `nms` skipping natively
   by design; a dump with `scales.coarse` moved by 5 %, five hypotheses dropped, one coarse score
   raised by 0.05 and one kept index changed fails exactly the three stages that measure those; and
-  a dump with no `nms1.order` skips rather than comparing against its own order.
+  a dump with no `nms1.order` skips rather than comparing against its own order. Three reader
+  checks the writer cannot make are enforced before anything is indexed — `ia`/`ib` address the
+  two breaklines, `pa`/`pb` address `ia`/`ib`, and `coarse.idx`, `nms1.order` and `nms1.kept`
+  address what they are supposed to — so a truncated dump is skipped with a reason rather than
+  panicking the harness.
 
 `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and
-`cargo test --workspace --locked` are green (233 passed, 1 ignored). `pytest -q` is 58 passed,
+`cargo test --workspace --locked` are green (234 passed, 1 ignored). `pytest -q` is 58 passed,
 unchanged. Determinism: the ignored terracotta test passes (two `segment` runs, byte-identical
 caches) and `--threads 1` against `--threads 10` gives byte-identical caches too.
 

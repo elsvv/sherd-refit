@@ -13,17 +13,21 @@
 //! loop and duplicate test on the reference's own ranking. What is compared is then exact: the
 //! same kept hypotheses, in the same order, or a defect.
 //!
-//! Three further rows say what the port's *own* order does with the same scores, because that is
-//! what a native run will do and PMC-6 asks for it to be measured rather than assumed:
+//! Four further rows say what the port's *own* order does with the same scores, because that is
+//! what a native run will do and PMC-6 asks for it to be measured rather than assumed. **None of
+//! them is a parity claim** — the tolerances are the measured worst case on these fixtures plus
+//! headroom, so that a later change which made the tie effect larger would show
+//! (`notes/2026-09-07-c1-hypotheses.md` §5):
 //!
-//! * **`own order count`** — its kept list is as long as the reference's (both stop at `stage1`).
-//! * **`own order kept`** — how much of the reference's kept set it reproduces. This is *not* a
-//!   parity claim: ties make the difference, and the tolerance is a measurement of how large the
-//!   tie effect is on these fixtures, recorded in `notes/2026-09-07-c1-hypotheses.md`.
+//! * **`own order count`** — its kept list is as long as the reference's; the two differ only on a
+//!   pair whose walk ends before `stage1` (worst 3.3 %).
+//! * **`own order kept`** — how much of the reference's kept set it reproduces (worst 43.6 %
+//!   missed, mean 14.3 %).
+//! * **`own order scores`** — both kept sets sorted by score and compared rank by rank. This is
+//!   the row that matters, and it is the tight one: the two tie-breaks keep poses of the *same
+//!   quality*, to one probe point of sixty on average and two at worst.
 //! * **`own order cover`** — the fraction of the reference's kept poses that are *not* within the
-//!   suppression ball of any pose the port kept. This is the invariant that survives the tie:
-//!   NMS returns a cover of the high-scoring poses, and two runs that disagree only on which
-//!   member of a cluster to keep still cover each other.
+//!   suppression ball of any pose the port kept (worst 38.8 %, mean 10.0 %).
 
 use nalgebra::Matrix3;
 use sherd_core::error::Result;
@@ -85,6 +89,10 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
             continue;
         }
         let theirs_hyp = pair.hypotheses()?;
+        if !theirs_hyp.describes(&fa, &fb) {
+            report.skip(&scope, "the dump's hypothesis indices do not describe its own breaklines");
+            continue;
+        }
         let cs = npy::read_f64(pair.file("coarse.cs.npy"))?;
         let order = npy::read_indices(pair.file("nms1.order.npy"))?;
         let theirs = npy::read_indices(pair.file("nms1.kept.npy"))?;
@@ -99,6 +107,10 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
         );
         if hyp.len() != cs.len() {
             report.skip(&scope, "coarse.cs does not describe the hypothesis set");
+            continue;
+        }
+        if order.iter().chain(&theirs).any(|&h| (h as usize) >= cs.len()) {
+            report.skip(&scope, "nms1.order or nms1.kept does not index the hypothesis set");
             continue;
         }
         let topk = params.stage1 as usize;

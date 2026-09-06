@@ -540,10 +540,11 @@ and the package calls `fixture.put(scope, stage, key, array)` at every stage bou
 DIR/manifest.json                         {commit, open3d, numpy, params, target_faces, collection order, pairs, files: {path: {shape, dtype, sha256}}}
 DIR/fragments/<name>/
    load.V0 load.F0 load.n_orig                              R§3.1
-   thick.idx thick.t_hit thick.prim thick.t thick.thick_mode thick.target   R§3.2–3.3
+   thick.idx thick.t_hit thick.prim thick.t thick.thick_mode thick.target   R§3.2–3.3 (idx is the stride set, ≤ 300 000)
    mesh.V mesh.F mesh.res mesh.watertight                   R§3.3 (working mesh after Taubin)
    seg.rep seg.near seg.NS seg.good seg.frac_raw seg.frac_majority seg.frac_islands seg.ref seg.has_ref seg.frac_final   R§3.4
    md.<each MD_ARRAY> md.params md.brk_t md.brk_dih md.valid                 R§3.5–3.6
+   md.S_u md.S_v md.Pf_u md.Pf_v      the uniforms behind each sample, before R§3.5.1's fold
 DIR/pairs/<a>__<b>/
    scales.json  hyp.pa hyp.pb  coarse.idx coarse.cs  nms1.kept
    s1.T[250,4,4] s1.score  nms2.kept
@@ -554,26 +555,52 @@ DIR/refine/    <name>.idx (fracture cloud indices), per-join T after each rung, 
 DIR/outputs/   transforms.json report.json
 ```
 
-Sizes: terracotta ≈ 40 MB, pot A ≈ 90 MB, synthetic 20 ≈ 350 MB (all pairs). For `mixed_all` and
+Sizes: terracotta ≈ 240 MB, pot A ≈ 250 MB, synthetic 20 ≈ 850 MB at level `slim`; the p0 note's
+table is the measured one and this line is the order of magnitude. For `mixed_all` and
 `synthetic_170` only `mesh`, `seg.frac_final`, `md.*`, `result.candidates.json` and the assembly
-are dumped (≈ 0.6 GB). Fixtures are generated once from commit `9d4b9d3` and stored outside
-git (§10.5). The Rust CLI writes the same layout with `--dump-fixtures`.
+are dumped (≈ 0.6 GB). Fixtures are stored outside git (§10.5) and regenerated whenever the
+reference changes; the current set comes from commit `09fb4d4`, R §3.2's deterministic ray set
+(task T1). The Rust CLI writes the same layout with `--dump-fixtures`.
 
 ### 10.2 Stage comparison and tolerances (`tools/compare_fixtures.py REF NEW`)
 
 Two modes per stage: **injected** (the Rust stage ran on the Python stage's inputs) and
-**native** (the Rust stage ran on Rust's own upstream results). Segmentation agreement is
-measured by sampling 200 000 area-weighted points on the Python working mesh and labelling each
-by its nearest face on each mesh.
+**native** (the Rust stage ran on Rust's own upstream results).
+
+**What "agreement" means, as the harness measures it and not as an earlier draft described it**
+(defect D8 of the phase-1b verification). Segmentation agreement is an **area-weighted quadrature
+over the reference's own faces**: one point per reference face, its centroid, weighted by that
+face's area, labelled on the reference's side by that face's own label and on the port's side by
+the nearest face of the port's mesh (`RayScene::closest_face`). It is not the 200 000-point
+Monte-Carlo sample this section used to describe: one point per face is exact on the reference's
+side, has no generator in it at all, and does not need a tolerance for its own sampling noise.
+What it gives up is fidelity on a mesh with a wide face-area spread, where a large face is
+represented by its centroid alone; that is the price, and it is stated here rather than left in a
+module comment. When the two working meshes are the same tessellation the harness compares the
+label arrays directly instead and the question does not arise.
+
+Two more places where the table is narrower than it sounds:
+
+* **`exact` in the injected column means the port reproduced the reference's own array**, not that
+  the two implementations drew the same random numbers — PMC-9 forbids the latter. Everything in
+  the samples row that is marked exact is a count, an index or a membership; the point arrays
+  themselves are compared only through the reference's own uniforms (the `md.*_u` / `md.*_v`
+  columns, defect D6) and through statistics.
+* **The injected column of a stage is only met on the fragments whose dump carries that stage's
+  inputs.** At level `slim` there is no `load.V0`, so injected thickness *skips* those fragments
+  rather than silently running natively (finding F3); today that is the twenty fragments of
+  synthetic_20, and the injected thickness claims below rest on the other 46 plus the slab's two
+  (defect D7). Native thickness covers all 68, and since T1 it is nearly as strong a check: both
+  sides cast from the same faces of the same mesh, and only the ray caster differs.
 
 | stage | quantity | injected tolerance | native tolerance |
 |---|---|---|---|
 | load | counts after cleaning, largest component | exact | exact |
-| thickness | `t`, `thick_mode` | same bin, or ±1 bin on a count tie | `max(2 %, 3 bins of the reference's own histogram)` |
+| thickness | `t`, `thick_mode` | same bin, or ±1 bin on a count tie | ±2 %, with a floor of 1 bin of the reference's own histogram |
 | working mesh | faces, `res`, area, `watertight` | (mesh is injected) | faces ±5 %, `res` ±10 %, area ±0.5 %, same `watertight` |
 | segmentation | area-weighted label agreement; fracture fraction | ≥ 0.995; ±0.005 | ≥ 0.97; ±0.02 |
-| breakline | count; point-set Hausdorff; `dih` per matched point | exact; 1e-4 t; 0.1° | ±10 %; 0.5 t on 99 %; distribution KS < 0.05 |
-| samples | `n_surface`, `n_frac`; sample-to-face residual; `fp` on fracture faces; margin count and membership; sample normals | exact; 1e-9 t; exact; exact; 0.1° over faces conditioned to 1000 f32 ulps, with ≤ 0.1 % of samples left out | `n_frac` ±10 %; fracture-sample fraction ±0.02; margin fraction ±0.05; cross-set nearest-distance p95 of `S` and of `Pf` within a factor of two of the Poisson expectation `0.977·√(A/n)` |
+| breakline | count; point-set Hausdorff; `dih` per matched point | exact; 1e-4 t; 0.1° | curve length (`count × median nearest-neighbour spacing`) ±10 % and the spacing alone ±10 %; 0.5 t on 99 %; distribution KS < 0.05 |
+| samples | `n_surface`, `n_frac`; sample-to-face residual; `fp` on fracture faces; margin count and membership; sample normals; **the reference's own points rebuilt from its own uniforms**; **the face pick over the reference's own cdf** | exact; 1e-9 t; exact; exact; 0.1° over faces conditioned to 1000 f32 ulps, with ≤ 0.1 % of samples left out; exact (bit for bit); exact | `n_frac` ±10 %; fracture-sample fraction ±0.02; margin fraction ±0.05; cross-set nearest-distance p95 of `S` and of `Pf` within a factor of two of the Poisson expectation `0.977·√(A/n)` |
 | hypotheses | `(pa, pb)` set | exact | count ±30 % |
 | coarse | `cs` per hypothesis | ≤ 1/60 + 1e-6 | — |
 | stage 1 | pose per kept hypothesis (by id); `s1` | 0.05° / 0.01 t; ±0.02 | — |
@@ -585,68 +612,106 @@ by its nearest face on each mesh.
 
 The tool exits non-zero on any violation and prints a per-stage table.
 
-**The native thickness row was ±2 % until the phase-1a verification (finding F1), and it is
-widened on the evidence, not for convenience.** R §3.2's `t` is the mode of a histogram over 20 000
-sampled rays; PMC-9 lets the port draw that sample from `ChaCha8Rng` instead of numpy's PCG64, so
-in native mode the two implementations evaluate the *same estimator on different samples*. Running
-the reference's own `estimate_thickness` with seeds 0–11 and nothing else changed moves `t` by up
-to 6.8 % of the seed-0 value (`Pot_A_Piece_04_Mesh`: 3.554 at seed 0, 3.774–3.795 at seeds 1–11)
-and by 5.8 % on `frag_019` — and those are exactly the two fragments on which the port was outside
-±2 %, with the port's value nearer the estimator's centre than the reference's. A gate of ±2 % is
-therefore unreachable by anything that does not reproduce PCG64, and it was rejecting the port for
-being right. One bin is `percentile(far, 90) / 60` over R §3.2's filtered distances, computed from
-the reference's own rays in the dump, and is 1.7–5.7 % of `t` on the benchmark; the widened gate is
-5.1–17.0 % there and never narrows below the original 2 %. 17 of the 136 native thickness
-comparisons need it. The injected row is untouched and is met bit-exactly.
+**The native thickness row is ±2 % again, and there is nothing left for it to absorb** (task T1,
+`notes/2026-09-07-t1-deterministic-thickness.md`). Finding F1 widened it to
+`max(2 %, 3 bins of the reference's own histogram)` on measured evidence: R §3.2's `t` was the mode
+of a histogram over 20 000 *randomly sampled* rays, PMC-9 let the port draw that sample from
+`ChaCha8Rng` rather than numpy's PCG64, and the two implementations were therefore evaluating the
+same estimator on different samples — which moved `t` by up to 6.8 % between seeds of the reference
+alone. T1 removed the sample instead of replicating PCG64: R §3.2 now casts a ray from every face
+of the original largest component, or from `arange(0, n_faces, ceil(n_faces / 300000))` above
+300 000, on both sides. The two implementations cast from the same faces of the same mesh, and what
+is left between the numbers is `parry3d` against Embree (PMC-17) and nothing else.
 
-**And the consequence has to travel.** `t` is the unit of every threshold in R §1.2, so a fragment
-whose `t` differs by 6.6 % has `coarse`, `stage1`, `tight`, `facing`, `gap`, `seam`, `near`, `pen`
-and `nms` shifted by 6.6 % for every pair it takes part in. No row of this table can absorb that:
-it lands on R §13's pair gates, which are exact-set gates. It belongs on the phase-1b/1c risk
-list, and it is the strongest argument for E6 (replicating PCG64, ≈ 2 days) if those gates ever
-fail for this reason.
+Measured on all 68 fixture fragments, native mode: `t` is **bit-identical on 41** and the worst
+relative difference anywhere is **7.1e-6** (`FY234021_reduced`), against the ±2 % row —
+`3.5e-4` of the tolerance. `thick_mode` is bit-identical on 28 with a worst of 1.2e-4. A one-bin
+floor is kept under the row, because two values that land in adjacent bins of a 60-bin histogram
+differ by a bin's width whatever else is true; on these fragments the 2 % is what binds, the bin
+being 1.7–5.7 % of `t`. The injected row is unchanged and still met bit-exactly on the 48
+fragments whose dump carries `load.V0`.
 
-**The segmentation row is the first gate it has broken, and the row is not being widened for it**
-(step B1, `docs/superpowers/notes/2026-09-06-b1-segmentation.md` §5). 66 of 68 fragments pass the
-native column, median agreement 0.9935; `Pot_B_Piece_01_Mesh` reaches 0.9142 and `frag_010`
-0.9687. Feeding the port's own `t` into the *reference's own* working mesh reproduces 0.914160 and
-0.970653 — so 100 % and 94 % of the two gaps is `t`, and at the reference's `t` the same code
-agrees with the reference to the last bit on all 68 fragments (injected agreement exactly
-1.000000000). A seed sweep of the reference's own estimator says which value is right:
-`Pot_B_Piece_01`'s fixture value, 5.6226, is the **maximum** of seeds 0–11 and 4.2 % above every
-other one, while the port's 5.4132 is 0.3 % from the sweep's median; `frag_010`'s fixture value is
-the **minimum** of its twelve and the port's sits inside the cloud. The port is not wrong on these
-two fragments — the estimator's sample is. E6 is therefore now argued for by evidence rather than
-by anticipation.
+**The consequence travelled, and it travelled the right way.** `t` is the unit of every threshold
+in R §1.2, so the fragments whose `t` used to differ by 4–7 % had `coarse`, `stage1`, `tight`,
+`facing`, `gap`, `seam`, `near`, `pen` and `nms` shifted by as much for every pair they took part
+in — the risk this section used to carry into the pair stages, and the strongest argument for E6
+(replicating PCG64). **E6 is no longer needed for `t`**: preprocessing draws nothing at random at
+all, and R §13's exact-set pair gates now see the same thresholds on both sides. PMC-9 still covers
+R §3.5's samplers, whose arrays remain incomparable point by point; what it no longer covers is
+anything upstream of them.
 
-**The breakline row is the same finding one stage on, and one of its three native columns is
-self-contradictory** (step B2, `notes/2026-09-06-b2-breaklines.md` §4). Injected, the row is met
-with nothing left over: on all 66 fragments the count and the subset are exact, the point arrays
-agree in order to 3.7e-5 and the frames to 4.5e-6 degrees, and every residual is reproduced
-exactly by rounding the reference's own arrays to `f32` — the §4.1 narrowing and nothing else.
-Natively, 33 of 198 comparisons fall outside the row. 15 of them are `p99 distance`, and the
-cause is upstream and measured: 3 115 of 271 592 point-to-set distances exceed `0.5 t`, and on
-every fragment whose working mesh is identical to the reference's each of them lies within
-`0.169 t` of a face the two segmentations label differently. 5 are `dihedral KS`, four of them on
-fragments whose `t` or whose mesh is the reference's only to within the rows above. The remaining
-13 are `count`, all on synthetic_20, and they are the contradiction: `res` is allowed ±10 %
-natively, the port's decimator lands +15 % on the median breakline spacing of that set, and a
-breakline crossing a coarser mesh has proportionally fewer edges to cross — the *curve* agrees,
-`count × spacing` being within 2.9 % on average. A count gate of ±10 % underneath a `res` gate of
-±10 % has no headroom, and it belongs with §13 question 2 rather than with the port. No row is
-widened here either.
+**The segmentation row passes on all 68 fragments** (it was 66 of 68: `Pot_B_Piece_01_Mesh` at
+0.9142 and `frag_010` at 0.9687 against ≥ 0.97). Step B1 had already shown those two gaps were
+100 % and 94 % explained by `t`, and with `t` bit-identical they are gone: the worst native
+agreement is now **0.9814** (`frag_014`, against ≥ 0.97), the median is 0.9989, and **39 of 68
+fragments agree exactly** — their label arrays are the reference's entry for entry. The worst
+fracture fraction is 1.14 pp against ±2 pp, also on `frag_014`. The injected column is unchanged:
+agreement exactly 1.000000000 everywhere.
 
-**The samples row is a new one, and three of its five injected columns are exact by construction
-rather than by luck** (step B3, `notes/2026-09-06-b3-samples.md`). PMC-9 lets the port draw its
-20 000 surface points and its `n_frac` fracture points from a different generator, so the *arrays*
-cannot be compared point by point at all; what injected mode compares is everything that does not
-depend on which numbers the generator produced. On all 66 fragments of the seven collections
-`n_surface`, `n_frac`, the `fp`-on-fracture test, the margin count and the margin membership are
-**exact**, the reference's own samples sit on the faces their own `sp`/`fp` name to 3.3e-11 (the
-`f64` round-off of the reference's own barycentric expression), and the two normal checks are the
-D §4.1 narrowing at 0.029°/0.038° against 0.1°. `n_frac` is the strongest of these: R §3.5.2's
-`clip(⌊150·A_f/t²⌋, 5000, 12000)` is reproduced exactly on the 32 fragments whose count is
-strictly between the clamps as well as on the 34 that sit on one.
+**The breakline row's `count` column is now a curve-length column, and that is the team decision of
+task T1 rather than a widening** (step B2, `notes/2026-09-06-b2-breaklines.md` §4.2). `res` is
+allowed ±10 % natively and a breakline crossing a mesh with longer edges has proportionally fewer
+edges to cross, so a ±10 % gate on the *number of points* underneath a ±10 % gate on `res` had no
+headroom by construction: on synthetic_20 the port carries 3–18 % fewer points than the reference
+while tracing the same curve. The row now measures the curve's **length**, as the sum of every
+point's distance to its nearest other point — equivalently `count × mean nearest-neighbour spacing`
+— at the same ±10 %. The estimator is not the one the decision named, and the reason is measured:
+`count × *median* spacing` disagrees between port and reference by 4.46 % on average and 11.17 % at
+worst over synthetic_20, because the spacing along a decimated mesh's breakline is heterogeneous
+and a median is not additive, while the sum of the nearest-neighbour distances disagrees by
+**1.42 % on average and 3.95 % at worst**. Over all 68 fragments the worst curve length is 3.95 %
+of a 10 % allowance. The point *density* is deliberately not gated here at all: it is a function of
+`res`, which the working-mesh row already gates, and gating it twice rebuilds the contradiction.
+
+**Five native breakline comparisons of 204 still fail, all on synthetic_20, and the cause is the
+decimator rather than the port.** They are `p99 distance` on `frag_014` (0.888 t) and `frag_019`
+(0.901 t) against `0.5 t`, and `dihedral KS` on `frag_010` (0.0636), `frag_014` (0.0655) and
+`frag_017` (0.0512) against 0.05. That is down from 33 of 198 before T1, and none of the survivors
+is a `t` difference: `t` is bit-identical on all five. What differs is `res`, +2.7 % to +8.3 % on
+these fragments — inside the working-mesh row's ±10 %, because `meshopt` and Open3D's quadric
+decimators distribute the same face budget differently (PMC-2).
+
+**The `p99 distance` row is not survivable by the reference either, and that was measured rather
+than argued.** Running the *reference's own* pipeline twice on the same fragment with only the face
+budget changed — 200 000 against 174 000, a `res` gap of 5.4–8.4 %, well inside the ±10 % the row
+above allows — puts its own two breaklines `0.866 t` apart at the 99th percentile on `frag_014` and
+`1.071 t` apart on `frag_019`: **larger than the port's own 0.888 t and 0.901 t**. A gate of `0.5 t`
+on the 99th percentile is therefore unreachable by any implementation whose decimator is not
+Open3D's, and it measures the working-mesh row rather than the breakline. The row is not widened;
+what changes is that this section now says what it measures. Over all 68 fragments, 313 of 126 687
+point-to-set distances exceed `0.5 t` (0.247 %), down from 3 115 of 271 592 (1.15 %) before T1.
+
+**The three `dihedral KS` failures are the segmentation row leaking into a curve statistic**, the
+same non-independence this section already describes for `Pf spacing`. The same reference-against-
+itself experiment moves the dihedral distribution by a KS of only 0.012–0.033 at those `res` gaps,
+so resolution alone does not explain 0.051–0.066; what does is that `frag_010`, `frag_014` and
+`frag_017` also carry three of the four lowest segmentation agreements of the set (0.9885, 0.9814,
+0.9868), and the breakline is the *boundary* of the mask the agreement measures. A 1.9 % area
+disagreement is a far larger fraction of a boundary than of a surface. Both rows are inside their
+own gates and the pair of them is not; that belongs with §13 question 2, not with a widened gate.
+
+**The samples row passes natively on all 408 comparisons** (it was 390 of 396). The four fragments
+that used to fail it — `Pot_A_Piece_04` on `n_frac`, `Pot_B_Piece_01` on three columns, `frag_010`
+on the fracture fraction, `Pot_G_Piece_05` on `Pf spacing` — were all named in this section as `t`
+consequences, and all four pass now. The worst native numbers are `n_frac` 2.0 % (±10 %), fracture
+fraction 1.14 pp (±2 pp), margin fraction 1.6 pp (±5 pp) and `Pf spacing` 1.23× the Poisson
+expectation (within a factor of two). The cross-set p95 of the 20 000 surface samples agrees with
+the Poisson prediction `0.977·√(A/n)` to within **1.34 %** on every fragment, which is the
+strongest statement available about a sample PMC-9 forbids comparing directly.
+
+**The injected samples row now reaches the sampler itself** (defect D6 of the phase-1b
+verification). It used to compare only what does not depend on which numbers the generator
+produced — `n_surface`, `n_frac`, the `fp`-on-fracture test, the margin count and membership, all
+exact, and the reference's own points sitting on the faces their own `sp`/`fp` name to 3.3e-11 —
+so a port that folded `u + v > 1` the wrong way, or wrote the barycentric expression off one
+corner, passed every column. The dump now carries the two uniforms behind each sample before the
+fold (`md.S_u`, `md.S_v`, `md.Pf_u`, `md.Pf_v`), and the port rebuilds the reference's own `md.S`
+and `md.Pf` from them through its own fold and its own barycentric expression: **1 962 406 points
+over 68 fragments, every one bit-identical**. The face pick is checked without uniforms, by
+requiring the midpoint of every face's interval of the reference's own cdf to pick that face:
+**7 404 452 faces probed, none wrong**. A face whose interval is narrower than an ulp of the cdf is
+skipped, because no uniform can distinguish it either; `frag_008` has one such sliver in 126 236
+faces.
 
 **Its two normal columns needed a conditioning rule, and that rule is arithmetic rather than
 fitted.** Narrowing a vertex to `f32` moves it by up to one ulp of its coordinate, and moving a
@@ -660,28 +725,10 @@ therefore takes the worst case over the faces with `h ≥ 1000 ulp` — which bo
 rad = 0.057°, under the 0.1° gate *by construction* — and gates the share of samples left out at
 0.1 % (measured maximum 0.033 %).
 
-**Natively, 390 of 396, and the six failures are on four fragments this table has already named.**
-`Pot_A_Piece_04` fails `n_frac` by 11.76 % where its `t` alone predicts 11.78 % (`A_f/t²` with `t`
-+6.58 %, the fragment §10.2's thickness paragraph is written about); `Pot_B_Piece_01` fails three
-columns and already fails the *segmentation* row above (agreement 0.9142, fracture fraction
-+8.17 pp — and the sampled estimate of that same fraction comes out +8.18 pp, which is the sampler
-agreeing with the area measurement to 0.01 pp rather than a second failure); `frag_010` fails
-`fracture fraction` by 2.63 pp and fails the segmentation row too (2.55 pp). The fourth is the
-interesting one. `Pot_G_Piece_05` **passes** the segmentation row (agreement 0.9833, fracture
-fraction +0.75 pp) and still fails `Pf spacing` at 2.89× the expectation, because 4.84 % of its
-fracture samples lie more than three expected spacings from the reference's cloud and **100 % of
-those sit on faces the reference labels shell** (the two working meshes are identical entry for
-entry, so nothing else can differ). That is B2's finding in its sharpest form: a p95 statistic over
-12 000 fracture samples has no headroom under an area-agreement row of 3 %, because the fracture
-is a tenth of the surface and a 1.7 % disagreement of the *total* area is 14 % of the *fracture*
-area. The two rows are not independent, and no percentile of the sample distance is; that belongs
-with §13 question 2, not with a widened gate.
-
-**What the row does establish is that the sampler itself is right.** The cross-set p95 of the
-20 000 surface samples agrees with the Poisson prediction `0.977·√(A/n)` to within **1.34 % on
-every one of the 66 fragments** (median 0.48 %), which says the port's draw is an independent
-sample of the same area-weighted distribution as the reference's, at the same density, on the same
-surface — the strongest statement available about a sample that PMC-9 forbids comparing directly.
+**The whole table, as it stands after T1.** Six stages, eight fixture sets, both modes:
+**3 847 injected comparisons with no failure, and 1 524 native comparisons with five** — the
+`p99 distance` and `dihedral KS` rows of the paragraphs above, on three fragments of synthetic_20.
+Before T1 the same sweep failed 43 native comparisons across three stages.
 
 ### 10.3 Benchmark gates
 

@@ -897,7 +897,7 @@ Numbers the port must reproduce on the benchmark sets, with the defaults above (
 
 | set | gate |
 |---|---|
-| `input/test_fragments_1` | joins used exactly {021–094, 094–104}; 007 unplaced; both `pen` = 0; 021–094 seam ≈ 21.3 t, 094–104 seam ≈ 11–12 t; tight of both ≥ 0.27 |
+| `input/test_fragments_1` | joins used exactly {021–094, 094–104}; 007 unplaced; both `pen` = 0; 021–094 seam ≈ 20.3 t, 094–104 seam ≈ 10.7 t; tight of both ≥ 0.27 |
 | `input/sfspp/pot_A` | fragment accuracy 87.5 %, precision 1.000 |
 | `pot_B` | 100 %, 1.000 |
 | `pot_C` | 75 %, 0.667 |
@@ -905,6 +905,27 @@ Numbers the port must reproduce on the benchmark sets, with the defaults above (
 | `pot_H` | 36.4 %, 0.429 |
 | `input/synthetic_pingsdorf_20` | 95 %, 1.000 |
 | all sets | cross-object joins 0; group purity 1.000 |
+
+**The two seam figures are measurements, and they have moved twice.** They were 21.3 t and 11.3 t
+in `2026-09-05-test-set-result.md`; the budget commits `991ff87` and `ca59c6a` took the second to
+10.7 t (p0 note §5); and §3.2's deterministic ray set (task T1) took the first from 21.33 t to
+20.33 t with the score 11.70 → 10.79 and the tight contact 0.548 → 0.531. The *decisions* did not
+move: the same two joins, the same group, 007 unplaced, both penetrations 0, tight far above 0.27
+on both. `pot_C`'s precision is the one number of this table that is not stable under §3.2's own
+estimator — see the note below.
+
+**`pot_C`'s precision of 0.667 is one draw of a coin, and this table should not have printed it
+without saying so.** Only four of pot C's seven fragments have a ground-truth pose (05, 06 and 07
+are `unknown`), so any join to the other three is *unscorable* and counts against precision by
+construction, and piece 01 has no correct pose available at all: it is attached to a
+ground-truth-adjacent neighbour at a wrong pose in every run measured. Its `tight` sits on
+`min_tight` — 0.255 at the old estimator's seed 0, 0.250 with §3.2's deterministic rays — so which
+of its marginal candidates is accepted flips on nothing. Running the *old* estimator at seeds 0–4
+gives precision 0.667, 0.667, **0.500**, 0.667, 0.667 with fragment accuracy 75.0 % on all five;
+the deterministic estimator gives 0.500 with the same 75.0 %. Fragment accuracy — the
+SfS++-comparable number, and the one every other row of this table leads with — is what is stable
+here; the precision column on this set is not, and 0.500 is inside the estimator's own cloud rather
+than a regression.
 
 Per-stage numeric tolerances for the fixture harness are defined in the port design
 (`2026-09-06-rust-core-design.md`, §10.2). One of them used to be a property of the algorithm

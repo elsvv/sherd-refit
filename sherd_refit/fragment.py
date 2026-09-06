@@ -393,7 +393,7 @@ MD_PARAMS = dict(t=float, seed=int, surface_points=int, frac_per_t2=float,
 
 def md_params(t: float, seed: int = 0, surface_points: int = 20000, frac_per_t2: float = 150.0,
               min_frac_points: int = 5000, max_frac_points: int = 12000, margin_points: int = 6000,
-              macro_inner: float = 0.15, macro_outer: float = 0.60, brk_voxel: float = 1 / 3) -> dict:
+              macro_inner: float = 0.15, macro_outer: float = 0.60, brk_voxel: float = 0.5) -> dict:
     """The knobs `match_arrays` depends on, normalised so that two dicts compare equal."""
     return dict(t=float(t), seed=int(seed), surface_points=int(surface_points), frac_per_t2=float(frac_per_t2),
                 min_frac_points=int(min_frac_points), max_frac_points=int(max_frac_points),
@@ -509,7 +509,7 @@ class MatchData:
     def __init__(self, fr: Fragment, t: float, seed: int = 0, surface_points: int = 20000,
                  frac_per_t2: float = 150.0, min_frac_points: int = 5000, max_frac_points: int = 12000,
                  margin_points: int = 6000, macro_inner: float = 0.15, macro_outer: float = 0.60,
-                 brk_voxel: float = 1 / 3, arrays: dict | None = None):
+                 brk_voxel: float = 0.5, reg_points: int = 6000, arrays: dict | None = None):
         kw = dict(seed=seed, surface_points=surface_points, frac_per_t2=frac_per_t2,
                   min_frac_points=min_frac_points, max_frac_points=max_frac_points,
                   margin_points=margin_points, macro_inner=macro_inner, macro_outer=macro_outer,
@@ -538,7 +538,18 @@ class MatchData:
         self.brk_tree = cKDTree(P) if len(P) else None
         self.margin_idx = arrays["margin_idx"]
         self.Pm, self.Nm = self.S[self.margin_idx], self.SN[self.margin_idx]
-        self.pc_reg = _pc(np.concatenate([self.Pf, self.Pm]), np.concatenate([self.Nf, self.Nm]))
+        # `pc_reg` drives the two coarse ICPs of stage 2, and profiling one mixed_all pair puts
+        # those at 73 % of the whole pair: 20 registrations against a 16 000-point cloud.  They
+        # only have to bring the pose from the breakline stage into the basin of the two fine
+        # ICPs that follow on `pc_frac`, and for that a few thousand points is as good as sixteen.
+        # Both `Pf` and `Pm` are i.i.d. area-weighted draws, so a prefix of each is still an
+        # area-weighted sample; the split keeps their proportion.
+        nf, nm = len(self.Pf), len(self.Pm)
+        if reg_points > 0 and nf + nm > reg_points:
+            nf = max(1, int(round(nf * reg_points / (nf + nm))))
+            nm = max(0, reg_points - nf)
+        self.pc_reg = _pc(np.concatenate([self.Pf[:nf], self.Pm[:nm]]),
+                          np.concatenate([self.Nf[:nf], self.Nm[:nm]]))
         self.pc_frac = _pc(self.Pf, self.Nf)
         self.has_frac = len(self.Pf) > 0
         self.pc_brk = _pc(P[self.brk_sub], ns[self.brk_sub])

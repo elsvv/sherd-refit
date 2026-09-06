@@ -73,7 +73,11 @@ class Params:
     screen_top_k: int = 0               # partners kept per fragment by the screening pass (0: no screening)
     screen_points: int = 150            # breakline points per fragment the screening pass uses
     screen_min_pairs: int = 200         # screening is skipped below this many pairs
+    second_pass_top: int = 0            # partners of each unplaced fragment rematched with a larger budget (0: no second pass)
+    second_pass_stage1: int = 400        # `stage1` for that second pass
+    second_pass_stage2: int = 40         # `stage2` for that second pass
     margin_points: int = 6000           # shell-margin points kept for the pc_reg ICP and the continuity test
+    reg_points: int = 6000              # points in the cloud the two coarse stage-2 ICPs run on (0: all)
     surface_points: int = 20000         # whole-surface samples per fragment (penetration test and shell margin)
     macro_inner: float = 0.15           # t, faces this close to the breakline are left out of the macro normals
     macro_outer: float = 0.60           # t, outer radius of the macro-normal neighbourhood

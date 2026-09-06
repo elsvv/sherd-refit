@@ -9,7 +9,7 @@ import time
 from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import numpy as np
 
@@ -137,7 +137,7 @@ def _preprocess_one(args):
 
 
 def _match_data(fr: Fragment, t: float, p: Params, surface_points: int | None = None) -> MatchData:
-    kw = _md_kw(p)
+    kw = dict(_md_kw(p), reg_points=p.reg_points)
     if surface_points is not None:
         kw["surface_points"] = surface_points
     return MatchData(fr, t, **kw)
@@ -216,6 +216,66 @@ def _pair_blocks(names: list[str], pairs: list[tuple], block: int) -> list[list[
     return [groups[key] for key in sorted(groups)]
 
 
+def _match_all(pairs: list[tuple], names: list[str], frags: dict, cache_of: dict, p: Params,
+               workers: int, threads: int | None, keep_per_pair: int, tag: str) -> list[list[Candidate]]:
+    """Match every pair in `pairs`, returning the candidates of each in the order given."""
+    per_pair: list[list[Candidate]] = [[] for _ in pairs]
+    if not pairs:
+        return per_pair
+
+    def t_of(k):
+        return min(frags[pairs[k][0]].thick, frags[pairs[k][1]].thick)
+
+    if workers > 1:
+        procs, per, block = _match_workers(workers, len(pairs), threads)
+        blocks = _pair_blocks(names, pairs, block)
+        log.info("%s %d pairs in %d processes x %d threads, %d job%s of up to %d pairs",
+                 tag, len(pairs), procs, per, len(blocks), "" if len(blocks) == 1 else "s", max(len(b) for b in blocks))
+        # inside a block, pairs that share a wall thickness come together: a pair is matched at
+        # `min(t_A, t_B)`, so its two `MatchData` are keyed by that thickness and consecutive jobs
+        # with the same one reuse the thinner fragment's outright
+        jobs = [([(k, cache_of[pairs[k][0]], cache_of[pairs[k][1]], t_of(k)) for k in sorted(b, key=lambda k: (t_of(k), k))],
+                 asdict(p), keep_per_pair, per) for b in blocks]
+        with _worker_env(per), ProcessPoolExecutor(max_workers=procs, initializer=_init_worker,
+                                                   initargs=(log.getEffectiveLevel(),)) as ex:
+            for res in ex.map(_match_block, jobs):
+                for k, cs in res:
+                    per_pair[k] = [Candidate.from_json(d) for d in cs]
+    else:
+        # in-process: this process's OpenMP was configured at start-up and cannot be changed any
+        # more, so leave the parallelism inside Open3D's ICP where it already is
+        jobs = [(k, cache_of[a], cache_of[b], t_of(k)) for k, (a, b) in enumerate(pairs)]
+        for k, cs in _match_block((jobs, asdict(p), keep_per_pair, 1)):
+            per_pair[k] = [Candidate.from_json(d) for d in cs]
+    return per_pair
+
+
+def _second_pass_pairs(pairs: list[tuple], cands: list[Candidate], groups: list[list[str]],
+                       p: Params) -> list[tuple]:
+    """Pairs worth matching again with a larger budget: the best-scoring partners of every
+    fragment the assembly left on its own.
+
+    "Best-scoring" is the pair's best stage-1 breakline score, which is what the first pass ranks
+    poses by and the only number available for a pair that produced nothing.  A fragment that did
+    get placed is not revisited: the budget was enough for it.
+    """
+    if p.second_pass_top <= 0:
+        return []
+    placed = {n for g in groups if len(g) > 1 for n in g}
+    lonely = [n for g in groups if len(g) == 1 for n in g if n not in placed]
+    if not lonely:
+        return []
+    best: dict[tuple, float] = {}
+    for c in cands:
+        k = (c.a, c.b)
+        best[k] = max(best.get(k, 0.0), float(c.scores.get("brk_best", c.scores.get("brk", 0.0))))
+    want = set()
+    for n in lonely:
+        row = sorted(((v, k) for k, v in best.items() if n in k), key=lambda x: (-x[0], x[1]))
+        want.update(k for _, k in row[:p.second_pass_top])
+    return [k for k in pairs if k in want]
+
+
 # ---------------------------------------------------------------- pipeline
 
 def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int | None = None, params: Params | None = None,
@@ -288,31 +348,7 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
                  "fragment and cut that by several times, at a cost in true joins measured in "
                  "docs/superpowers/notes/2026-09-06-scale-pairs.md", len(pairs))
     t0 = time.time()                    # the partner search has its own entry in `timings`
-    per_pair: list[list[Candidate]] = [[] for _ in pairs]
-    if workers > 1 and pairs:
-        procs, per, block = _match_workers(workers, len(pairs), threads)
-        blocks = _pair_blocks(names, pairs, block)
-        log.info("matching %d pairs in %d processes x %d threads, %d job%s of up to %d pairs",
-                 len(pairs), procs, per, len(blocks), "" if len(blocks) == 1 else "s", max(len(b) for b in blocks))
-        def t_of(k):
-            return min(frags[pairs[k][0]].thick, frags[pairs[k][1]].thick)
-
-        # inside a block, pairs that share a wall thickness come together: a pair is matched at
-        # `min(t_A, t_B)`, so its two `MatchData` are keyed by that thickness and consecutive jobs
-        # with the same one reuse the thinner fragment's outright
-        jobs = [([(k, cache_of[pairs[k][0]], cache_of[pairs[k][1]], t_of(k)) for k in sorted(b, key=lambda k: (t_of(k), k))],
-                 asdict(p), keep_per_pair, per) for b in blocks]
-        with _worker_env(per), ProcessPoolExecutor(max_workers=procs, initializer=_init_worker,
-                                                   initargs=(log.getEffectiveLevel(),)) as ex:
-            for res in ex.map(_match_block, jobs):
-                for k, cs in res:
-                    per_pair[k] = [Candidate.from_json(d) for d in cs]
-    else:
-        # in-process: this process's OpenMP was configured at start-up and cannot be changed any
-        # more, so leave the parallelism inside Open3D's ICP where it already is
-        jobs = [(k, cache_of[a], cache_of[b], min(frags[a].thick, frags[b].thick)) for k, (a, b) in enumerate(pairs)]
-        for k, cs in _match_block((jobs, asdict(p), keep_per_pair, 1)):
-            per_pair[k] = [Candidate.from_json(d) for d in cs]
+    per_pair = _match_all(pairs, names, frags, cache_of, p, workers, threads, keep_per_pair, "matching")
     cands: list[Candidate] = [c for cs in per_pair for c in cs]      # back in pair order
     timings["matching"] = time.time() - t0
     log.info("matching done in %.1fs: %d candidates, %d accepted", timings["matching"], len(cands), sum(c.accepted for c in cands))
@@ -322,6 +358,22 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
     md = {n: _match_data(frags[n], thick, p, surface_points=15000) for n in names}
     poses, groups, used, rejected = assemble(md, cands, p)
     timings["assembly"] = time.time() - t0
+
+    # 3a. second pass: the cheap budget is chosen so that the correct pose is almost always inside
+    # it, and "almost" is what this is for.  Fragments that came out of the assembly with no join
+    # get their most promising partners matched again with a larger budget.
+    retry = _second_pass_pairs(pairs, cands, groups, p)
+    if retry:
+        t0 = time.time()
+        p2 = replace(p, stage1=p.second_pass_stage1, stage2=p.second_pass_stage2, stage1_floor=0.0)
+        again = _match_all(retry, names, frags, cache_of, p2, workers, threads, keep_per_pair, "second pass")
+        fresh = dict(zip(retry, again))
+        cands = [c for pr, cs in zip(pairs, per_pair) for c in fresh.get(pr, cs)]
+        timings["second_pass"] = time.time() - t0
+        poses, groups, used, rejected = assemble(md, cands, p)
+        log.info("second pass: %d pairs rematched in %.1fs at stage1 %d / stage2 %d, %d accepted, %d groups",
+                 len(retry), timings["second_pass"], p2.stage1, p2.stage2, sum(c.accepted for c in cands),
+                 len([g for g in groups if len(g) > 1]))
 
     # 4. full-resolution refinement + outputs
     paths = {n: frags[n].path for n in names}

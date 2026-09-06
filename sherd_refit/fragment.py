@@ -21,7 +21,8 @@ log = logging.getLogger("sherd_refit")
 MESH_EXT = (".ply", ".obj", ".stl", ".off")
 FACES_PER_T2 = 600      # working-mesh faces per t^2 of surface (~12 edges across the wall)
 MIN_FACES = 50000
-CACHE_VERSION = 7       # bump when preprocessing/segmentation changes so stale caches are recomputed
+THICK_FACES = 300000    # faces that cast a wall-thickness ray; a fixed stride picks them above this
+CACHE_VERSION = 8       # bump when preprocessing/segmentation changes so stale caches are recomputed
 
 
 def load_mesh(path: str) -> o3d.geometry.TriangleMesh:
@@ -51,8 +52,8 @@ def _hist_mode(d):
     return float(0.5 * (edges[k] + edges[k + 1]))
 
 
-def estimate_thickness(scene, C, FN, rng, n=20000):
-    """Wall thickness from rays cast inward from random faces, as (robust estimate, plain mode).
+def estimate_thickness(scene, C, FN, n=THICK_FACES):
+    """Wall thickness from rays cast inward from every face, as (robust estimate, plain mode).
 
     A hit counts only when the face it lands on looks back along the ray (its normal points the
     way the ray travels, cos > 0.7): that is the opposite wall seen from behind, and it drops the
@@ -73,8 +74,22 @@ def estimate_thickness(scene, C, FN, rng, n=20000):
 
     Both numbers are returned; the report prints the unfiltered mode beside the estimate so that a
     fragment whose two values disagree is visible.
+
+    The rays used to come from a random sample of 20 000 faces, and that sample was the estimate's
+    largest error term rather than its cost saving: with nothing but the seed changed the estimate
+    moved by up to 6.8 % on `Pot_A_Piece_04_Mesh` and 5.8 % on `frag_019`, because a fragment whose
+    filtered distances form a plateau rather than a peak puts several near-equal bins in contention
+    and `argmax` picks by a count that another sample reorders.  `t` is the unit of every threshold
+    in `Scales`, so that spread moved nine thresholds for every pair the fragment took part in.
+    The estimator is now deterministic: every face of the original largest component casts a ray
+    when there are at most `n` of them, and a fixed stride `ceil(n_faces / n)` picks the faces
+    otherwise, which keeps the cost bounded and the choice independent of any generator.  Nothing
+    else about the estimate changed -- the same origin offset, the same `> 0.7` filter, the same
+    60-bin histogram over `(0, p90]`, the same unweighted per-face mode.
     """
-    idx = rng.choice(len(C), min(n, len(C)), replace=False)
+    n_faces = len(C)
+    stride = max(1, -(-n_faces // max(n, 1)))            # ceil(n_faces / n), 1 when they all fit
+    idx = np.arange(0, n_faces, stride)
     dvec = -FN[idx]
     rays = np.concatenate([C[idx] + dvec * 1e-3, dvec], 1).astype(np.float32)
     ans = scene.cast_rays(o3d.core.Tensor(rays))
@@ -268,12 +283,14 @@ class Fragment:
     @classmethod
     def from_mesh_file(cls, path: str, target_faces: int = 200000, seed: int = 0, name: str | None = None,
                        seg: SegParams | None = None) -> "Fragment":
+        """Preprocess one mesh file.  `seed` is accepted and unused: preprocessing draws nothing at
+        random since `estimate_thickness` became deterministic, and the match arrays carry their own
+        seed (`md_params`)."""
         t0 = time.time()
         name = name or os.path.splitext(os.path.basename(path))[0]
         m = load_mesh(path)
         n_orig_v, n_orig_f = len(m.vertices), len(m.triangles)
         m = largest_component(m)
-        rng = np.random.default_rng(seed)
         # wall thickness from the original mesh, then a face budget that keeps ~12 edges across the wall
         V0 = np.asarray(m.vertices, dtype=np.float64); F0 = np.asarray(m.triangles, dtype=np.int64)
         fixture.put("load.V0", V0, "orig")
@@ -283,7 +300,7 @@ class Fragment:
         FN0, A0, C0 = face_geometry(V0, F0)
         scene0 = o3d.t.geometry.RaycastingScene()
         scene0.add_triangles(o3d.t.geometry.TriangleMesh(o3d.core.Tensor(V0.astype(np.float32)), o3d.core.Tensor(F0.astype(np.uint32))))
-        thick, thick_mode = estimate_thickness(scene0, C0, FN0, rng)
+        thick, thick_mode = estimate_thickness(scene0, C0, FN0)
         if thick is None or thick <= 0:
             thick = float(np.min(m.get_oriented_bounding_box().extent) / 10.0)
             log.warning("%s: thickness estimate failed, using OBB fallback %.2f", name, thick)

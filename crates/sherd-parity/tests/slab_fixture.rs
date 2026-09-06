@@ -34,6 +34,15 @@ fn the_manifest_describes_the_slab_pair() {
     assert!(manifest.files.contains_key("fragments/pieceA/mesh.V.npy"));
     assert!(manifest.files.contains_key("outputs/transforms.json"));
     assert!(manifest.total_size() > 0);
+
+    // Task T1's two additions to the dump, without which the injected samples stage silently
+    // drops the columns of defect D6 and the stage's own test would stop asserting them.
+    for name in ["pieceA", "pieceB"] {
+        for array in ["md.S_u.npy", "md.S_v.npy", "md.Pf_u.npy", "md.Pf_v.npy"] {
+            let path = format!("fragments/{name}/{array}");
+            assert!(manifest.files.contains_key(&path), "{path} is missing from the dump");
+        }
+    }
 }
 
 #[test]

@@ -3,9 +3,9 @@
  "faces": 35900,
  "n_boundary": 0,
  "res": 2.2784501327205304,
- "target": 54483,
- "thick": 30.161022186279297,
- "thick_mode": 29.864871978759766,
+ "target": 54603,
+ "thick": 30.127979278564453,
+ "thick_mode": 29.82595443725586,
  "vertices": 17952,
  "watertight": true
 }

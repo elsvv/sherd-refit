@@ -276,7 +276,7 @@ R §13's pair gates, not with a widened tolerance.
 |---|---|
 | `cargo fmt --all --check` | **ok** |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | **ok** |
-| `cargo test --workspace --locked` | **ok**, 194 passed, 1 ignored |
+| `cargo test --workspace --locked` | **ok**, 207 passed, 1 ignored (206 before T1) |
 | `pytest -q` (sink off) | **ok**, 58 passed |
 | two `segment` runs byte-identical | **ok**, `cmp` clean on all four terracotta caches |
 | `--threads 1` vs default byte-identical | **ok** |

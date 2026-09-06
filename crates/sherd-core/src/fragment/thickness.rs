@@ -331,11 +331,26 @@ pub fn percentile90(x: &[f32]) -> f32 {
 /// `min(extent of the PCA oriented bounding box) / 10` — the reference's fallback when the rays
 /// fail (R §3.2).
 ///
-/// **Known deviation.** Open3D's `get_oriented_bounding_box()` runs its PCA over the vertices of
-/// the *convex hull*, not over every vertex; measured on a blob with a thin arm the two differ by
-/// about 1 % in each extent. Reproducing it exactly would need a convex hull, which nothing else
-/// in the pipeline wants, so this function does the PCA over all vertices and the difference is
-/// recorded here rather than hidden.
+/// Open3D's `get_oriented_bounding_box()` is `OrientedBoundingBox::CreateFromPoints`: it takes the
+/// **convex hull** of the points, runs the PCA over the *hull's* vertices, and measures the
+/// extents along those axes. This does the same. The extents themselves may be taken over the hull
+/// or over every point — the hull contains every extreme point, so the two agree — but the axes
+/// may not: a PCA is a weighted average of positions, and the interior of a scan is not
+/// distributed like its hull.
+///
+/// **Finding F6 of the phase-1a verification, and the size of it was measured rather than
+/// guessed.** Against Open3D 0.19: on `fixtures/slab/input/pieceA.ply` the hull PCA gives 42.0619
+/// where a PCA over all 22 552 vertices gives 40.8516 (3.0 % low); on `pieceB.ply` 41.7494 against
+/// 38.3579 (8.1 % low); on a terracotta scan 93.803 against 102.075 (8.8 % high). The earlier
+/// "about 1 %" recorded here was optimistic, and since `t` is the unit of every threshold in
+/// R §1.2, an 8 % error would move all of them by 8 %.
+///
+/// The hull comes from `parry3d`, which computes it in `f32`; the PCA and the projections are
+/// `f64`, over the `f32`-rounded hull vertices. Measured cost of that narrowing against Open3D's
+/// `f64` Qhull: 1.6e-9 relative on `pieceA`, 1.0e-8 on `pieceB` — five orders of magnitude below
+/// what it buys. When no hull can be built — fewer than three points, or a degenerate set that
+/// leaves `try_convex_hull` with nothing — the PCA falls back to every vertex, which is the old
+/// behaviour and the best available.
 ///
 /// The path is unreachable on the benchmark: the fragment with the fewest valid hits of the 68 in
 /// the parity fixtures has 7 154 of 20 000, against a threshold of 100.
@@ -343,20 +358,52 @@ pub fn obb_min_extent(v: &[[f64; 3]]) -> f64 {
     if v.is_empty() {
         return 0.0;
     }
-    #[allow(clippy::cast_precision_loss, reason = "vertex counts are far below 2^53")]
-    let n = v.len() as f64;
-    let mut mean = [0.0_f64; 3];
+    let axes = principal_axes(&hull_or_all(v));
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
     for p in v {
+        for k in 0..3 {
+            let proj = p[0] * axes[(0, k)] + p[1] * axes[(1, k)] + p[2] * axes[(2, k)];
+            lo[k] = lo[k].min(proj);
+            hi[k] = hi[k].max(proj);
+        }
+    }
+    (0..3).map(|k| hi[k] - lo[k]).fold(f64::INFINITY, f64::min)
+}
+
+/// The vertices of the convex hull of `v`, or `v` itself when no hull can be built.
+#[allow(clippy::cast_possible_truncation, reason = "parry3d's hull is f32 by construction")]
+fn hull_or_all(v: &[[f64; 3]]) -> Vec<[f64; 3]> {
+    let points: Vec<Vector> =
+        v.iter().map(|p| Vector::new(p[0] as f32, p[1] as f32, p[2] as f32)).collect();
+    match parry3d::transformation::try_convex_hull(&points) {
+        Ok((hull, _)) if hull.len() >= 3 => {
+            hull.iter().map(|p| [f64::from(p.x), f64::from(p.y), f64::from(p.z)]).collect()
+        }
+        _ => v.to_vec(),
+    }
+}
+
+/// The eigenvectors of the covariance of `p`, as the columns of a 3×3 matrix — Open3D's
+/// `ComputeMeanAndCovariance` followed by Eigen's `SelfAdjointEigenSolver`.
+///
+/// The extents an OBB reports do not depend on the mean (a shift cancels in `max − min`), only on
+/// these axes, so the caller projects its own points and never sees the mean.
+fn principal_axes(p: &[[f64; 3]]) -> Matrix3<f64> {
+    #[allow(clippy::cast_precision_loss, reason = "vertex counts are far below 2^53")]
+    let n = p.len() as f64;
+    let mut mean = [0.0_f64; 3];
+    for q in p {
         for c in 0..3 {
-            mean[c] += p[c];
+            mean[c] += q[c];
         }
     }
     for m in &mut mean {
         *m /= n;
     }
     let mut cov = Matrix3::<f64>::zeros();
-    for p in v {
-        let d = [p[0] - mean[0], p[1] - mean[1], p[2] - mean[2]];
+    for q in p {
+        let d = [q[0] - mean[0], q[1] - mean[1], q[2] - mean[2]];
         for r in 0..3 {
             for c in 0..3 {
                 cov[(r, c)] += d[r] * d[c];
@@ -364,18 +411,7 @@ pub fn obb_min_extent(v: &[[f64; 3]]) -> f64 {
         }
     }
     cov /= n;
-    let axes = cov.symmetric_eigen().eigenvectors;
-    let mut lo = [f64::INFINITY; 3];
-    let mut hi = [f64::NEG_INFINITY; 3];
-    for p in v {
-        let d = [p[0] - mean[0], p[1] - mean[1], p[2] - mean[2]];
-        for k in 0..3 {
-            let proj = d[0] * axes[(0, k)] + d[1] * axes[(1, k)] + d[2] * axes[(2, k)];
-            lo[k] = lo[k].min(proj);
-            hi[k] = hi[k].max(proj);
-        }
-    }
-    (0..3).map(|k| hi[k] - lo[k]).fold(f64::INFINITY, f64::min)
+    cov.symmetric_eigen().eigenvectors
 }
 
 /// `rng.choice(n_faces, min(n, n_faces), replace=False)`: distinct face indices, uniformly.
@@ -609,6 +645,29 @@ mod tests {
             m.v.iter().map(|p| [c * p[0] - s * p[1], s * p[0] + c * p[1], p[2]]).collect();
         assert!((obb_min_extent(&rotated) / 10.0 - 0.2).abs() < 1e-9);
         assert_eq!(obb_min_extent(&[]), 0.0);
+        // Three points cannot bound a volume; the hull is refused and the PCA runs over them.
+        assert_eq!(obb_min_extent(&[[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]), 0.0);
+    }
+
+    /// The OBB fallback against Open3D's own `get_oriented_bounding_box()` (finding F6).
+    ///
+    /// The two expectations are `min(extent)` as Open3D 0.19 reports it for the two committed slab
+    /// pieces, the meshes every checkout has. They are not round numbers and they are not this
+    /// port's arithmetic: a PCA over *all* the vertices gives 40.8516 and 38.3579 instead, 3.0 %
+    /// and 8.1 % out, which is what this test exists to catch. What is left — 1.6e-9 and 1.0e-8
+    /// relative — is `parry3d`'s `f32` hull against Open3D's `f64` Qhull.
+    #[test]
+    fn the_obb_fallback_is_open3ds_oriented_bounding_box() {
+        for (name, open3d) in [("pieceA", 42.061_872_931_582_74), ("pieceB", 41.749_393_252_514_84)]
+        {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/slab/input")
+                .join(format!("{name}.ply"));
+            let mesh = crate::io::read_mesh(&path).expect("the slab piece reads");
+            let got = obb_min_extent(&mesh.v);
+            let rel = (got - open3d).abs() / open3d;
+            assert!(rel < 1e-7, "{name}: {got} against Open3D's {open3d} ({rel:.3e} relative)");
+        }
     }
 
     #[test]

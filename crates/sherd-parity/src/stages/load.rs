@@ -22,7 +22,8 @@
 //! `F0` is compared exactly: an index is an integer and there is nothing to round.
 //!
 //! A dump written at the `slim` or `min` level does not carry `load.V0`; the counts are still
-//! compared and the array comparison is skipped.
+//! compared and the array comparison is skipped, with a reason that names the consequence — the
+//! injected thickness stage skips that fragment too, because nothing pins `(V0, F0)` any more.
 
 use sherd_core::error::Result;
 use sherd_core::io;
@@ -83,8 +84,16 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
         ));
 
         // The arrays themselves, when the dump carries them.
+        // F3: this is the comparison that pins the port's `(V0, F0)` to the reference's, and
+        // every injected comparison downstream rests on it. When the dump does not carry the
+        // arrays the skip has to say so, because the consequence travels: the injected thickness
+        // stage skips the same fragment rather than quietly running on arrays of its own.
         if !fragment.has("load.V0.npy") {
-            report.skip(&fragment.name, "no load.V0 in the dump (level slim or min)");
+            report.skip(
+                &fragment.name,
+                "no load.V0 in the dump (level slim or min): (V0, F0) is not pinned, and the \
+                 injected thickness stage skips this fragment for the same reason",
+            );
             continue;
         }
         let v0 = npy::read_points(fragment.file("load.V0.npy"))?;

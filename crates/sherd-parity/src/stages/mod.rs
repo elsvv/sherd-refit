@@ -63,6 +63,29 @@ impl std::fmt::Display for Stage {
 /// A cleaned mesh as R §3.1 leaves it: `(V0, F0)`.
 pub type Original = (Vec<[f64; 3]>, Vec<[u32; 3]>);
 
+/// Where a [`FragmentFixture::original`] came from — the distinction finding F3 asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OriginalSource {
+    /// `load.V0` / `load.F0` of the dump: the reference's own arrays.
+    Dump,
+    /// Read from the source file by this port, because the dump does not carry them.
+    Recomputed,
+}
+
+impl OriginalSource {
+    /// Why an injected comparison cannot be made from arrays of this provenance, or `None` when
+    /// it can.
+    pub fn injected_skip_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Dump => None,
+            Self::Recomputed => Some(
+                "no load.V0 in the dump (level slim or min): injected mode would run on the \
+                 port's own (V0, F0), which is native mode under another name",
+            ),
+        }
+    }
+}
+
 /// One fragment of a dump: where its stage boundaries are, and which file it was made from.
 #[derive(Clone, Debug)]
 pub struct FragmentFixture {
@@ -86,21 +109,39 @@ impl FragmentFixture {
         self.file(name).is_file()
     }
 
-    /// R §3.1's `(V0, F0)`: the cleaned largest component the rest of R §3 is built on.
+    /// R §3.1's `(V0, F0)` as the *dump* holds them, or `None` at the `slim` and `min` levels,
+    /// which do not carry them.
     ///
-    /// Taken from the dump when it is there (`full` level), and otherwise recomputed from the
-    /// source file — which is legitimate for both modes, because the `load` stage compares the
-    /// two and the comparison is exact.
-    pub fn original(&self) -> Result<Option<Original>> {
-        if self.has("load.V0.npy") && self.has("load.F0.npy") {
-            let v = npy::read_points(self.file("load.V0.npy"))?;
-            let f = npy::read_triangles(self.file("load.F0.npy"))?;
-            return Ok(Some((v, f)));
+    /// This is the only source an injected comparison may use. Injected means "the Rust stage ran
+    /// on the Python stage's own inputs" (D §10.2); arrays the port computed itself are not that,
+    /// however likely they are to be equal.
+    pub fn dumped_original(&self) -> Result<Option<Original>> {
+        if !self.has("load.V0.npy") || !self.has("load.F0.npy") {
+            return Ok(None);
+        }
+        let v = npy::read_points(self.file("load.V0.npy"))?;
+        let f = npy::read_triangles(self.file("load.F0.npy"))?;
+        Ok(Some((v, f)))
+    }
+
+    /// R §3.1's `(V0, F0)`: the cleaned largest component the rest of R §3 is built on, from the
+    /// dump when it is there and from the source file otherwise, saying **which**.
+    ///
+    /// Finding F3 of the phase-1a verification: the recomputation used to be silent, and was
+    /// justified by "the `load` stage compares the two and the comparison is exact" — which is
+    /// true only at the `full` level. At `slim` and `min` the load stage has no `load.V0` to
+    /// compare against and skips that check, so on a `slim` dump the fallback was feeding the
+    /// port's own arrays into an *injected* comparison with nothing pinning them to the
+    /// reference's. Callers now decide: native mode may recompute (it starts from the file
+    /// anyway), injected mode may not.
+    pub fn original(&self) -> Result<Option<(Original, OriginalSource)>> {
+        if let Some(dumped) = self.dumped_original()? {
+            return Ok(Some((dumped, OriginalSource::Dump)));
         }
         let Some(source) = &self.source else { return Ok(None) };
         let mut mesh = sherd_core::io::load_mesh(source)?;
         sherd_core::mesh::components::largest_component(&mut mesh);
-        Ok(Some((mesh.v, mesh.f)))
+        Ok(Some(((mesh.v, mesh.f), OriginalSource::Recomputed)))
     }
 
     /// The working mesh the reference produced (`mesh.V`, `mesh.F`).
@@ -123,7 +164,9 @@ pub struct Collection {
     pub manifest: Manifest,
     /// The directory holding the source meshes, when the caller gave one.
     pub input: Option<PathBuf>,
-    /// The face cap the reference ran with (`collection.target_faces`).
+    /// The face cap the reference ran with, from
+    /// [`Collection::face_cap`](crate::manifest::Collection::face_cap) — so
+    /// [`NO_CAP`](crate::manifest::NO_CAP) when the manifest names none.
     pub target_faces: usize,
     /// The fragments, in collection order (R §2).
     pub fragments: Vec<FragmentFixture>,
@@ -157,7 +200,7 @@ impl Collection {
                 FragmentFixture { name: name.clone(), dir: dir.fragment_dir(name), source }
             })
             .collect();
-        let target_faces = usize::try_from(manifest.collection.target_faces).unwrap_or(200_000);
+        let target_faces = manifest.collection.face_cap();
         Ok(Self { dir, manifest, input: input.map(Path::to_path_buf), target_faces, fragments })
     }
 
@@ -178,7 +221,7 @@ impl Collection {
 
 #[cfg(test)]
 mod tests {
-    use super::{Collection, Stage};
+    use super::{Collection, OriginalSource, Stage};
     use crate::layout::FixtureDir;
     use std::path::{Path, PathBuf};
 
@@ -190,6 +233,45 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/slab/input")
     }
 
+    /// A throwaway dump built from the slab's: its manifest, optionally edited, plus only the
+    /// named per-fragment files.
+    ///
+    /// This is how a test asks what the harness does when a dump does *not* carry something —
+    /// a `slim` level with no `load.V0`, a manifest with no `target_faces` — without needing a
+    /// second fixture in the repository.
+    pub(crate) fn partial_slab_dump(
+        tag: &str,
+        keep: &[&str],
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sherd-parity-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch dump directory");
+
+        let text = std::fs::read_to_string(slab_dump().join("manifest.json"))
+            .expect("the committed manifest reads");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&text).expect("the manifest is JSON");
+        edit(&mut manifest);
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_string(&manifest).expect("the manifest serialises"),
+        )
+        .expect("the manifest is written");
+
+        for name in ["pieceA", "pieceB"] {
+            let out = dir.join("fragments").join(name);
+            std::fs::create_dir_all(&out).expect("a fragment directory");
+            for file in keep {
+                let from = slab_dump().join("fragments").join(name).join(file);
+                if from.is_file() {
+                    std::fs::copy(&from, out.join(file)).expect("the fixture file copies");
+                }
+            }
+        }
+        dir
+    }
+
     #[test]
     fn stage_names_round_trip() {
         for stage in Stage::ALL {
@@ -197,6 +279,74 @@ mod tests {
             assert_eq!(stage.to_string(), stage.as_str());
         }
         assert_eq!(Stage::parse("segmentation"), None, "phase 1b, not this build");
+    }
+
+    /// Finding F2: `target_faces = 0` and a manifest with no `target_faces` key are the same
+    /// thing, and that thing is R §3.3's adaptive budget with no cap on it.
+    ///
+    /// The old reading handed the 0 straight to `face_budget`, where numpy's floor-first clip made
+    /// it `clip(raw, 50000, 0) == 0` and decimated every fragment to nothing: 6 of the slab's 24
+    /// native comparisons failed at deviation 1.0. The native stage below is the proof that the
+    /// new reading is not merely different but right — on this collection the adaptive budget is
+    /// under 200 000 anyway, so removing the cap changes no answer.
+    #[test]
+    fn a_manifest_without_a_face_cap_means_the_adaptive_budget() {
+        use crate::manifest::NO_CAP;
+
+        let dir = partial_slab_dump("no-cap", &["mesh.stats.json"], |m| {
+            m["collection"]
+                .as_object_mut()
+                .expect("collection is an object")
+                .remove("target_faces");
+        });
+        let c = Collection::open(FixtureDir::new(&dir), Some(&slab_input())).unwrap();
+        assert_eq!(c.target_faces, NO_CAP, "an absent key is the sentinel, not 0 and not 200 000");
+
+        let r = c.run(Stage::WorkingMesh, crate::report::Mode::Native).unwrap();
+        let failures: Vec<String> = r.failures().map(crate::report::Check::line).collect();
+        assert_eq!(r.status(), "PASS", "{failures:?}");
+        assert_eq!(r.checks.len(), 8);
+
+        // And an explicit 0 reads the same way as an absent key.
+        let dir = partial_slab_dump("zero-cap", &[], |m| {
+            m["collection"]["target_faces"] = serde_json::json!(0);
+        });
+        let c = Collection::open(FixtureDir::new(&dir), None).unwrap();
+        assert_eq!(c.target_faces, NO_CAP);
+    }
+
+    /// Finding F3: a dump that does not carry `load.V0` cannot support an injected comparison of
+    /// anything derived from it, and the harness says so instead of recomputing the arrays.
+    #[test]
+    fn injected_mode_skips_a_fragment_whose_v0_is_not_in_the_dump() {
+        let dir = partial_slab_dump(
+            "slim",
+            &["thick.t.json", "thick.thick_mode.json", "mesh.stats.json"],
+            |m| m["level"] = serde_json::json!("slim"),
+        );
+        let c = Collection::open(FixtureDir::new(&dir), Some(&slab_input())).unwrap();
+        // The arrays would have been recomputed happily, which is the trap.
+        assert_eq!(
+            c.fragments[0].original().unwrap().map(|(_, source)| source),
+            Some(OriginalSource::Recomputed)
+        );
+        assert!(c.fragments[0].dumped_original().unwrap().is_none());
+
+        let r = c.run(Stage::Thickness, crate::report::Mode::Injected).unwrap();
+        assert!(r.checks.is_empty(), "nothing may be compared without the reference's own V0");
+        assert_eq!(r.skips.len(), 2);
+        assert!(r.skips[0].reason.contains("slim or min"), "{}", r.skips[0].reason);
+        assert_eq!(r.status(), "SKIP");
+
+        // Native mode never refuses for this reason: it starts from the file by definition. (This
+        // partial dump has no `thick.t_hit` either, so it skips for that instead — a different
+        // sentence, which is the point.)
+        let r = c.run(Stage::Thickness, crate::report::Mode::Native).unwrap();
+        assert!(
+            r.skips.iter().all(|s| !s.reason.contains("slim or min")),
+            "{:?}",
+            r.skips.iter().map(|s| s.reason.as_str()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -212,7 +362,8 @@ mod tests {
         // Without an input directory the fixture still resolves; only native mode loses.
         let c = Collection::open(FixtureDir::new(slab_dump()), None).unwrap();
         assert!(c.fragments[1].source.is_none());
-        let (v, f) = c.fragments[1].original().unwrap().expect("the slab dump is `full`");
+        let ((v, f), source) = c.fragments[1].original().unwrap().expect("the slab dump is `full`");
+        assert_eq!(source, OriginalSource::Dump);
         assert!(!v.is_empty() && !f.is_empty());
         assert!(c.fragments[1].working().unwrap().is_some());
     }

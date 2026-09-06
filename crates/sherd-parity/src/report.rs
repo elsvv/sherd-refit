@@ -90,6 +90,16 @@ pub struct Check {
 
 impl Check {
     /// A relative comparison: `|a − b| / |b|` against `tolerance`.
+    ///
+    /// A reference of exactly zero has no relative scale, so the check degrades to the absolute
+    /// difference **and says so**: the unit becomes [`Absolute`](Unit::Absolute), so the printed
+    /// row reads `abs` and nobody reads a millimetre as a per cent (finding F12 of the phase-1a
+    /// verification — the old code kept the `rel` label on an absolute number). The tolerance is
+    /// the caller's either way, which is conservative: a fraction like 0.05 is a far *tighter*
+    /// bound in the quantity's own units than it is as a fraction of anything larger than 1.
+    /// Nothing in R produces a zero `res`, area, `t` or face count, so the branch is unreachable
+    /// on real data and exists so that a future stage with a genuinely zero reference fails
+    /// loudly rather than dividing by it.
     pub fn relative(
         scope: impl Into<String>,
         quantity: &'static str,
@@ -97,20 +107,12 @@ impl Check {
         reference: f64,
         tolerance: f64,
     ) -> Self {
-        let deviation = if reference == 0.0 {
-            (measured - reference).abs()
+        let (deviation, unit) = if reference == 0.0 {
+            ((measured - reference).abs(), Unit::Absolute)
         } else {
-            (measured - reference).abs() / reference.abs()
+            ((measured - reference).abs() / reference.abs(), Unit::Relative)
         };
-        Self {
-            scope: scope.into(),
-            quantity,
-            measured,
-            reference,
-            deviation,
-            tolerance,
-            unit: Unit::Relative,
-        }
+        Self { scope: scope.into(), quantity, measured, reference, deviation, tolerance, unit }
     }
 
     /// An absolute comparison in the quantity's own units.
@@ -384,9 +386,16 @@ mod tests {
         let c = Check::relative("frag", "res", 1.2, 1.0, 0.10);
         assert!(!c.passed());
         assert!(c.line().contains("FAIL"));
-        // A zero reference falls back to the absolute difference rather than dividing by zero.
+        // A zero reference falls back to the absolute difference rather than dividing by zero —
+        // and changes its unit with it, so the row does not print a millimetre as a per cent
+        // (finding F12).
         let c = Check::relative("frag", "res", 0.5, 0.0, 1.0);
         assert!(c.deviation.is_finite() && c.passed());
+        assert!((c.deviation - 0.5).abs() < 1e-15);
+        assert_eq!(c.unit, Unit::Absolute);
+        assert!(c.line().contains("abs"), "{}", c.line());
+        // Every other reference keeps the relative unit.
+        assert_eq!(Check::relative("frag", "res", 0.5, 1e-30, 1.0).unit, Unit::Relative);
     }
 
     #[test]

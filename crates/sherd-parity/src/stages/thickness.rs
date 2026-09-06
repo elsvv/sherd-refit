@@ -56,11 +56,19 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
         let ref_mode = npy::read_scalar(fragment.file("thick.thick_mode.json"))?;
 
         // The reference's own rays, and the mesh they were cast on, are what the bin width and
-        // the injected comparison both need.
-        let Some((v0, f0)) = fragment.original()? else {
+        // the injected comparison both need. Injected mode insists the mesh come from the dump
+        // (F3): the normals of `(V0, F0)` are what R §3.2's `> 0.7` filter tests, so a recomputed
+        // `(V0, F0)` would make the "injected" comparison partly the port's own.
+        let Some(((v0, f0), provenance)) = fragment.original()? else {
             report.skip(&fragment.name, "neither load.V0 nor a source file");
             continue;
         };
+        if mode == Mode::Injected
+            && let Some(reason) = provenance.injected_skip_reason()
+        {
+            report.skip(&fragment.name, reason);
+            continue;
+        }
         if !fragment.has("thick.t_hit.npy") {
             report.skip(&fragment.name, "no thick.t_hit in the dump");
             continue;

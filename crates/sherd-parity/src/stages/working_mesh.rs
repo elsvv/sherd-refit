@@ -71,43 +71,46 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
                     let ref_target = npy::field_u64(&target, "target", &target_file)?;
                     let ref_cap = npy::field_u64(&target, "target_faces", &target_file)?;
                     let ref_t = npy::read_scalar(fragment.file("thick.t.json"))?;
-                    let budget =
-                        face_budget(ref_area0, ref_t, usize::try_from(ref_cap).unwrap_or(0));
+                    // The reference's own recorded cap, reproduced exactly — including a 0, which
+                    // is what the reference would itself have clipped to. A cap too wide for a
+                    // usize cannot bind, so saturating is the right reading of it.
+                    let budget = face_budget(
+                        ref_area0,
+                        ref_t,
+                        usize::try_from(ref_cap).unwrap_or(usize::MAX),
+                    );
                     report.push(Check::count(name, "face budget", budget as u64, ref_target));
-                    if let Some((v0, f0)) = fragment.original()? {
-                        if fragment.has("load.V0.npy") {
-                            let area0 = face_geometry(&v0, &f0).total_area();
-                            report.push(Check::exact(name, "area0", area0, ref_area0));
-                        }
+                    // `dumped_original`, never the recomputing `original` (F3): both checks below
+                    // are injected ones and are only worth making on the reference's own arrays.
+                    if let Some((v0, f0)) = fragment.dumped_original()? {
+                        let area0 = face_geometry(&v0, &f0).total_area();
+                        report.push(Check::exact(name, "area0", area0, ref_area0));
                         // Taubin, where the reference's working mesh is exactly Taubin(V0, F0).
                         let faces0 = npy::field_u64(&target, "faces0", &target_file)?;
                         if faces0 <= ref_target
-                            && fragment.has("load.V0.npy")
                             && let Some(mesh) = fragment.working()?
                         {
-                            {
-                                let mut smoothed = sherd_core::mesh::Mesh::new(v0, f0);
-                                taubin(&mut smoothed);
-                                let worst = if smoothed.v.len() == mesh.v.len() {
-                                    smoothed
-                                        .v
-                                        .iter()
-                                        .zip(&mesh.v)
-                                        .flat_map(|(a, b)| (0..3).map(move |c| (a[c] - b[c]).abs()))
-                                        .fold(0.0_f64, f64::max)
-                                } else {
-                                    f64::INFINITY
-                                };
-                                let mut check = Check::absolute(
-                                    name,
-                                    "taubin",
-                                    worst,
-                                    0.0,
-                                    INJECTED_TAUBIN_RES * ref_res,
-                                );
-                                check.unit = Unit::Absolute;
-                                report.push(check);
-                            }
+                            let mut smoothed = sherd_core::mesh::Mesh::new(v0, f0);
+                            taubin(&mut smoothed);
+                            let worst = if smoothed.v.len() == mesh.v.len() {
+                                smoothed
+                                    .v
+                                    .iter()
+                                    .zip(&mesh.v)
+                                    .flat_map(|(a, b)| (0..3).map(move |c| (a[c] - b[c]).abs()))
+                                    .fold(0.0_f64, f64::max)
+                            } else {
+                                f64::INFINITY
+                            };
+                            let mut check = Check::absolute(
+                                name,
+                                "taubin",
+                                worst,
+                                0.0,
+                                INJECTED_TAUBIN_RES * ref_res,
+                            );
+                            check.unit = Unit::Absolute;
+                            report.push(check);
                         }
                     }
                 }

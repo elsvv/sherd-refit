@@ -559,10 +559,10 @@ Sizes: terracotta ≈ 240 MB, pot A ≈ 250 MB, synthetic 20 ≈ 850 MB at level
 table is the measured one and this line is the order of magnitude. For `mixed_all` and
 `synthetic_170` only `mesh`, `seg.frac_final`, `md.*`, `result.candidates.json` and the assembly
 are dumped (≈ 0.6 GB). Fixtures are stored outside git (§10.5) and regenerated whenever the
-reference changes; the current set and the committed `fixtures/slab/dump`
-come from the commit that added step C1's two NMS walk orders — carrying R §3.2's deterministic ray
-set (task T1) and the sample uniforms of §10.2's D6 columns with it — and each `manifest.json`
-records which.
+reference changes; the committed `fixtures/slab/dump` comes from
+**`9cbcbbc`** — step C1's two NMS walk orders, carrying R §3.2's deterministic ray set (task T1) and
+the sample uniforms of §10.2's D6 columns with it — and the seven `output/fixtures` sets from the
+commit that added it; each `manifest.json` records which.
 
 **`nms1.order` and `nms2.order` are inputs, not outputs, and step C1 added them for that reason.**
 R §5.3's suppression is a greedy walk over `np.argsort(score)[::-1]`, and numpy's `argsort` is an

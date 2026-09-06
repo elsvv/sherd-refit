@@ -87,8 +87,9 @@ numpy's sort, not the port's greedy loop.
 
 `_match_pair` now hoists the expression it already evaluated and the sink writes it as
 `nms1.order` (and `nms2.order`, which step C2 will need). Nothing the reference computes changes:
-re-dumping the slab from the same `sherd_refit/` reproduced all 178 previous files byte for byte,
-and only `manifest.json` and the two new arrays differ. With the order injected, the `nms` row is
+re-dumping the slab from the same `sherd_refit/` reproduced all **177** arrays and JSON files of
+the previous dump byte for byte, and only `manifest.json` differs — in the commit it names and in
+the two new arrays of its file list. With the order injected, the `nms` row is
 exact — the port keeps the reference's 250 hypotheses, in the reference's order, on all 358 pairs.
 
 All eight fixture sets were regenerated for it (`tools/dump_fixtures.py`, ≈ 20 min at

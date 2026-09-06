@@ -59,7 +59,7 @@
   "target_faces": 200000,
   "write_meshes": false
  },
- "commit": "f0da04191814cb8b2b2d24aa41180acd3a69e137",
+ "commit": "9cbcbbc53e0069620efc7a65ec95344783d8ba33",
  "dirty": false,
  "files": {
   "assembly/groups.json": {
@@ -1261,6 +1261,14 @@
    ],
    "size": 2128
   },
+  "pairs/pieceA__pieceB/nms1.order.npy": {
+   "dtype": "int64",
+   "sha256": "60296271aed03bb8d2cd2e9452a0536dad6566b18a6600e20372a27672aa3037",
+   "shape": [
+    5000
+   ],
+   "size": 40128
+  },
   "pairs/pieceA__pieceB/nms2.kept.npy": {
    "dtype": "int64",
    "sha256": "9edb6b94a7209394851d920194be84724c9ca938c4560bf431aaad34a49ad51b",
@@ -1268,6 +1276,14 @@
     10
    ],
    "size": 208
+  },
+  "pairs/pieceA__pieceB/nms2.order.npy": {
+   "dtype": "int64",
+   "sha256": "1edbc31e2a8d57ef36e5f2948dda0b95152b0c2e0be6d2e7835c98965c08d21f",
+   "shape": [
+    250
+   ],
+   "size": 2128
   },
   "pairs/pieceA__pieceB/result.candidates.json": {
    "sha256": "504e59bb329461e886076233a3df14b4c6b59efbcf18956b8427031adb413f2e",

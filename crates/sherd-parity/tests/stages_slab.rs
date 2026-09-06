@@ -32,23 +32,57 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
-/// Copies the part of the dump the three stages of this build read: the manifest and the
-/// per-fragment boundaries.
+/// Copies the part of the dump the stages of this build read: the manifest, the per-fragment
+/// boundaries (including the `md_t` rebuild a pair asks for) and the pair directories.
 fn copy_dump(to: &Path) {
     std::fs::create_dir_all(to).unwrap();
     std::fs::copy(slab_dump().join("manifest.json"), to.join("manifest.json")).unwrap();
-    let from = slab_dump().join("fragments");
-    for fragment in std::fs::read_dir(&from).unwrap() {
-        let fragment = fragment.unwrap().path();
-        let target = to.join("fragments").join(fragment.file_name().unwrap());
-        std::fs::create_dir_all(&target).unwrap();
-        for file in std::fs::read_dir(&fragment).unwrap() {
-            let file = file.unwrap().path();
-            if file.is_file() {
-                std::fs::copy(&file, target.join(file.file_name().unwrap())).unwrap();
-            }
+    for group in ["fragments", "pairs"] {
+        copy_tree(&slab_dump().join(group), &to.join(group));
+    }
+}
+
+/// Copies a directory tree, files and subdirectories alike.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let path = entry.unwrap().path();
+        let target = to.join(path.file_name().unwrap());
+        if path.is_dir() {
+            copy_tree(&path, &target);
+        } else {
+            std::fs::copy(&path, &target).unwrap();
         }
     }
+}
+
+/// Writes a one-dimensional `.npy` file — the perturbation tests below need to put a *changed*
+/// array back into a copied dump, and the reader under test is `npyz`, so writing the bytes by
+/// hand keeps the two sides independent.
+fn write_npy(path: &Path, descr: &str, count: usize, data: &[u8]) {
+    let mut header =
+        format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': ({count},), }}");
+    while (10 + header.len() + 1) % 64 != 0 {
+        header.push(' ');
+    }
+    header.push('\n');
+    let mut out = b"\x93NUMPY\x01\x00".to_vec();
+    out.extend_from_slice(&u16::try_from(header.len()).unwrap().to_le_bytes());
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(data);
+    std::fs::write(path, out).unwrap();
+}
+
+/// Replaces a `float64` array of a pair directory.
+fn write_f64(dump: &Path, file: &str, values: &[f64]) {
+    let data: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    write_npy(&dump.join("pairs/pieceA__pieceB").join(file), "<f8", values.len(), &data);
+}
+
+/// Replaces an `int64` array of a pair directory.
+fn write_i64(dump: &Path, file: &str, values: &[i64]) {
+    let data: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    write_npy(&dump.join("pairs/pieceA__pieceB").join(file), "<i8", values.len(), &data);
 }
 
 /// Rewrites one JSON field of one fragment's dump.
@@ -69,14 +103,23 @@ fn every_stage_passes_on_the_slab_in_both_modes() {
         let reports = collection.run_all(&Stage::ALL, mode).expect("the stages run");
         assert_eq!(reports.len(), Stage::ALL.len());
         for report in &reports {
+            // D §10.2 gives `coarse` and `nms` no native column: both are functions of a draw the
+            // port makes with its own generator (PMC-9), so natively there is nothing to compare
+            // and the stage says so instead of inventing a tolerance.
+            let no_native_column = mode == Mode::Native && matches!(report.stage, "coarse" | "nms");
             assert_eq!(
                 report.status(),
-                "PASS",
+                if no_native_column { "SKIP" } else { "PASS" },
                 "{} {mode}: {:?}",
                 report.stage,
                 report.failures().map(sherd_parity::Check::line).collect::<Vec<_>>()
             );
-            assert!(report.skips.is_empty(), "{} {mode} skipped something", report.stage);
+            assert_eq!(
+                report.skips.is_empty(),
+                !no_native_column,
+                "{} {mode} skipped something",
+                report.stage
+            );
         }
     }
 }
@@ -181,4 +224,79 @@ fn without_the_input_directory_native_mode_skips_and_injected_mode_does_not() {
         "{:?}",
         injected.iter().map(|r| (r.stage, r.status())).collect::<Vec<_>>()
     );
+}
+
+/// The three pair stages, each made to fail by exactly the thing it measures — the same standard
+/// `tools/compare_fixtures.py` is held to on the Python side.
+#[test]
+fn a_perturbed_pair_fails_the_stage_that_measures_it() {
+    let dump = scratch("pairs");
+    copy_dump(&dump);
+    let pair = dump.join("pairs/pieceA__pieceB");
+
+    // R §1.2 resolved differently: the `scales` row of the hypotheses stage is exact.
+    let mut scales: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(pair.join("scales.json")).unwrap()).unwrap();
+    scales["coarse"] = (scales["coarse"].as_f64().unwrap() * 1.05).into();
+    std::fs::write(pair.join("scales.json"), serde_json::to_vec_pretty(&scales).unwrap()).unwrap();
+
+    // Five frame pairs dropped off the end of the hypothesis set.
+    let pa = sherd_parity::npy::read_indices(pair.join("hyp.pa.npy")).unwrap();
+    let pb = sherd_parity::npy::read_indices(pair.join("hyp.pb.npy")).unwrap();
+    let keep = pa.len() - 5;
+    let cut = |v: &[u32]| v[..keep].iter().map(|&x| i64::from(x)).collect::<Vec<i64>>();
+    write_i64(&dump, "hyp.pa.npy", &cut(&pa));
+    write_i64(&dump, "hyp.pb.npy", &cut(&pb));
+
+    // One coarse score raised by 0.05 — three probe points, past D §10.2's one.
+    let mut cs = sherd_parity::npy::read_f64(pair.join("coarse.cs.npy")).unwrap();
+    cs.truncate(keep);
+    cs[7] += 0.05;
+    write_f64(&dump, "coarse.cs.npy", &cs);
+
+    // And one kept hypothesis replaced by another.
+    let mut kept = sherd_parity::npy::read_indices(pair.join("nms1.kept.npy"))
+        .unwrap()
+        .iter()
+        .map(|&x| i64::from(x))
+        .collect::<Vec<i64>>();
+    kept[3] += 1;
+    write_i64(&dump, "nms1.kept.npy", &kept);
+
+    let collection =
+        Collection::open(FixtureDir::new(&dump), Some(&slab_input())).expect("the copy opens");
+
+    let report = collection.run(Stage::Hypotheses, Mode::Injected).unwrap();
+    let failed: Vec<&str> = report.failures().map(|c| c.quantity).collect();
+    assert_eq!(report.status(), "FAIL");
+    assert!(failed.contains(&"scales"), "{failed:?}");
+    assert!(failed.contains(&"n_hyp") && failed.contains(&"pairs"), "{failed:?}");
+
+    let report = collection.run(Stage::Coarse, Mode::Injected).unwrap();
+    let failed: Vec<&str> = report.failures().map(|c| c.quantity).collect();
+    assert_eq!(report.status(), "FAIL");
+    assert!(failed.contains(&"cs") && failed.contains(&"cs exact"), "{failed:?}");
+
+    let report = collection.run(Stage::Nms, Mode::Injected).unwrap();
+    let failed: Vec<&str> = report.failures().map(|c| c.quantity).collect();
+    assert_eq!(report.status(), "FAIL");
+    assert!(failed.contains(&"kept"), "{failed:?}");
+    std::fs::remove_dir_all(&dump).ok();
+}
+
+/// A dump written before task C1 has no `nms1.order`, and the NMS stage refuses to compare rather
+/// than walking its own order and calling the difference a failure (PMC-6).
+#[test]
+fn without_the_walk_order_the_nms_stage_skips() {
+    let dump = scratch("no-order");
+    copy_dump(&dump);
+    std::fs::remove_file(dump.join("pairs/pieceA__pieceB/nms1.order.npy")).unwrap();
+
+    let collection = Collection::open(FixtureDir::new(&dump), None).expect("the copy opens");
+    let report = collection.run(Stage::Nms, Mode::Injected).unwrap();
+    assert_eq!(report.status(), "SKIP");
+    assert!(report.checks.is_empty());
+    assert_eq!(report.skips.len(), 1);
+    assert!(report.skips[0].reason.contains("nms1.order"), "{}", report.skips[0].reason);
+    std::fs::remove_dir_all(&dump).ok();
 }

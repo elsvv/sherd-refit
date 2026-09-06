@@ -883,6 +883,28 @@ random number. Consequences: `rng_pre` is gone from §10, `Fragment.from_mesh_fi
 accepted and unused, `CACHE_VERSION` moved 7 → 8 on the Python side and the fixture commit in this
 document's header moved to `fbfebca`. D §10.2's native tolerance on `t` returns to ±2 %.
 
+**2026-09-07, step C1 — the fixture sink dumps the two NMS walk orders (a dump-only change).**
+`_match_pair` now hoists `np.argsort(cs)[::-1][:5000]` and `np.argsort(s1)[::-1]` into variables
+and writes them as `nms1.order` and `nms2.order` (D §10.1). Nothing the reference computes changes
+— re-dumping the slab at the same `sherd_refit/` reproduced every previous file byte for byte —
+and §5.3's text is unchanged. The reason is PMC-6: the walk order is an **input** of `nms`, the
+reference's is an unstable quicksort over scores that are multiples of `1/60`, and without it in
+the dump an injected comparison of the kept set would be measuring numpy's tie-breaking rather
+than the port's greedy loop. With it, the port keeps the reference's 250 hypotheses in the
+reference's order on all 358 pairs of the eight fixture sets.
+
+**2026-09-07, step C1 — PMC-6 and PMC-9's coarse draw are re-verified, and PMC-4 is exercised.**
+PMC-6's row says "expect small candidate-set differences on ties, verified by the pair-level gates
+(§13)". Measured, the differences are not small and the gates are not the right instrument: with
+the port's stable tie-break the coarse NMS misses 14.3 % of the reference's kept hypotheses on
+average and 43.6 % at worst, while keeping poses of the same quality — the two kept sets agree
+rank for rank to one probe point on average and two at worst (D §10.2). PMC-9's row gains R §5.2's
+probe, which is the reference's first draw of `rng_pair` and the port's own `Draw::CoarsePoints`
+stream; fed the reference's own `coarse.idx` the port reproduces every score bit for bit, so the
+draw is the only thing between the two implementations at this stage. PMC-4 is exercised for the
+first time: injected mode hands the port the reference's own `hyp.ia`/`hyp.ib`, in Open3D's hash
+order, and `(pa, pb)` comes out in the reference's own order on every pair.
+
 **2026-09-06, task T1 — two library substitutions were promoted to rows (defects D4 and D5).**
 PMC-16 (the `near` tie rule) and PMC-17 (the ray-cast library) are new rows in the table above
 rather than addenda, because they describe things the port has done since step B1 and neither

@@ -8,11 +8,16 @@
 //!
 //! Plan step S4 filled in the first three rows of D §10.2's table — `load`, `thickness` and
 //! `working mesh` — step B1 the fourth, `segmentation`, step B2 the fifth, `breakline`, and step
-//! B3 the sixth, `samples`. `hypotheses` and the rest follow their stages in phases 1b–1d, as new
-//! modules beside these.
+//! B3 the sixth, `samples`. Step C1 added the first three *pair* rows — `hypotheses`, `coarse` and
+//! `nms` — which read `DIR/pairs/<a>__<b>/` through [`pairs`] instead of a fragment directory.
+//! `stage 1` and the rest follow their stages in phases 1c–1d, as new modules beside these.
 
 pub mod breakline;
+pub mod coarse;
+pub mod hypotheses;
 pub mod load;
+pub mod nms;
+pub mod pairs;
 pub mod samples;
 pub mod segmentation;
 pub mod thickness;
@@ -43,17 +48,26 @@ pub enum Stage {
     Breakline,
     /// R §3.5.1–3.5.2, §3.5.6 — the surface, fracture and shell-margin samples.
     Samples,
+    /// R §5.1 — the frame pairs the dihedral filter keeps, and the pose of each.
+    Hypotheses,
+    /// R §5.2 — the coarse breakline score of every hypothesis.
+    Coarse,
+    /// R §5.3 — the poses the non-maximum suppression keeps.
+    Nms,
 }
 
 impl Stage {
     /// Every stage this build can run, in pipeline order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 9] = [
         Self::Load,
         Self::Thickness,
         Self::WorkingMesh,
         Self::Segmentation,
         Self::Breakline,
         Self::Samples,
+        Self::Hypotheses,
+        Self::Coarse,
+        Self::Nms,
     ];
 
     /// The name the command line and the table use.
@@ -65,6 +79,9 @@ impl Stage {
             Self::Segmentation => "segmentation",
             Self::Breakline => "breakline",
             Self::Samples => "samples",
+            Self::Hypotheses => "hypotheses",
+            Self::Coarse => "coarse",
+            Self::Nms => "nms",
         }
     }
 
@@ -233,6 +250,9 @@ impl Collection {
             Stage::Segmentation => segmentation::run(self, mode),
             Stage::Breakline => breakline::run(self, mode),
             Stage::Samples => samples::run(self, mode),
+            Stage::Hypotheses => hypotheses::run(self, mode),
+            Stage::Coarse => coarse::run(self, mode),
+            Stage::Nms => nms::run(self, mode),
         }
     }
 
@@ -301,7 +321,7 @@ mod tests {
             assert_eq!(Stage::parse(stage.as_str()), Some(stage));
             assert_eq!(stage.to_string(), stage.as_str());
         }
-        assert_eq!(Stage::parse("hypotheses"), None, "R §5.1, not this build");
+        assert_eq!(Stage::parse("stage1"), None, "R §5.4, not this build");
     }
 
     /// Finding F2: `target_faces = 0` and a manifest with no `target_faces` key are the same

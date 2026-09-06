@@ -3,9 +3,10 @@
 //! The subcommands are D §9's: `run` and `segment` mirror the Python's, flag for flag, and
 //! `parity`, `bench` and `info` are new. Phase 1a implemented `info`, `segment` up to the working
 //! mesh and `parity` for the stages the port computes; step B1 added R §3.4's shell/fracture
-//! labels to `segment` and its own `parity` row, step B2 R §3.5's breaklines and theirs, and step
-//! B3 the sampled match arrays and the `samples` row. `run` and `bench` arrive with the pipeline
-//! they drive (phase 1d) and report that plainly until then.
+//! labels to `segment` and its own `parity` row, step B2 R §3.5's breaklines and theirs, step
+//! B3 the sampled match arrays and the `samples` row, and step C1 the first three pair rows —
+//! `hypotheses`, `coarse` and `nms`. `run` and `bench` arrive with the pipeline they drive
+//! (phase 1d) and report that plainly until then.
 
 use std::path::PathBuf;
 
@@ -108,7 +109,7 @@ struct ParityArgs {
     #[arg(long)]
     input: Option<PathBuf>,
     /// Stage to compare: `load`, `thickness`, `working-mesh`, `segmentation`, `breakline`,
-    /// `samples`, or `all`. Repeatable.
+    /// `samples`, `hypotheses`, `coarse`, `nms`, or `all`. Repeatable.
     #[arg(long, default_value = "all")]
     stage: Vec<String>,
     /// Feed each stage the Python stage's own inputs instead of the port's upstream results
@@ -405,8 +406,14 @@ mod tests {
         );
         assert_eq!(requested_stages(&["breakline".to_owned()]).unwrap(), vec![Stage::Breakline]);
         assert_eq!(requested_stages(&["samples".to_owned()]).unwrap(), vec![Stage::Samples]);
-        let err = requested_stages(&["hypotheses".to_owned()]).unwrap_err().to_string();
-        assert!(err.contains("samples"), "{err}");
+        assert_eq!(
+            requested_stages(&["nms".to_owned(), "hypotheses".to_owned(), "coarse".to_owned()])
+                .unwrap(),
+            vec![Stage::Hypotheses, Stage::Coarse, Stage::Nms],
+            "the pair stages come back in pipeline order too"
+        );
+        let err = requested_stages(&["stage1".to_owned()]).unwrap_err().to_string();
+        assert!(err.contains("nms"), "{err}");
     }
 
     #[test]

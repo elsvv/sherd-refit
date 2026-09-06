@@ -25,7 +25,7 @@
 //! | [`mesh`] | §3.1 (clean, components) S2; §3.3 (the rest) S3; §3.4.6 islands B1 | S2, S3, B1 |
 //! | [`fragment`] | §3.2, §3.4–3.7 | S3 (mesh), S4 (cache), B1 (segmentation), B2 (breaklines), B3 (samples) |
 //! | [`spatial`] | §3.2, §3.4.1–3.4.3, §6.1, §6.4 | B1 (rays, KD-tree), phase 1c (inside test) |
-//! | [`matching`] | §4–§7 | phase 1c |
+//! | [`matching`] | §1.2, §4–§7 | C1 (scales, hypotheses, coarse, NMS), phase 1c (the rest) |
 //! | [`assembly`] | §8 | phase 1d |
 //! | [`refine`], [`report`], [`render`], [`pipeline`] | §9, §11, §2 | phase 1d |
 //!
@@ -47,9 +47,14 @@
 //! frames ([`fragment::breakline`]) and step B3 the sampled match arrays of R §3.5.1–3.5.2 and
 //! §3.5.6 with the runtime [`MatchData`](fragment::samples::MatchData) of R §3.6
 //! ([`fragment::samples`]), which completes R §3: the ten tensors of a fragment cache and the
-//! `breakline` and `samples` rows of the parity table. The remaining algorithm modules are
-//! documented but empty; they are filled in step by step, each step gated on the fixtures under
-//! `fixtures/` and on `tools/compare_fixtures.py`.
+//! `breakline` and `samples` rows of the parity table. Step C1 opened phase 1c with the first
+//! half of a pair: the resolved distances of R §1.2 ([`matching::scales`]), the frame-pair
+//! hypotheses of R §5.1 ([`matching::hypotheses`]), the coarse breakline score of R §5.2
+//! ([`matching::coarse`]), the non-maximum suppression of R §5.3 ([`matching::nms`]) and the
+//! [`Pair`](matching::pair::Pair) of R §4.2 that drives them — with the `hypotheses`, `coarse` and
+//! `nms` rows of the parity table. The remaining algorithm modules are documented but empty; they
+//! are filled in step by step, each step gated on the fixtures under `fixtures/` and on
+//! `tools/compare_fixtures.py`.
 
 pub mod assembly;
 pub mod collection;

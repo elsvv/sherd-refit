@@ -546,8 +546,8 @@ DIR/fragments/<name>/
    md.<each MD_ARRAY> md.params md.brk_t md.brk_dih md.valid                 R§3.5–3.6
    md.S_u md.S_v md.Pf_u md.Pf_v      the uniforms behind each sample, before R§3.5.1's fold
 DIR/pairs/<a>__<b>/
-   scales.json  hyp.pa hyp.pb  coarse.idx coarse.cs  nms1.kept
-   s1.T[250,4,4] s1.score  nms2.kept
+   scales.json md_used.json  hyp.ia hyp.ib hyp.pa hyp.pb  coarse.idx coarse.cs  nms1.order nms1.kept
+   s1.T[250,4,4] s1.score  nms2.order nms2.kept
    s2.T_reg1 s2.T_reg2 s2.T_frac1 s2.T_frac2 (per candidate)  s2.scores.json  s2.accepted
    result.candidates.json (the 5 returned)
 DIR/assembly/  md_t_median samples (S per fragment, 15000), poses.json, groups.json, used.json, rejected.json
@@ -559,9 +559,21 @@ Sizes: terracotta ≈ 240 MB, pot A ≈ 250 MB, synthetic 20 ≈ 850 MB at level
 table is the measured one and this line is the order of magnitude. For `mixed_all` and
 `synthetic_170` only `mesh`, `seg.frac_final`, `md.*`, `result.candidates.json` and the assembly
 are dumped (≈ 0.6 GB). Fixtures are stored outside git (§10.5) and regenerated whenever the
-reference changes; the current set comes from commit **`09fb4d4`** (R §3.2's deterministic ray set,
-task T1, plus the sample uniforms of §10.2's D6 columns), and the committed `fixtures/slab/dump`
-from `f0da041` with the same `sherd_refit/`. The Rust CLI writes the same layout with
+reference changes; the current set and the committed `fixtures/slab/dump`
+come from the commit that added step C1's two NMS walk orders — carrying R §3.2's deterministic ray
+set (task T1) and the sample uniforms of §10.2's D6 columns with it — and each `manifest.json`
+records which.
+
+**`nms1.order` and `nms2.order` are inputs, not outputs, and step C1 added them for that reason.**
+R §5.3's suppression is a greedy walk over `np.argsort(score)[::-1]`, and numpy's `argsort` is an
+unstable quicksort over scores that are multiples of `1/60`: thousands of hypotheses tie at every
+level and the permutation among them is an artefact of numpy's partitioning, which PMC-6 already
+says the port will not reproduce. Without the order in the dump, an injected NMS comparison would
+be measuring numpy's sort. With it the port's greedy loop and duplicate test run on the
+reference's own ranking and the kept list is compared exactly. The change is to the *sink* only —
+`_match_pair` hoists the expression it already evaluated into a variable — so the reference's
+results are unchanged, and re-dumping the slab at the same `sherd_refit/` reproduced all 178
+previous files byte for byte. The Rust CLI writes the same layout with
 `--dump-fixtures`.
 
 ### 10.2 Stage comparison and tolerances (`tools/compare_fixtures.py REF NEW`)
@@ -603,8 +615,10 @@ Two more places where the table is narrower than it sounds:
 | segmentation | area-weighted label agreement; fracture fraction | ≥ 0.995; ±0.005 | ≥ 0.97; ±0.02 |
 | breakline | count; point-set Hausdorff; `dih` per matched point | exact; 1e-4 t; 0.1° | curve length (`count × median nearest-neighbour spacing`) ±10 % and the spacing alone ±10 %; 0.5 t on 99 %; distribution KS < 0.05 |
 | samples | `n_surface`, `n_frac`; sample-to-face residual; `fp` on fracture faces; margin count and membership; sample normals; **the reference's own points rebuilt from its own uniforms**; **the face pick over the reference's own cdf** | exact; 1e-9 t; exact; exact; 0.1° over faces conditioned to 1000 f32 ulps, with ≤ 0.1 % of samples left out; exact (bit for bit); exact | `n_frac` ±10 %; fracture-sample fraction ±0.02; margin fraction ±0.05; cross-set nearest-distance p95 of `S` and of `Pf` within a factor of two of the Poisson expectation `0.977·√(A/n)` |
-| hypotheses | `(pa, pb)` set | exact | count ±30 % |
-| coarse | `cs` per hypothesis | ≤ 1/60 + 1e-6 | — |
+| hypotheses | `(pa, pb)` set **and order**; the pose of each; the twelve fields of R §1.2 | exact; 1e-4° / 1e-5 t; exact | pair matched at all; count ±30 % |
+| coarse | `cs` per hypothesis, on the reference's own `coarse.idx` | ≤ 1/60 + 1e-6, **and bit-exact** (`cs exact`); probe count and pool exact | — |
+| nms | kept hypotheses, on the reference's own walk order `nms1.order` | identical, in order | — |
+| nms, PMC-6 tie effect (a measurement, not a parity requirement) | with the port's **own** tie-break: kept count; share of the reference's kept set missed; score at equal rank; share of its kept poses not covered by a kept pose of the port's | ±5 %; ≤ 0.5; ≤ 3/60; ≤ 0.5 | — |
 | stage 1 | pose per kept hypothesis (by id); `s1` | 0.05° / 0.01 t; ±0.02 | — |
 | stage 2 | pose per candidate (by stage-1 id); `tight`; `gap`; `seam`; `cont`; `cont_n`; `pen`; `accepted` | 0.05° / 0.01 t; ±0.01; ±0.002 t; ±0.34 t; ±0.005 t; ±0.01; ±0.0005; identical | — |
 | pair result | accepted set; best candidate of pairs with an accepted join | identical; 1° / 0.05 t | identical; 1° / 0.05 t (perf-note criterion); no requirement on the best candidate of pairs without a join |
@@ -736,6 +750,44 @@ therefore takes the worst case over the faces with `h ≥ 1000 ulp` — which bo
 rad = 0.057°, under the 0.1° gate *by construction* — and gates the share of samples left out at
 0.1 % (measured maximum 0.033 %).
 
+**The three pair rows of step C1 are met exactly, on 358 pairs of eight fixture sets** (`notes/
+2026-09-07-c1-hypotheses.md`). Injected: **6 086 comparisons, none failed** — the `(pa, pb)` set
+*and* its order are the reference's on every pair, the twelve fields of R §1.2 are bit-identical on
+every pair, the coarse score is bit-identical on **every one of the 38.1 million hypotheses of
+the eight sets**, and the NMS keeps the reference's 250 hypotheses in the reference's order. Native:
+**1 074 comparisons, none failed**; every pair the reference matched the port matches, and the
+hypothesis count is within 7.5 % of the reference's at worst against the ±30 % of the row above.
+
+**`cs exact` is a stronger row than D §10.2's `1/60 + 1e-6`, and it is stated separately because it
+found a defect the tolerance would have hidden.** The reference's `mean` is a division, and the
+port first wrote it as a multiplication by `1/60` — which has no exact double, so `k · (1/60)` is
+not `k / 60` for some `k`. That moved 52 of one pot_G pair's 40 029 scores by a single ulp:
+`5.6e-17` against a tolerance of `1.7e-2`, three hundred million times inside the gate the row
+prescribes, and a difference the ranking below it can still turn into a different candidate. Both
+rows are kept: `cs` is the tolerance the algorithm can live with, `cs exact` is the statement the
+port can actually make.
+
+**The `nms` row exists only because the dump grew `nms1.order` (§10.1), and the PMC-6 rows say what
+that bought.** Run on the port's own stable tie-break instead of the reference's ranking, the same
+suppression over the same scores keeps a *different* set: over the 358 pairs it misses **14.3 % of
+the reference's kept hypotheses on average and 43.6 % at worst**, and 10.0 % / 38.8 % of the
+reference's kept poses lie outside every suppression ball of the port's. What does *not* differ is
+their quality: sort both kept sets by score and compare rank by rank, and the two agree to
+**one probe point on average and two at worst** (`own order scores`, mean 0.0051, worst 0.0333 =
+2/60), while the kept counts agree to 3.3 %. That is the whole content of PMC-6 measured: which
+member of a tie the suppression keeps is arbitrary, and the poses stage 1 receives are equally
+good either way. The four tie rows are gated at their measured worst plus headroom — they are a
+regression alarm on the size of the tie effect, not a parity claim.
+
+**Cost, against the reference on the same machine and the same pairs** (single thread, R §13's own
+comparison): a terracotta pair of 35 374 hypotheses takes the reference 0.484 s and the port
+0.17 s; a synthetic_20 pair of 163 098 hypotheses takes 2.318 s and 0.80 s. With the default thread
+pool the port's two stages are 0.03 s and 0.12 s of wall clock. The port's first version was
+*slower* than the reference — 1.05 µs per breakline query against scipy's 0.22 — because it asked
+`kiddo` for the unbounded nearest neighbour and then discarded it; R §5.2's radius is
+`distance_upper_bound`, and passing it into the query (`PointTree::nearest_within`) took the
+coarse stage over synthetic_20 from 1 800 core-seconds to 178 with bit-identical scores.
+
 **The whole table, as it stands after T1.** Six stages, eight fixture sets, both modes:
 **3 847 injected comparisons with no failure, and 1 524 native comparisons with five** — the
 `p99 distance` and `dihedral KS` rows of the paragraphs above, on three fragments of synthetic_20.
@@ -809,6 +861,7 @@ shorten phase 1+2 to ≈ 14 weeks because GPU work can start once the CPU ICP is
 | 1b, step B2 | done: breaklines and frames (R §3.5.3–3.5.5), the five `brk_*` tensors, the `breakline` parity row | | injected exact on all 66 fragments (the only residuals are the `f32` cache narrowing); native 165 of 198 checks, every failure inherited (§10.2) | none new; the native `count` row is found to contradict the `res` row above it |
 | 1b, step B3 | done: the sampled match arrays (R §3.5.1–3.5.2, §3.5.6), `MatchData` (R §3.6), the five sampled tensors, the `samples` parity row | | injected 660 of 660 on all 66 fragments (`n_frac`, the margin and the face indices exact); native 390 of 396, six failures on four fragments the segmentation and thickness rows already name (§10.2) | none new; the native `Pf spacing` column is found to inherit the `segmentation` row above it |
 | 1c | hypotheses, coarse, NMS, ICP (E5), verification, `match_pair`, screening flags | 2.5 | stage-2 injected tolerances on every fixture pair | ICP corner cases (empty correspondences), tie handling |
+| 1c, step C1 | done: pair scales (R §1.2, §4.2), hypotheses (R §5.1), the coarse score (R §5.2) and the NMS (R §5.3), with the `hypotheses`, `coarse` and `nms` parity rows | | injected 6 086 of 6 086 on 358 pairs of eight sets — the `(pa, pb)` set and order exact, `Scales` bit-identical, `cs` bit-identical on 38.1 M hypotheses, the kept list identical on the reference's own walk order; native 1 074 of 1 074 (§10.2) | PMC-6's tie effect is now measured rather than assumed: membership differs by up to 43.6 %, quality by at most two probe points |
 | 1d | assembly, refinement, recentre, report/transforms/meshes, renderer, CLI, determinism tests | 2 | R§13 gates natively; CI green on 4 OSs | none major |
 | 1e | profiling and CPU tuning to §10.3 CPU gates | 1.5 | CPU gates | 2 h collection gate has 1.6× margin only |
 | **phase 1 total** | | **11** | | |

@@ -51,6 +51,9 @@ pub enum Draw {
     /// R §3.5.6's thinning of the shell margin: one `choice(margin, margin_points,
     /// replace=False)`, and only when the margin is larger than that.
     Margin,
+    /// R §5.2's probe: one `choice(B.brk_sub, coarse_points, replace=False)` per pair, the first
+    /// draw of the reference's `rng_pair`.
+    CoarsePoints,
 }
 
 impl Draw {
@@ -64,6 +67,7 @@ impl Draw {
             Self::Surface => fnv1a(b"surface"),
             Self::Fracture => fnv1a(b"fracture"),
             Self::Margin => fnv1a(b"margin"),
+            Self::CoarsePoints => fnv1a(b"coarse_points"),
         }
     }
 }
@@ -185,8 +189,9 @@ mod tests {
         assert_eq!(Draw::Surface.tag(), 0x1826_0d59_cf7e_151c);
         assert_eq!(Draw::Fracture.tag(), 0x5f49_d730_66d9_516b);
         assert_eq!(Draw::Margin.tag(), 0x56b5_a72b_50ec_d75b);
+        assert_eq!(Draw::CoarsePoints.tag(), 0x3ccd_0910_606d_802a);
 
-        let tags = [Draw::Surface, Draw::Fracture, Draw::Margin].map(Draw::tag);
+        let tags = [Draw::Surface, Draw::Fracture, Draw::Margin, Draw::CoarsePoints].map(Draw::tag);
         for i in 0..tags.len() {
             assert_ne!(tags[i], 0, "tag {i} would collide with the bare seed");
             for j in (i + 1)..tags.len() {
@@ -202,12 +207,18 @@ mod tests {
         let mut surface = seeded_for(0, Draw::Surface);
         let mut fracture = seeded_for(0, Draw::Fracture);
         let mut margin = seeded_for(0, Draw::Margin);
+        let mut coarse = seeded_for(0, Draw::CoarsePoints);
         for _ in 0..64 {
-            let draws = [unit_f64(&mut surface), unit_f64(&mut fracture), unit_f64(&mut margin)];
+            let draws = [
+                unit_f64(&mut surface),
+                unit_f64(&mut fracture),
+                unit_f64(&mut margin),
+                unit_f64(&mut coarse),
+            ];
             let mut bits: Vec<u64> = draws.iter().map(|u| u.to_bits()).collect();
             bits.sort_unstable();
             bits.dedup();
-            assert_eq!(bits.len(), 3, "{draws:?}");
+            assert_eq!(bits.len(), 4, "{draws:?}");
         }
     }
 

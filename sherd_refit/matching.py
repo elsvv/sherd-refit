@@ -514,7 +514,15 @@ def _match_pair(A, B, p, keep, n_threads, rng, t0, fx) -> list[Candidate]:
         log.info("%s-%s: no hypotheses", A.name, B.name)
         return []
     cs = coarse_score(A, B, R, tr, sc, p, rng, dump=dump)
-    kept = nms(np.argsort(cs)[::-1][:5000], R, tr, cs, sc.nms, p.stage1, 0.1)
+    # The walk order is an *input* of `nms`, and numpy's unstable argsort is what makes it one
+    # (PMC-6): the coarse scores are multiples of 1/60, so thousands of hypotheses tie and which
+    # of them the sort puts first is arbitrary.  The port cannot reproduce that permutation and
+    # does not try; the dump therefore carries the order, so that the parity harness can compare
+    # the greedy loop and the duplicate test on the reference's own ranking instead of on a
+    # different one.  Hoisting it out of the call changes nothing about the result.
+    order = np.argsort(cs)[::-1][:5000]
+    fixture.put("nms1.order", np.ascontiguousarray(order), "pair")
+    kept = nms(order, R, tr, cs, sc.nms, p.stage1, 0.1)
     fixture.put("nms1.kept", np.asarray(kept, dtype=np.int64), "pair")
 
     def stage1(k):
@@ -544,7 +552,9 @@ def _match_pair(A, B, p, keep, n_threads, rng, t0, fx) -> list[Candidate]:
         fixture.put("result.candidates", [c.to_json() for c in out1], "result")
         return out1
     Rs = np.array([T[:3, :3] for T in Ts]); trs = np.array([T[:3, 3] for T in Ts])
-    kept2 = nms(np.argsort(s1)[::-1], Rs, trs, s1, sc.nms, p.stage2, 0.05)
+    order2 = np.argsort(s1)[::-1]
+    fixture.put("nms2.order", np.ascontiguousarray(order2), "pair")
+    kept2 = nms(order2, Rs, trs, s1, sc.nms, p.stage2, 0.05)
     fixture.put("nms2.kept", np.asarray(kept2, dtype=np.int64), "pair")
     tr2 = fixture.trace(fx, "pair")
     cands = _map(lambda ik: _stage2(A, B, Ts[ik[1]], sc, p, float(s1[ik[1]]), tr=tr2, ti=ik[0]),

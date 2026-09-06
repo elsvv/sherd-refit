@@ -169,11 +169,16 @@ impl Breaklines {
     /// Computed in `f64` from the stored frames and narrowed once, like every other product of
     /// this module.
     pub fn tangents(&self) -> Vec<Vec3f> {
-        self.ns
-            .iter()
-            .zip(&self.f)
-            .map(|(ns, f)| Vec3f::from_f64(cross(ns.to_f64(), f.to_f64())))
-            .collect()
+        self.tangents_f64().into_iter().map(Vec3f::from_f64).collect()
+    }
+
+    /// [`Breaklines::tangents`] before the narrowing — what R §5.1 builds its frames from.
+    ///
+    /// The matcher works in `f64` (R §0) and the reference never narrows this product at all, so
+    /// the pair stages take it wide; only the `f32` inputs are the port's, and those are the cache
+    /// format (D §4.1, PMC-15).
+    pub fn tangents_f64(&self) -> Vec<[f64; 3]> {
+        self.ns.iter().zip(&self.f).map(|(ns, f)| cross(ns.to_f64(), f.to_f64())).collect()
     }
 
     /// R §3.6's `brk_dih`: the angle between the two macro normals, in degrees.

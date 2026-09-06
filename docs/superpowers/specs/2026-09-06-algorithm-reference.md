@@ -255,6 +255,15 @@ shell[i] = good[i] ≥ votes;  frac = ¬shell
 raw_fraction = ΣA[frac] / ΣA                                   # diagnostic only
 ```
 
+**Dtypes, and they are load-bearing.** `dh` is a `float32` array (Open3D's `t_hit`) and `t` a
+Python float, so under numpy 2's NEP 50 the scalar is *weak*: `dh > 0.1·t` and the two `dh/t`
+comparisons are evaluated in **float32**, with `0.1·t` and `t` cast down first. The
+`hit_normals[prim] · d_k` test is the other way round — `np.einsum` over the `float64` face
+normals and the `float64` direction array, not over the `float32` rays that were handed to the
+scene. Origin and direction are computed in `float64` and narrowed once
+(`np.concatenate([...]).astype(np.float32)`). A port that evaluates the window in `float64` moves
+faces across it. (Step B1; found by reading the code, not by a failing gate.)
+
 **3.4.4 Majority filter.** With `Wm` = membership of faces within `t/4` of each representative:
 `frac_g[r] = Σ_{f∈ball(r)} A[f]·frac[f] > 0.5 · Σ_{f∈ball(r)} A[f]`; `frac = frac_g[near]`.
 

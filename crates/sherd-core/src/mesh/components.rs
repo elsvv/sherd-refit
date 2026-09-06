@@ -6,8 +6,12 @@
 //! triangles meeting at a single vertex are *not* connected, and that is deliberate, because a
 //! scan's stray specks often touch the fragment at one point.
 //!
-//! Filled in by plan step S2.
+//! The same union–find serves R §3.4.6's island removal ([`drop_small_components`]), which works
+//! over a *face mask* and the edge adjacency of R §3.4.5 rather than over the whole mesh.
+//!
+//! Filled in by plan step S2; [`mask_components`] and [`drop_small_components`] by step B1.
 
+use super::adjacency::FaceAdjacency;
 use super::{Mesh, clean::remove_unreferenced_vertices};
 
 /// The edge-connected clustering of a mesh's triangles.
@@ -115,6 +119,75 @@ pub fn largest_component(m: &mut Mesh) -> usize {
         remove_unreferenced_vertices(m);
     }
     clusters.len()
+}
+
+/// Connected components of the faces where `mask == target`, over the face adjacency of R §3.4.5.
+///
+/// Returns one label per face: the component index for a face in the set, [`u32::MAX`] for a face
+/// outside it. Components are numbered in the order their lowest-indexed face appears, which is
+/// not the reference's numbering (`scipy.sparse.csgraph.connected_components` numbers them in its
+/// own traversal order) and does not need to be: nothing reads the labels, only the areas of the
+/// sets they define.
+///
+/// `sherd_refit.geometry.components_of` builds a graph on the adjacency pairs whose **both** faces
+/// are in the set, so a face of the set that touches nothing is its own component, and a face
+/// outside the set is dropped afterwards. Both are reproduced here.
+pub fn mask_components(mask: &[bool], target: bool, adj: &FaceAdjacency) -> Vec<u32> {
+    let n = mask.len();
+    let mut parent: Vec<u32> = (0..u32::try_from(n).expect("face count fits in u32")).collect();
+    for i in 0..adj.len() {
+        let (a, b) = (adj.fa[i], adj.fb[i]);
+        if mask[a as usize] == target && mask[b as usize] == target {
+            union(&mut parent, a, b);
+        }
+    }
+    let mut labels = vec![u32::MAX; n];
+    let mut root_label = vec![u32::MAX; n];
+    let mut n_components = 0_u32;
+    for i in 0..n {
+        if mask[i] != target {
+            continue;
+        }
+        let r = find(&mut parent, u32::try_from(i).expect("face count fits in u32")) as usize;
+        if root_label[r] == u32::MAX {
+            root_label[r] = n_components;
+            n_components += 1;
+        }
+        labels[i] = root_label[r];
+    }
+    labels
+}
+
+/// R §3.4.6, `sherd_refit.geometry.drop_small_components`: flips every component of
+/// `mask == target` whose total face area is below `min_area`.
+///
+/// Used twice with `target = true` (fracture islands smaller than `0.5·t²` become shell) and once
+/// with `target = false` (shell islands smaller than `2.0·t²` become fracture).
+///
+/// The component areas are summed in face order rather than by `np.bincount`, which accumulates in
+/// the same order; both are plain left-to-right sums over the same values, so the totals agree bit
+/// for bit and a component sitting exactly on `min_area` falls the same way in both.
+pub fn drop_small_components(
+    mask: &mut [bool],
+    target: bool,
+    min_area: f64,
+    adj: &FaceAdjacency,
+    areas: &[f64],
+) {
+    let labels = mask_components(mask, target, adj);
+    let n_components = labels.iter().filter(|&&l| l != u32::MAX).map(|&l| l + 1).max();
+    let Some(n_components) = n_components else { return };
+    let mut sizes = vec![0.0_f64; n_components as usize];
+    for (i, &label) in labels.iter().enumerate() {
+        if label != u32::MAX {
+            sizes[label as usize] += areas[i];
+        }
+    }
+    for (i, &label) in labels.iter().enumerate() {
+        if label != u32::MAX && sizes[label as usize] < min_area {
+            mask[i] = !target;
+        }
+    }
 }
 
 #[inline]

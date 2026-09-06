@@ -1553,6 +1553,7 @@ name = "sherd-parity"
 version = "0.1.0"
 dependencies = [
  "npyz",
+ "rayon",
  "serde",
  "serde_json",
  "sha2",

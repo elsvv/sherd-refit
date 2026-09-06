@@ -67,7 +67,7 @@ fn every_stage_passes_on_the_slab_in_both_modes() {
         Collection::open(FixtureDir::new(slab_dump()), Some(&slab_input())).expect("the dump");
     for mode in [Mode::Injected, Mode::Native] {
         let reports = collection.run_all(&Stage::ALL, mode).expect("the stages run");
-        assert_eq!(reports.len(), 3);
+        assert_eq!(reports.len(), Stage::ALL.len());
         for report in &reports {
             assert_eq!(
                 report.status(),
@@ -170,12 +170,13 @@ fn without_the_input_directory_native_mode_skips_and_injected_mode_does_not() {
     let native = collection.run_all(&Stage::ALL, Mode::Native).unwrap();
     assert_eq!(
         native.iter().map(sherd_parity::StageReport::status).collect::<Vec<_>>(),
-        ["SKIP", "SKIP", "SKIP"]
+        ["SKIP", "SKIP", "SKIP", "SKIP"]
     );
     let injected = collection.run_all(&Stage::ALL, Mode::Injected).unwrap();
-    // `load` needs the file in both modes — its input *is* the file. The other two run off the
+    // `load` needs the file in both modes — its input *is* the file. The other three run off the
     // dump alone.
     assert_eq!(injected[0].status(), "SKIP");
     assert_eq!(injected[1].status(), "PASS");
     assert_eq!(injected[2].status(), "PASS");
+    assert_eq!(injected[3].status(), "PASS");
 }

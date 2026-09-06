@@ -14,12 +14,14 @@
 //! |---|---|---|---|
 //! | `V` | f32 | `[n, 3]` | §3.3 working-mesh vertices |
 //! | `F` | u32 | `[m, 3]` | §3.3 working-mesh triangles |
+//! | `labels` | u8 | `[m]` | §3.4 shell (0) or fracture (1) per face |
 //!
-//! D §4.2 lists `labels u8[m]`, the match arrays (`S`, `sp`, `Pf`, `fp`, `brk_*`, `margin_idx`)
-//! and the optional `features/*` beside them. Those stages are phase 1b; the reader treats an
-//! unknown tensor as data it does not need yet and the writer adds them when they exist, so an
-//! older cache stays readable and a newer one does not confuse this build (`cache_version` moves
-//! when the *set* changes, not when a tensor is added — see [`crate::CACHE_VERSION`]).
+//! D §4.2 lists the match arrays (`S`, `sp`, `Pf`, `fp`, `brk_*`, `margin_idx`) and the optional
+//! `features/*` beside them. Those stages are still ahead; the reader treats an unknown tensor as
+//! data it does not need yet and the writer adds them when they exist, so a newer cache does not
+//! confuse this build. A tensor the port *needs* is a different matter: `labels` joined the set in
+//! step B1 and [`crate::CACHE_VERSION`] moved with it, so a cache written before the segmentation
+//! existed is refused by its version rather than read back with no labels.
 //!
 //! Everything else is metadata: the source's identity for the validity rule, the scalars of
 //! R §3.2–3.3, and the version triple of D §4.3.
@@ -46,7 +48,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Fragment;
 use crate::error::{Error, Result};
-use crate::types::{SourceRef, WorkingMesh};
+use crate::types::{FaceLabel, SourceRef, WorkingMesh};
 use crate::vec3::Vec3f;
 use crate::{ALGO_REF, CACHE_VERSION, CORE_VERSION};
 
@@ -205,9 +207,11 @@ pub fn to_bytes(fragment: &Fragment) -> Result<Vec<u8>> {
     let v: Vec<u8> =
         fragment.mesh.v.iter().flat_map(|p| p.to_array()).flat_map(f32::to_le_bytes).collect();
     let f: Vec<u8> = fragment.mesh.f.iter().flatten().copied().flat_map(u32::to_le_bytes).collect();
+    let labels: Vec<u8> = fragment.labels.iter().map(|&l| l as u8).collect();
     let tensors = vec![
         ("F", TensorView::new(Dtype::U32, vec![fragment.mesh.f.len(), 3], &f)),
         ("V", TensorView::new(Dtype::F32, vec![fragment.mesh.v.len(), 3], &v)),
+        ("labels", TensorView::new(Dtype::U8, vec![fragment.labels.len()], &labels)),
     ];
     let mut views = Vec::with_capacity(tensors.len());
     for (name, view) in tensors {
@@ -287,6 +291,25 @@ pub fn from_bytes(bytes: &[u8], path: impl AsRef<Path>) -> Result<Fragment> {
         return Err(Error::cache(path, format!("triangle index {bad} is outside V ({n_v})")));
     }
 
+    let l_view =
+        file.tensor("labels").map_err(|e| Error::cache(path, format!("tensor labels: {e}")))?;
+    if l_view.dtype() != Dtype::U8 || l_view.shape() != [f.len()] {
+        return Err(Error::cache(
+            path,
+            format!(
+                "tensor labels is {:?} {:?}, expected U8 [{}]",
+                l_view.dtype(),
+                l_view.shape(),
+                f.len()
+            ),
+        ));
+    }
+    let labels = l_view
+        .data()
+        .iter()
+        .map(|&b| FaceLabel::from_u8(b).ok_or_else(|| Error::cache(path, format!("label {b}"))))
+        .collect::<Result<Vec<FaceLabel>>>()?;
+
     #[allow(
         clippy::cast_possible_truncation,
         reason = "`res` was written from an f32 and round-trips exactly"
@@ -302,6 +325,7 @@ pub fn from_bytes(bytes: &[u8], path: impl AsRef<Path>) -> Result<Fragment> {
             sha256: meta.source_sha256.as_deref().and_then(unhex),
         },
         mesh,
+        labels,
         thick: meta.thick,
         thick_mode: meta.thick_mode,
         watertight: meta.watertight,
@@ -430,7 +454,7 @@ mod tests {
         load_valid, read, read_meta, to_bytes, unhex, write,
     };
     use crate::fragment::Fragment;
-    use crate::types::{SourceRef, WorkingMesh};
+    use crate::types::{FaceLabel, SourceRef, WorkingMesh};
     use crate::vec3::vec3;
     use crate::{ALGO_REF, CACHE_VERSION};
 
@@ -460,6 +484,12 @@ mod tests {
                 sha256: Some([7u8; 32]),
             },
             mesh: WorkingMesh::from_parts(v, f, 0.123_456_79),
+            labels: vec![
+                FaceLabel::Shell,
+                FaceLabel::Fracture,
+                FaceLabel::Fracture,
+                FaceLabel::Shell,
+            ],
             thick: 3.531_017_303_466_797,
             thick_mode: 4.044_1,
             watertight: true,
@@ -511,6 +541,7 @@ mod tests {
         assert_eq!(back.mesh.res.to_bits(), fr.mesh.res.to_bits(), "res");
         assert_eq!(back.mesh.v, fr.mesh.v, "vertices");
         assert_eq!(back.mesh.f, fr.mesh.f, "faces");
+        assert_eq!(back.labels, fr.labels, "labels");
         assert_eq!(back.mesh.face_normals, fr.mesh.face_normals, "face normals");
         assert_eq!(back.mesh.face_areas, fr.mesh.face_areas, "face areas");
         assert_eq!(back.mesh.face_centroids, fr.mesh.face_centroids, "face centroids");
@@ -633,6 +664,20 @@ mod tests {
     fn the_extension_is_the_designs() {
         assert_eq!(EXTENSION, "sherd");
         assert_eq!(cache_path("/out", "x").extension().unwrap(), "sherd");
+    }
+
+    /// A cache whose `labels` tensor does not describe the face list is refused, not read.
+    #[test]
+    fn a_label_array_of_the_wrong_length_is_rejected() {
+        let dir = scratch("badlabels");
+        let source = dir.join("pieceA.ply");
+        std::fs::write(&source, b"x").unwrap();
+        let mut fr = sample(&source);
+        fr.labels.pop();
+        let bytes = to_bytes(&fr).unwrap();
+        let err = from_bytes(&bytes, &source).unwrap_err().to_string();
+        assert!(err.contains("tensor labels"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

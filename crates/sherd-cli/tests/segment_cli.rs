@@ -70,7 +70,8 @@ fn two_runs_agree(input: &Path) {
     // the summary says what the subcommand does and does not do.
     for out in [&first_out, &second_out] {
         assert!(out.contains("miss"), "a cold run computes: {out}");
-        assert!(out.contains("working mesh"), "the summary says where it stops: {out}");
+        assert!(out.contains("fracture"), "the table carries R §3.4's label fraction: {out}");
+        assert!(out.contains("segmentation"), "the summary says where it stops: {out}");
     }
 
     // A third run over the first directory must hit every cache and change nothing.

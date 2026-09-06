@@ -9,7 +9,7 @@
 //! callback. Matching, assembly, refinement and the outputs are filled in in phase 1d.
 //!
 //! Step S4 fills in the first stage: [`preprocess`], which is what `sherd-refit-rs segment`
-//! drives. The memory-aware semaphore is not part of it yet — that needs the per-fragment
+//! drives — R §3.1–3.3 then, R §3.1–3.4 since step B1. The memory-aware semaphore is not part of it yet — that needs the per-fragment
 //! high-water mark measured rather than guessed, which belongs with the memory work of phase 1e —
 //! so the fan-out is a plain `par_iter` over the collection, with `--threads` sizing the pool.
 
@@ -24,8 +24,7 @@ use crate::fragment::{Fragment, cache};
 /// What preprocessing one fragment produced.
 #[derive(Debug)]
 pub struct Preprocessed {
-    /// The fragment, at the state R §3.3 leaves it in (phase 1b adds the labels and the match
-    /// arrays).
+    /// The fragment, at the state R §3.4 leaves it in (the match arrays follow).
     pub fragment: Fragment,
     /// Whether it came from the cache rather than from the file (R §3.7).
     pub cached: bool,
@@ -33,7 +32,8 @@ pub struct Preprocessed {
     pub seconds: f64,
 }
 
-/// R §3 for a whole collection, in parallel, through the fragment cache (R §3.7, D §5 stage 2).
+/// R §3.1–3.4 for a whole collection, in parallel, through the fragment cache (R §3.7, D §5
+/// stage 2).
 ///
 /// `out_dir` is the run's output directory: caches are written to `<out_dir>/cache/<name>.sherd`
 /// and read from there when they describe the same file at the same `target_faces`. `None`
@@ -41,8 +41,9 @@ pub struct Preprocessed {
 /// gives.
 ///
 /// Results come back in **collection order**, whatever order the pool finished them in, and every
-/// fragment's own computation is single-threaded apart from the ray loop of R §3.2, so the result
-/// does not depend on the thread count. A fragment that fails to load takes its error into the
+/// fragment's own computation is single-threaded apart from the ray loops of R §3.2 and R §3.4.3
+/// and the radius queries of R §3.4.2, all of which are indexed collects, so the result does not
+/// depend on the thread count. A fragment that fails to load takes its error into the
 /// result vector instead of aborting the collection: one unreadable file among a hundred scans is
 /// a warning, not the end of the run.
 pub fn preprocess(

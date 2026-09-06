@@ -22,9 +22,9 @@
 //! |---|---|---|
 //! | [`collection`] | §2 | S4 |
 //! | [`io`] | §3.1, §11 | S2 |
-//! | [`mesh`] | §3.1 (clean, components) S2; §3.3 (the rest) S3 | S2, S3 |
-//! | [`fragment`] | §3.2, §3.4–3.7 | S3 (mesh), S4 (cache), phase 1b (the rest) |
-//! | [`spatial`] | §3.2, §3.4.3, §6.1, §6.4 | phase 1b |
+//! | [`mesh`] | §3.1 (clean, components) S2; §3.3 (the rest) S3; §3.4.6 islands B1 | S2, S3, B1 |
+//! | [`fragment`] | §3.2, §3.4–3.7 | S3 (mesh), S4 (cache), B1 (segmentation), phase 1b (the rest) |
+//! | [`spatial`] | §3.2, §3.4.1–3.4.3, §6.1, §6.4 | B1 (rays, KD-tree), phase 1c (inside test) |
 //! | [`matching`] | §4–§7 | phase 1c |
 //! | [`assembly`] | §8 | phase 1d |
 //! | [`refine`], [`report`], [`render`], [`pipeline`] | §9, §11, §2 | phase 1d |
@@ -40,9 +40,12 @@
 //! [`fragment::Fragment::from_mesh_file`], which runs all of it in the reference's order. Step S4
 //! added the fragment cache ([`fragment::cache`], D §4.2), collection discovery ([`collection`],
 //! R §2) and, in `sherd-parity`, the reader for the Python fixtures and the stage runners behind
-//! `sherd-refit-rs parity`. The remaining algorithm modules are documented but empty; they are
-//! filled in step by step, each step gated on the fixtures under `fixtures/` and on
-//! `tools/compare_fixtures.py`.
+//! `sherd-refit-rs parity`. Step B1 opened phase 1b with R §3.4's shell/fracture segmentation
+//! ([`fragment::segment`]) and the two spatial structures it runs on
+//! ([`spatial::bvh`], [`spatial::kdtree`]); its labels are the `labels` tensor of the cache and
+//! the `segmentation` row of the parity table. The remaining algorithm modules are documented but
+//! empty; they are filled in step by step, each step gated on the fixtures under `fixtures/` and
+//! on `tools/compare_fixtures.py`.
 
 pub mod assembly;
 pub mod collection;
@@ -82,4 +85,8 @@ pub const ALGO_REF: &str = "2026-09-06/9d4b9d3";
 
 /// Layout version of `<out>/cache/<name>.sherd` (D §4.2). Bumped when the tensor set or the
 /// metadata keys change, independently of [`ALGO_REF`].
-pub const CACHE_VERSION: u32 = 1;
+///
+/// `2`: step B1 added `labels u8[m]` (R §3.4). Every tensor the port reads back must be in the
+/// file, so a version-1 cache — written before the segmentation existed — is refused and its
+/// fragment recomputed, rather than being read back with no labels at all.
+pub const CACHE_VERSION: u32 = 2;

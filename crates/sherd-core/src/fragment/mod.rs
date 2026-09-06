@@ -6,9 +6,10 @@
 //! a rerun on the same collection starts at the matching stage.
 //!
 //! Step S3 fills in the preprocessing up to the working mesh — [`Fragment::from_mesh_file`] and
-//! everything it calls; step S4 the cache ([`cache`], [`Fragment::load_or_build`]).
-//! Segmentation, breaklines and the match arrays follow in phase 1b, each adding its own field to
-//! [`Fragment`] and its own tensor to the cache.
+//! everything it calls; step S4 the cache ([`cache`], [`Fragment::load_or_build`]); step B1 the
+//! shell/fracture segmentation ([`segment`]), whose labels are the second tensor of the cache.
+//! Breaklines and the match arrays follow, each adding its own field to [`Fragment`] and its own
+//! tensor to the cache.
 
 pub mod breakline;
 pub mod cache;
@@ -25,15 +26,15 @@ use crate::mesh::clean::{remove_degenerate_triangles, remove_unreferenced_vertic
 use crate::mesh::decimate::{decimate, face_budget};
 use crate::mesh::geometry::{face_geometry, median_edge};
 use crate::mesh::taubin::taubin;
-use crate::types::{FragId, SourceRef, WorkingMesh};
+use crate::spatial::bvh::RayScene;
+use crate::types::{FaceLabel, FragId, SourceRef, WorkingMesh};
 use crate::vec3::Vec3f;
 
-/// One fragment of a collection, at the state plan step S3 leaves it in.
+/// One fragment of a collection, at the state plan step B1 leaves it in.
 ///
-/// D §4.1 defines the finished struct; the fields below are the ones R §3.1–3.3 produce, which is
-/// everything the matcher needs *about the mesh itself*. `labels` (R §3.4), the match arrays
-/// (R §3.5) and the shared BVHs join them in phase 1b, and the cache that stores all of it in
-/// step S4.
+/// D §4.1 defines the finished struct; the fields below are the ones R §3.1–3.4 produce, which is
+/// the mesh, its wall, and the shell/fracture labels the matcher works on. The match arrays
+/// (R §3.5) and the shared BVHs join them in the next steps of phase 1b.
 #[derive(Clone, Debug)]
 pub struct Fragment {
     /// Index inside the collection, in the order R §2 discovers the files. `from_mesh_file`
@@ -45,6 +46,8 @@ pub struct Fragment {
     pub source: SourceRef,
     /// The decimated, smoothed mesh with its per-face geometry and `res` (R §3.3).
     pub mesh: WorkingMesh,
+    /// Shell or fracture, one per face of `mesh`, in face order (R §3.4).
+    pub labels: Vec<FaceLabel>,
     /// Wall thickness `t` (R §3.2) — the unit every scale-free threshold of R §1.2 is in.
     pub thick: f64,
     /// The unfiltered ray mode, reported beside `thick` so a fragment whose two values disagree
@@ -172,11 +175,14 @@ impl Fragment {
             res as f32,
         );
 
+        let labels = segment_working_mesh(&working, thick, res, name);
+
         Ok(Self {
             id: 0,
             name: name.to_owned(),
             source,
             mesh: working,
+            labels,
             thick,
             thick_mode,
             watertight,
@@ -237,6 +243,74 @@ impl Fragment {
     pub fn res(&self) -> f64 {
         f64::from(self.mesh.res)
     }
+
+    /// Total area of the faces labelled [`Fracture`](FaceLabel::Fracture) (R §3.4).
+    ///
+    /// Summed over the `f64` face areas the segmentation itself used, not over the `f32` ones the
+    /// working mesh stores, so the value is the reference's rather than a rounding of it.
+    pub fn fracture_area(&self) -> f64 {
+        let v64: Vec<[f64; 3]> = self.mesh.v.iter().map(|p| p.to_f64()).collect();
+        let areas = face_geometry(&v64, &self.mesh.f).areas;
+        let selected: Vec<f64> = areas
+            .iter()
+            .zip(&self.labels)
+            .filter_map(|(&a, l)| l.is_fracture().then_some(a))
+            .collect();
+        crate::mesh::geometry::pairwise_sum(&selected)
+    }
+
+    /// Fracture area over total area — the number the report and the parity table carry.
+    pub fn fracture_fraction(&self) -> f64 {
+        let v64: Vec<[f64; 3]> = self.mesh.v.iter().map(|p| p.to_f64()).collect();
+        let geom = face_geometry(&v64, &self.mesh.f);
+        let total = geom.total_area();
+        if total <= 0.0 {
+            return 0.0;
+        }
+        let selected: Vec<f64> = geom
+            .areas
+            .iter()
+            .zip(&self.labels)
+            .filter_map(|(&a, l)| l.is_fracture().then_some(a))
+            .collect();
+        crate::mesh::geometry::pairwise_sum(&selected) / total
+    }
+}
+
+/// R §3.4 for one working mesh: the shell/fracture label of every face.
+///
+/// The segmentation runs on the **narrowed** working mesh, for the same reason
+/// [`WorkingMesh::from_parts`] derives its per-face arrays from it: a fragment computed from the
+/// file and the same fragment read back from the cache must be the same fragment, and the cache
+/// stores `f32` vertices. The `f64` geometry below is therefore the working mesh's own,
+/// recomputed the way `from_parts` recomputes it — the reference's arithmetic, over vertices that
+/// have been through an `f32`.
+///
+/// A mesh with no triangle gets no labels; nothing downstream reads them, and `RayScene` refuses
+/// such a mesh anyway.
+fn segment_working_mesh(working: &WorkingMesh, thick: f64, res: f64, name: &str) -> Vec<FaceLabel> {
+    let v64: Vec<[f64; 3]> = working.v.iter().map(|p| p.to_f64()).collect();
+    let geom = face_geometry(&v64, &working.f);
+    let Some(scene) = RayScene::new(&v64, &working.f) else { return Vec::new() };
+    let started = std::time::Instant::now();
+    let seg = segment::segment_faces(
+        &scene,
+        &working.f,
+        &geom,
+        thick,
+        res,
+        &segment::SegParams::default(),
+    );
+    tracing::info!(
+        fragment = name,
+        raw = seg.raw_fraction,
+        fracture = seg.fracture_fraction,
+        votes = seg.votes,
+        boundary_angle = seg.boundary_angle,
+        seconds = started.elapsed().as_secs_f64(),
+        "segmentation"
+    );
+    seg.labels
 }
 
 /// The file's identity for the cache validity rule of R §3.7.

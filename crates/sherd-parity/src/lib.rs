@@ -12,9 +12,9 @@
 //! Phase 1a step S1 provided the dump's layout and its manifest, which is enough to check that a
 //! fixture is intact and to read the run's parameters. Step S4 added the array reader ([`npy`],
 //! over `npyz`), the comparison vocabulary ([`report`]) and the stage runners behind
-//! `sherd-refit-rs parity --stage …` ([`stages`]) for the three stages the port computes so far:
-//! `load`, `thickness` and `working mesh`. The later rows of D §10.2's table join them with the
-//! stages they judge, in phases 1b–1d.
+//! `sherd-refit-rs parity --stage …` ([`stages`]) for the three stages the port computed then:
+//! `load`, `thickness` and `working mesh`. Step B1 added `segmentation`. The later rows of
+//! D §10.2's table join them with the stages they judge, in phases 1b–1d.
 
 pub mod layout;
 pub mod manifest;

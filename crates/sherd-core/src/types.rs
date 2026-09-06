@@ -35,6 +35,19 @@ impl FaceLabel {
     pub fn is_fracture(self) -> bool {
         matches!(self, Self::Fracture)
     }
+
+    /// The label a cache file's `labels` tensor byte stands for, or `None` for a byte no variant
+    /// uses (D §4.2: the cache is validated, not trusted).
+    #[inline]
+    pub fn from_u8(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Shell),
+            1 => Some(Self::Fracture),
+            2 => Some(Self::Solid),
+            3 => Some(Self::Rim),
+            _ => None,
+        }
+    }
 }
 
 /// The file a fragment was read from, and enough of its metadata to tell whether a cache entry
@@ -205,6 +218,10 @@ mod tests {
         assert_eq!(FaceLabel::Fracture as u8, 1);
         assert!(FaceLabel::Fracture.is_fracture());
         assert!(!FaceLabel::Shell.is_fracture());
+        for label in [FaceLabel::Shell, FaceLabel::Fracture, FaceLabel::Solid, FaceLabel::Rim] {
+            assert_eq!(FaceLabel::from_u8(label as u8), Some(label));
+        }
+        assert_eq!(FaceLabel::from_u8(4), None);
     }
 
     #[test]

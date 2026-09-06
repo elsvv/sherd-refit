@@ -14,6 +14,8 @@ name = "sherd_parity"
 sherd-core.workspace = true
 # `npyz` reads the fixtures' .npy arrays; the reader itself lands in plan step S4.
 npyz.workspace = true
+# The native segmentation transfer projects every reference face onto the port's mesh (step B1).
+rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -192,9 +192,11 @@ was corrected to follow (phase-1a verification, finding F11):
 
 A `safetensors` file. Tensors (all little-endian): `V f32[n,3]`, `F u32[m,3]`, `labels u8[m]`,
 `S f32[20000,3]`, `sp u32`, `Pf f32`, `fp u32`, `brk_P/brk_ns/brk_nf/brk_f f32[k,3]`,
-`brk_sub u32`, `margin_idx u32`, optional `features/*`. Phase 1a writes `V` and `F`; each later
-stage adds its own tensors beside them, and neither the reader nor `cache_version` minds — the
-version moves when the *set* changes meaning, not when a tensor is added.
+`brk_sub u32`, `margin_idx u32`, optional `features/*`. Phase 1a writes `V` and `F`, step B1
+`labels`; each later stage adds its own tensors beside them, and the reader ignores what it does
+not know. `cache_version` moves when the set changes *meaning* — which includes a tensor becoming
+one the reader requires: `labels` took it from 1 to 2, so a cache written before the segmentation
+existed is refused and recomputed rather than read back with no labels.
 
 Metadata: `format=sherd-cache`, `cache_version`, `algo_ref`, `core_version`, `name`,
 `source_path`, `source_size`, `source_mtime_ns`, `source_sha256` (optional), `target_faces`,
@@ -578,6 +580,19 @@ it lands on R §13's pair gates, which are exact-set gates. It belongs on the ph
 list, and it is the strongest argument for E6 (replicating PCG64, ≈ 2 days) if those gates ever
 fail for this reason.
 
+**The segmentation row is the first gate it has broken, and the row is not being widened for it**
+(step B1, `docs/superpowers/notes/2026-09-06-b1-segmentation.md` §5). 66 of 68 fragments pass the
+native column, median agreement 0.9935; `Pot_B_Piece_01_Mesh` reaches 0.9142 and `frag_010`
+0.9687. Feeding the port's own `t` into the *reference's own* working mesh reproduces 0.914160 and
+0.970653 — so 100 % and 94 % of the two gaps is `t`, and at the reference's `t` the same code
+agrees with the reference to the last bit on all 68 fragments (injected agreement exactly
+1.000000000). A seed sweep of the reference's own estimator says which value is right:
+`Pot_B_Piece_01`'s fixture value, 5.6226, is the **maximum** of seeds 0–11 and 4.2 % above every
+other one, while the port's 5.4132 is 0.3 % from the sweep's median; `frag_010`'s fixture value is
+the **minimum** of its twelve and the port's sits inside the cloud. The port is not wrong on these
+two fragments — the estimator's sample is. E6 is therefore now argued for by evidence rather than
+by anticipation.
+
 ### 10.3 Benchmark gates
 
 Quality: exactly R§13 on every listed set, run natively (no injection), CPU and GPU. Runtime
@@ -642,6 +657,7 @@ shorten phase 1+2 to ≈ 14 weeks because GPU work can start once the CPU ICP is
 | 0 | Python fixture sink and dumps; `compare_fixtures.py`; fixtures for terracotta, pots A/B/C/G/H, synthetic 20, summary fixtures for the two large sets; slab fixture committed | 1 | fixtures reproducible from `9d4b9d3` twice, byte-identical | none |
 | 1a | workspace, IO (E2), cleaning, components, thickness, decimation (E1), Taubin, working mesh, cache | 2.5 | native tolerances of §10.2 up to "working mesh" on all fixtures | decimation choice; PLY edge cases |
 | 1b | BVH, hash grid (E3, E4), segmentation, breaklines, match arrays | 2.5 | segmentation ≥ 0.995 injected / ≥ 0.97 native; breakline gates | BVH correctness; `voxel_down_sample` semantics |
+| 1b, step B1 | done: segmentation (R §3.4), `spatial::bvh`, `spatial::kdtree`, the `labels` tensor, the `segmentation` parity row | | injected 1.000000000 on all 68 fragments; native 66 of 68 (§10.2 on the two others) | `voxel_down_sample` semantics settled: the bucket rule is exact, only the voxel *order* is a hash artefact (PMC-4) |
 | 1c | hypotheses, coarse, NMS, ICP (E5), verification, `match_pair`, screening flags | 2.5 | stage-2 injected tolerances on every fixture pair | ICP corner cases (empty correspondences), tie handling |
 | 1d | assembly, refinement, recentre, report/transforms/meshes, renderer, CLI, determinism tests | 2 | R§13 gates natively; CI green on 4 OSs | none major |
 | 1e | profiling and CPU tuning to §10.3 CPU gates | 1.5 | CPU gates | 2 h collection gate has 1.6× margin only |
@@ -670,7 +686,11 @@ automatic fallback.
 1. **Decimator:** accept a working mesh that differs from Open3D's (statistical parity), or
    invest a week in an own Garland–Heckbert to get closer? (Recommendation: E1 first; accept.)
 2. **Parity standard:** tolerance-based parity as in §10.2, or bit-parity in native mode via
-   numpy RNG replication (E6, ≈ 2 days, fragile)? (Recommendation: tolerance-based.)
+   numpy RNG replication (E6, ≈ 2 days, fragile)? (Recommendation was: tolerance-based.
+   **Now open again on evidence:** step B1 showed the thickness sample's seed spread breaking the
+   native segmentation gate on 2 of 68 fragments, with the port's `t` nearer the estimator's
+   centre than the fixture's on one of them — §10.2's t-propagation paragraph and
+   `notes/2026-09-06-b1-segmentation.md` §5. E6 would remove the class rather than absorb it.)
 3. **PMC items to apply in phase 1** (R§12): proposed to apply PMC-4, 6, 11, 12, 13, 14 in
    phase 1 (no result change expected), PMC-1, 7, 8 in phase 1 with re-verification, and to
    leave PMC-5 for a later algorithm change. Confirm.

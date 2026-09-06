@@ -27,19 +27,18 @@
 //! fixtures. The one place `f64` is used is the reference's own: the `> 0.7` test compares the
 //! `f64` face normals, not the `f32` ray directions.
 //!
-//! The ray casting itself is `parry3d` (experiment E3/E4). [`RayScene`] is a placeholder home for
-//! it: the shared BVH of D §6.2 lands in `crate::spatial` in phase 1b, and the segmentation of
-//! R §3.4 will cast its cone of seven rays through the same structure.
+//! The ray casting itself is `parry3d` (experiment E3/E4), through the shared
+//! [`RayScene`] of D §6.2 — the same structure the seven-ray cone
+//! of R §3.4.3 casts through, re-exported here because this module was its first caller.
 
 use nalgebra::Matrix3;
 use parry3d::math::Vector;
-use parry3d::query::Ray;
-use parry3d::shape::{CompositeShapeRef, TriMesh};
 use rand_chacha::ChaCha8Rng;
 use rand_chacha::rand_core::Rng;
 use rayon::prelude::*;
 
 use crate::mesh::geometry::FaceGeometry;
+pub use crate::spatial::bvh::RayScene;
 
 /// The reference hard-codes this seed for the thickness rays (R §3, `rng_pre = rng(0)`).
 pub const SEED: u64 = 0;
@@ -81,51 +80,6 @@ impl RayHits {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.t_hit.is_empty()
-    }
-}
-
-/// A BVH over a triangle mesh, for first-hit ray queries (experiment E3/E4).
-///
-/// `parry3d` 0.30 with `enhanced-determinism`, built **without** `TriMeshFlags::ORIENTED`: the
-/// pseudo-normals that flag computes are wrong on decimated fracture surfaces (29 of 30 000 points
-/// on one closed manifold fragment), and nothing here needs them. Vertices are `f32`, which is
-/// what Open3D's `RaycastingScene` uses too, so both implementations see the same geometry.
-///
-/// This type is temporary: D §6.2's shared BVH lands in `crate::spatial` in phase 1b, and this
-/// module will use that instead.
-#[derive(Clone, Debug)]
-pub struct RayScene {
-    mesh: TriMesh,
-}
-
-impl RayScene {
-    /// Builds the BVH. Returns `None` for a mesh with no triangle, which `parry` refuses.
-    #[allow(clippy::cast_possible_truncation, reason = "the scene is f32, as Open3D's is")]
-    pub fn new(v: &[[f64; 3]], f: &[[u32; 3]]) -> Option<Self> {
-        if f.is_empty() {
-            return None;
-        }
-        let vertices: Vec<Vector> =
-            v.iter().map(|p| Vector::new(p[0] as f32, p[1] as f32, p[2] as f32)).collect();
-        TriMesh::new(vertices, f.to_vec()).ok().map(|mesh| Self { mesh })
-    }
-
-    /// First hit along a ray, as `(face index, distance)`.
-    ///
-    /// The direction is not normalised by this call, so the distance is in units of `|dir|` —
-    /// exactly Embree's contract, and the callers here always pass a unit direction.
-    pub fn first_hit(&self, origin: [f32; 3], dir: [f32; 3]) -> Option<(u32, f32)> {
-        let ray = Ray::new(
-            Vector::new(origin[0], origin[1], origin[2]),
-            Vector::new(dir[0], dir[1], dir[2]),
-        );
-        CompositeShapeRef(&self.mesh).cast_local_ray(&ray, f32::MAX, true)
-    }
-
-    /// Number of triangles in the scene.
-    #[inline]
-    pub fn n_faces(&self) -> usize {
-        self.mesh.indices().len()
     }
 }
 
@@ -459,8 +413,8 @@ mod tests {
     #![allow(clippy::float_cmp, reason = "the histogram code is asserted exactly on purpose")]
 
     use super::{
-        MIN_HITS, MISS, RayHits, RayScene, estimate_thickness, hist_mode, obb_min_extent,
-        percentile90, sample_face_indices, thickness_from_hits,
+        MIN_HITS, MISS, RayHits, estimate_thickness, hist_mode, obb_min_extent, percentile90,
+        sample_face_indices, thickness_from_hits,
     };
     use crate::mesh::Mesh;
     use crate::mesh::geometry::face_geometry;
@@ -668,20 +622,5 @@ mod tests {
             let rel = (got - open3d).abs() / open3d;
             assert!(rel < 1e-7, "{name}: {got} against Open3D's {open3d} ({rel:.3e} relative)");
         }
-    }
-
-    #[test]
-    fn the_ray_scene_reports_first_hits_and_misses() {
-        let m = box_mesh([-1.0; 3], [1.0; 3]);
-        let scene = RayScene::new(&m.v, &m.f).expect("twelve triangles");
-        assert_eq!(scene.n_faces(), 12);
-        // Straight down the z axis from above: the far face at z = 1 is 4 away.
-        let (_, t) = scene.first_hit([0.0, 0.0, 5.0], [0.0, 0.0, -1.0]).expect("hits the lid");
-        assert!((t - 4.0).abs() < 1e-5, "distance {t}");
-        // Started inside: the first hit is the wall, 1 away.
-        let (_, t) = scene.first_hit([0.0, 0.0, 0.0], [0.0, 0.0, -1.0]).expect("hits from inside");
-        assert!((t - 1.0).abs() < 1e-5, "distance {t}");
-        assert!(scene.first_hit([0.0, 0.0, 5.0], [0.0, 0.0, 1.0]).is_none(), "away from the box");
-        assert!(RayScene::new(&m.v, &[]).is_none());
     }
 }

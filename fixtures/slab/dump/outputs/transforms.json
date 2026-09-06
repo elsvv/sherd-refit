@@ -1,0 +1,119 @@
+{
+ "fragments": {
+  "pieceA": {
+   "group": 0,
+   "matrix": [
+    [
+     1.0,
+     0.0,
+     0.0,
+     87.82261677622459
+    ],
+    [
+     0.0,
+     1.0,
+     0.0,
+     23.103135401460516
+    ],
+    [
+     0.0,
+     0.0,
+     1.0,
+     -131.97432591757325
+    ],
+    [
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "placed": true
+  },
+  "pieceB": {
+   "group": 0,
+   "matrix": [
+    [
+     -0.6951534410854441,
+     0.4091388954946935,
+     0.5910728022337406,
+     76.77336187056622
+    ],
+    [
+     0.7024762705307761,
+     0.2120758545470144,
+     0.6793753905311327,
+     29.73048177771563
+    ],
+    [
+     0.15260662727496352,
+     0.8874847582418163,
+     -0.43483562549568583,
+     -142.42597619596503
+    ],
+    [
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "placed": true
+  }
+ },
+ "groups": [
+  [
+   "pieceA",
+   "pieceB"
+  ]
+ ],
+ "params": {
+  "brk_voxel": 0.5,
+  "coarse_delta": 0.15,
+  "coarse_points": 60,
+  "coarse_res": 2.3,
+  "dihedral_tol": 25.0,
+  "early_reject_tight": 0.0,
+  "facing_delta": 0.3,
+  "facing_res": 1.0,
+  "frac_per_t2": 150.0,
+  "gap_res": 0.45,
+  "icp_delta": 0.04,
+  "icp_res": 0.6,
+  "macro_inner": 0.15,
+  "macro_outer": 0.6,
+  "margin_points": 6000,
+  "max_frac_points": 12000,
+  "max_gap": 0.03,
+  "max_pen": 0.005,
+  "min_cont_n": 0.8,
+  "min_frac_points": 5000,
+  "min_seam": 3.0,
+  "min_tight": 0.25,
+  "near_delta": 0.5,
+  "near_res": 4.0,
+  "nms_delta": 0.5,
+  "pen_delta": 0.06,
+  "pen_res": 0.9,
+  "reg_points": 6000,
+  "screen_min_pairs": 200,
+  "screen_points": 150,
+  "screen_top_k": 0,
+  "seam_delta": 0.12,
+  "seam_res": 1.8,
+  "second_pass_stage1": 400,
+  "second_pass_stage2": 40,
+  "second_pass_top": 0,
+  "seed": 0,
+  "stage1": 250,
+  "stage1_delta": 0.06,
+  "stage1_floor": 0.0,
+  "stage1_res": 0.9,
+  "stage2": 10,
+  "surface_points": 20000,
+  "thick_ratio": 2.5,
+  "tight_delta": 0.01,
+  "tight_res": 0.15
+ },
+ "thickness": 30.15668296813965
+}

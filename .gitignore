@@ -10,3 +10,9 @@ out*/
 # large data folders (remove these lines to track them)
 input/
 papers/
+
+# ...but not the committed parity fixture: `fixtures/slab/input/` is the collection the dump was
+# made from and `dump/outputs/` its expected transforms.json / report.json, both of which the
+# rules above would otherwise swallow (docs/superpowers/notes/2026-09-06-p0-fixtures.md).
+!fixtures/**/input/
+!fixtures/**/outputs/

@@ -15,13 +15,21 @@
 //! | `V` | f32 | `[n, 3]` | §3.3 working-mesh vertices |
 //! | `F` | u32 | `[m, 3]` | §3.3 working-mesh triangles |
 //! | `labels` | u8 | `[m]` | §3.4 shell (0) or fracture (1) per face |
+//! | `brk_P` | f32 | `[k, 3]` | §3.5.3 breakline points |
+//! | `brk_ns`, `brk_nf`, `brk_f` | f32 | `[k, 3]` | §3.5.4 macro normals and the in-plane axis |
+//! | `brk_sub` | u32 | `[j]` | §3.5.5 hypothesis subset |
 //!
-//! D §4.2 lists the match arrays (`S`, `sp`, `Pf`, `fp`, `brk_*`, `margin_idx`) and the optional
+//! D §4.2 lists the sampled match arrays (`S`, `sp`, `Pf`, `fp`, `margin_idx`) and the optional
 //! `features/*` beside them. Those stages are still ahead; the reader treats an unknown tensor as
 //! data it does not need yet and the writer adds them when they exist, so a newer cache does not
-//! confuse this build. A tensor the port *needs* is a different matter: `labels` joined the set in
-//! step B1 and [`crate::CACHE_VERSION`] moved with it, so a cache written before the segmentation
-//! existed is refused by its version rather than read back with no labels.
+//! confuse this build. A tensor the port *needs* is a different matter, and moving
+//! [`crate::CACHE_VERSION`] is how it is announced: `labels` took it from 1 to 2 in step B1 and
+//! the five `brk_*` tensors from 2 to 3 in step B2, so a cache written before either existed is
+//! refused by its version rather than read back half empty.
+//!
+//! The `brk_*` tensors are `f32` because [`Breaklines`](crate::fragment::breakline::Breaklines)
+//! is (D §4.1), so the arrays a warm run reads back are the arrays a cold run computed, bit for
+//! bit — the same rule `V` and `WorkingMesh` follow.
 //!
 //! Everything else is metadata: the source's identity for the validity rule, the scalars of
 //! R §3.2–3.3, and the version triple of D §4.3.
@@ -47,6 +55,7 @@ use safetensors::tensor::{Dtype, TensorView};
 use serde::{Deserialize, Serialize};
 
 use super::Fragment;
+use super::breakline::{Breaklines, BrkParams};
 use crate::error::{Error, Result};
 use crate::types::{FaceLabel, SourceRef, WorkingMesh};
 use crate::vec3::Vec3f;
@@ -123,9 +132,15 @@ pub struct CacheMeta {
     pub n_orig_faces: u32,
     /// Which executor produced the file (D §4.3). Preprocessing is CPU-only in phase 1.
     pub backend: String,
-    /// The match-array parameters the `md_*` tensors were built with (R §3.7's `mdp_*`), once
-    /// phase 1b writes them. A cache whose `md_params` differ from the run's recomputes only the
-    /// match arrays, as the reference does.
+    /// The parameters the five `brk_*` tensors were built with — the breakline half of R §3.7's
+    /// `mdp_*`. A cache whose `brk_params` differ from the run's has its breaklines recomputed and
+    /// nothing else ([`Fragment::load_or_build`]), which is the reference's rule for the match
+    /// arrays. Absent only in a cache written by a build that had no breaklines, which this
+    /// build's `cache_version` refuses anyway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brk_params: Option<BrkParams>,
+    /// The parameters the sampled `md_*` tensors were built with (the rest of R §3.7's `mdp_*`),
+    /// once the next step writes them. Same rule as `brk_params`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub md_params: Option<serde_json::Value>,
     /// Roadmap items 4 and 6 (D §11); absent in phase 1.
@@ -157,6 +172,7 @@ impl CacheMeta {
             n_orig_vertices: fragment.n_orig_vertices,
             n_orig_faces: fragment.n_orig_faces,
             backend: "cpu".to_owned(),
+            brk_params: Some(fragment.brk.params),
             md_params: None,
             features: None,
         }
@@ -208,9 +224,23 @@ pub fn to_bytes(fragment: &Fragment) -> Result<Vec<u8>> {
         fragment.mesh.v.iter().flat_map(|p| p.to_array()).flat_map(f32::to_le_bytes).collect();
     let f: Vec<u8> = fragment.mesh.f.iter().flatten().copied().flat_map(u32::to_le_bytes).collect();
     let labels: Vec<u8> = fragment.labels.iter().map(|&l| l as u8).collect();
+    let brk = &fragment.brk;
+    let points = points_bytes(&brk.p);
+    let ns = points_bytes(&brk.ns);
+    let nf = points_bytes(&brk.nf);
+    let axis = points_bytes(&brk.f);
+    let sub: Vec<u8> = brk.sub.iter().copied().flat_map(u32::to_le_bytes).collect();
+    // Every shape is the array's own length rather than a shared `k`: the writer states what it
+    // holds and the reader is what checks that the five hang together, which is the only order in
+    // which a file written elsewhere is checked at all.
     let tensors = vec![
         ("F", TensorView::new(Dtype::U32, vec![fragment.mesh.f.len(), 3], &f)),
         ("V", TensorView::new(Dtype::F32, vec![fragment.mesh.v.len(), 3], &v)),
+        ("brk_P", TensorView::new(Dtype::F32, vec![brk.p.len(), 3], &points)),
+        ("brk_f", TensorView::new(Dtype::F32, vec![brk.f.len(), 3], &axis)),
+        ("brk_nf", TensorView::new(Dtype::F32, vec![brk.nf.len(), 3], &nf)),
+        ("brk_ns", TensorView::new(Dtype::F32, vec![brk.ns.len(), 3], &ns)),
+        ("brk_sub", TensorView::new(Dtype::U32, vec![brk.sub.len()], &sub)),
         ("labels", TensorView::new(Dtype::U8, vec![fragment.labels.len()], &labels)),
     ];
     let mut views = Vec::with_capacity(tensors.len());
@@ -247,45 +277,10 @@ pub fn from_bytes(bytes: &[u8], path: impl AsRef<Path>) -> Result<Fragment> {
     let file = safetensors::SafeTensors::deserialize(bytes)
         .map_err(|e| Error::cache(path, format!("reading the tensors: {e}")))?;
 
-    let v_view = file.tensor("V").map_err(|e| Error::cache(path, format!("tensor V: {e}")))?;
-    if v_view.dtype() != Dtype::F32 || v_view.shape().len() != 2 || v_view.shape()[1] != 3 {
-        return Err(Error::cache(
-            path,
-            format!("tensor V is {:?} {:?}, expected F32 [n, 3]", v_view.dtype(), v_view.shape()),
-        ));
-    }
-    let f_view = file.tensor("F").map_err(|e| Error::cache(path, format!("tensor F: {e}")))?;
-    if f_view.dtype() != Dtype::U32 || f_view.shape().len() != 2 || f_view.shape()[1] != 3 {
-        return Err(Error::cache(
-            path,
-            format!("tensor F is {:?} {:?}, expected U32 [m, 3]", f_view.dtype(), f_view.shape()),
-        ));
-    }
-
     // Little-endian by the safetensors specification, and read as such rather than cast: the
     // buffer of a file read into a `Vec<u8>` carries no alignment guarantee.
-    let v: Vec<Vec3f> = v_view
-        .data()
-        .chunks_exact(12)
-        .map(|c| {
-            Vec3f::new(
-                f32::from_le_bytes([c[0], c[1], c[2], c[3]]),
-                f32::from_le_bytes([c[4], c[5], c[6], c[7]]),
-                f32::from_le_bytes([c[8], c[9], c[10], c[11]]),
-            )
-        })
-        .collect();
-    let f: Vec<[u32; 3]> = f_view
-        .data()
-        .chunks_exact(12)
-        .map(|c| {
-            [
-                u32::from_le_bytes([c[0], c[1], c[2], c[3]]),
-                u32::from_le_bytes([c[4], c[5], c[6], c[7]]),
-                u32::from_le_bytes([c[8], c[9], c[10], c[11]]),
-            ]
-        })
-        .collect();
+    let v = read_points(&file, "V", path)?;
+    let f = read_triangles(&file, "F", path)?;
     let n_v = u32::try_from(v.len()).unwrap_or(u32::MAX);
     if let Some(bad) = f.iter().flatten().find(|&&i| i >= n_v) {
         return Err(Error::cache(path, format!("triangle index {bad} is outside V ({n_v})")));
@@ -310,6 +305,23 @@ pub fn from_bytes(bytes: &[u8], path: impl AsRef<Path>) -> Result<Fragment> {
         .map(|&b| FaceLabel::from_u8(b).ok_or_else(|| Error::cache(path, format!("label {b}"))))
         .collect::<Result<Vec<FaceLabel>>>()?;
 
+    let brk_params = meta.brk_params.ok_or_else(|| Error::cache(path, "no brk_params"))?;
+    let brk = Breaklines {
+        params: brk_params,
+        p: read_points(&file, "brk_P", path)?,
+        ns: read_points(&file, "brk_ns", path)?,
+        nf: read_points(&file, "brk_nf", path)?,
+        f: read_points(&file, "brk_f", path)?,
+        sub: read_u32(&file, "brk_sub", path)?,
+    };
+    if brk.ns.len() != brk.len() || brk.nf.len() != brk.len() || brk.f.len() != brk.len() {
+        return Err(Error::cache(path, "the brk_* frames do not describe brk_P"));
+    }
+    let k = u32::try_from(brk.len()).unwrap_or(u32::MAX);
+    if let Some(bad) = brk.sub.iter().find(|&&i| i >= k) {
+        return Err(Error::cache(path, format!("brk_sub {bad} is outside brk_P ({k})")));
+    }
+
     #[allow(
         clippy::cast_possible_truncation,
         reason = "`res` was written from an f32 and round-trips exactly"
@@ -326,6 +338,7 @@ pub fn from_bytes(bytes: &[u8], path: impl AsRef<Path>) -> Result<Fragment> {
         },
         mesh,
         labels,
+        brk,
         thick: meta.thick,
         thick_mode: meta.thick_mode,
         watertight: meta.watertight,
@@ -419,6 +432,71 @@ fn meta_from_bytes(bytes: &[u8], path: &Path) -> Result<CacheMeta> {
     Ok(meta)
 }
 
+/// The little-endian `f32` bytes of a point array.
+fn points_bytes(p: &[Vec3f]) -> Vec<u8> {
+    p.iter().flat_map(|p| p.to_array()).flat_map(f32::to_le_bytes).collect()
+}
+
+/// One `u32[m, 3]` tensor as triangles, checking its dtype and shape.
+fn read_triangles(
+    file: &safetensors::SafeTensors<'_>,
+    name: &str,
+    path: &Path,
+) -> Result<Vec<[u32; 3]>> {
+    let view = file.tensor(name).map_err(|e| Error::cache(path, format!("tensor {name}: {e}")))?;
+    if view.dtype() != Dtype::U32 || view.shape().len() != 2 || view.shape()[1] != 3 {
+        return Err(Error::cache(
+            path,
+            format!("tensor {name} is {:?} {:?}, expected U32 [m, 3]", view.dtype(), view.shape()),
+        ));
+    }
+    Ok(view
+        .data()
+        .chunks_exact(12)
+        .map(|c| {
+            [
+                u32::from_le_bytes([c[0], c[1], c[2], c[3]]),
+                u32::from_le_bytes([c[4], c[5], c[6], c[7]]),
+                u32::from_le_bytes([c[8], c[9], c[10], c[11]]),
+            ]
+        })
+        .collect())
+}
+
+/// One `f32[n, 3]` tensor as points, checking its dtype and shape.
+fn read_points(file: &safetensors::SafeTensors<'_>, name: &str, path: &Path) -> Result<Vec<Vec3f>> {
+    let view = file.tensor(name).map_err(|e| Error::cache(path, format!("tensor {name}: {e}")))?;
+    if view.dtype() != Dtype::F32 || view.shape().len() != 2 || view.shape()[1] != 3 {
+        return Err(Error::cache(
+            path,
+            format!("tensor {name} is {:?} {:?}, expected F32 [n, 3]", view.dtype(), view.shape()),
+        ));
+    }
+    Ok(view
+        .data()
+        .chunks_exact(12)
+        .map(|c| {
+            Vec3f::new(
+                f32::from_le_bytes([c[0], c[1], c[2], c[3]]),
+                f32::from_le_bytes([c[4], c[5], c[6], c[7]]),
+                f32::from_le_bytes([c[8], c[9], c[10], c[11]]),
+            )
+        })
+        .collect())
+}
+
+/// One `u32[n]` tensor as indices, checking its dtype and shape.
+fn read_u32(file: &safetensors::SafeTensors<'_>, name: &str, path: &Path) -> Result<Vec<u32>> {
+    let view = file.tensor(name).map_err(|e| Error::cache(path, format!("tensor {name}: {e}")))?;
+    if view.dtype() != Dtype::U32 || view.shape().len() != 1 {
+        return Err(Error::cache(
+            path,
+            format!("tensor {name} is {:?} {:?}, expected U32 [n]", view.dtype(), view.shape()),
+        ));
+    }
+    Ok(view.data().chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+}
+
 /// `os.path.abspath`'s Rust equivalent: the path against the working directory, unresolved.
 ///
 /// Symbolic links are deliberately left alone — R §3.7 compares what the caller passed, not where
@@ -454,6 +532,7 @@ mod tests {
         load_valid, read, read_meta, to_bytes, unhex, write,
     };
     use crate::fragment::Fragment;
+    use crate::fragment::breakline::{Breaklines, BrkParams};
     use crate::types::{FaceLabel, SourceRef, WorkingMesh};
     use crate::vec3::vec3;
     use crate::{ALGO_REF, CACHE_VERSION};
@@ -490,6 +569,14 @@ mod tests {
                 FaceLabel::Fracture,
                 FaceLabel::Shell,
             ],
+            brk: Breaklines {
+                params: BrkParams::at(3.531_017_303_466_797),
+                p: vec![vec3(0.5, 0.0, 0.0), vec3(0.0, 0.5, 0.123_456_79)],
+                ns: vec![vec3(0.0, 0.0, -1.0), vec3(0.0, -1.0, 0.0)],
+                nf: vec![vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0)],
+                f: vec![vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0)],
+                sub: vec![1],
+            },
             thick: 3.531_017_303_466_797,
             thick_mode: 4.044_1,
             watertight: true,
@@ -542,6 +629,7 @@ mod tests {
         assert_eq!(back.mesh.v, fr.mesh.v, "vertices");
         assert_eq!(back.mesh.f, fr.mesh.f, "faces");
         assert_eq!(back.labels, fr.labels, "labels");
+        assert_eq!(back.brk, fr.brk, "the breakline arrays, frames, subset and parameters");
         assert_eq!(back.mesh.face_normals, fr.mesh.face_normals, "face normals");
         assert_eq!(back.mesh.face_areas, fr.mesh.face_areas, "face areas");
         assert_eq!(back.mesh.face_centroids, fr.mesh.face_centroids, "face centroids");
@@ -664,6 +752,34 @@ mod tests {
     fn the_extension_is_the_designs() {
         assert_eq!(EXTENSION, "sherd");
         assert_eq!(cache_path("/out", "x").extension().unwrap(), "sherd");
+    }
+
+    /// A cache whose `brk_sub` points outside `brk_P`, or whose frames do not describe the points,
+    /// is refused rather than read back and indexed.
+    #[test]
+    fn a_cache_whose_breaklines_do_not_hang_together_is_refused() {
+        let dir = scratch("badbrk");
+        let source = dir.join("pieceA.ply");
+        std::fs::write(&source, b"x").unwrap();
+
+        let mut fr = sample(&source);
+        fr.brk.sub = vec![7];
+        let err = from_bytes(&to_bytes(&fr).unwrap(), &source).unwrap_err().to_string();
+        assert!(err.contains("brk_sub 7 is outside brk_P"), "{err}");
+
+        let mut fr = sample(&source);
+        fr.brk.ns.pop();
+        let err = from_bytes(&to_bytes(&fr).unwrap(), &source).unwrap_err().to_string();
+        assert!(err.contains("frames do not describe brk_P"), "{err}");
+
+        // And a fragment with no breakline at all round-trips as one, rather than as an error:
+        // an all-shell mesh is a legitimate fragment (R §3.5.3).
+        let mut fr = sample(&source);
+        fr.brk = Breaklines { params: BrkParams::at(fr.thick), ..Breaklines::default() };
+        let back = from_bytes(&to_bytes(&fr).unwrap(), &source).unwrap();
+        assert!(back.brk.is_empty());
+        assert_eq!(back.brk, fr.brk);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A cache whose `labels` tensor does not describe the face list is refused, not read.

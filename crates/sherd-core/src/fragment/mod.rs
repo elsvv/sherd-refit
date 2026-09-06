@@ -7,9 +7,10 @@
 //!
 //! Step S3 fills in the preprocessing up to the working mesh — [`Fragment::from_mesh_file`] and
 //! everything it calls; step S4 the cache ([`cache`], [`Fragment::load_or_build`]); step B1 the
-//! shell/fracture segmentation ([`segment`]), whose labels are the second tensor of the cache.
-//! Breaklines and the match arrays follow, each adding its own field to [`Fragment`] and its own
-//! tensor to the cache.
+//! shell/fracture segmentation ([`segment`]), whose labels are the second tensor of the cache;
+//! step B2 the breaklines and their frames ([`breakline`]), which are the next five. The sampled
+//! match arrays of R §3.5.1–3.5.2 and §3.5.6 follow, adding their own field to [`Fragment`] and
+//! their own tensors to the cache.
 
 pub mod breakline;
 pub mod cache;
@@ -21,20 +22,22 @@ pub mod thickness;
 use std::path::Path;
 
 use crate::error::{Error, Result};
+use crate::fragment::breakline::{Breaklines, BrkParams};
 use crate::mesh::adjacency::closed_enough;
 use crate::mesh::clean::{remove_degenerate_triangles, remove_unreferenced_vertices};
 use crate::mesh::decimate::{decimate, face_budget};
-use crate::mesh::geometry::{face_geometry, median_edge};
+use crate::mesh::geometry::{FaceGeometry, face_geometry, median_edge};
 use crate::mesh::taubin::taubin;
 use crate::spatial::bvh::RayScene;
 use crate::types::{FaceLabel, FragId, SourceRef, WorkingMesh};
 use crate::vec3::Vec3f;
 
-/// One fragment of a collection, at the state plan step B1 leaves it in.
+/// One fragment of a collection, at the state plan step B2 leaves it in.
 ///
-/// D §4.1 defines the finished struct; the fields below are the ones R §3.1–3.4 produce, which is
-/// the mesh, its wall, and the shell/fracture labels the matcher works on. The match arrays
-/// (R §3.5) and the shared BVHs join them in the next steps of phase 1b.
+/// D §4.1 defines the finished struct; the fields below are the ones R §3.1–3.5.5 produce, which
+/// is the mesh, its wall, the shell/fracture labels the matcher works on, and the breakline it
+/// anchors its hypotheses on. The sampled match arrays (R §3.5.1–3.5.2, §3.5.6) and the shared
+/// BVHs join them in the next steps of phase 1b.
 #[derive(Clone, Debug)]
 pub struct Fragment {
     /// Index inside the collection, in the order R §2 discovers the files. `from_mesh_file`
@@ -48,6 +51,9 @@ pub struct Fragment {
     pub mesh: WorkingMesh,
     /// Shell or fracture, one per face of `mesh`, in face order (R §3.4).
     pub labels: Vec<FaceLabel>,
+    /// The breakline points, their frames and the hypothesis subset (R §3.5.3–3.5.5), built at
+    /// this fragment's own `thick`.
+    pub brk: Breaklines,
     /// Wall thickness `t` (R §3.2) — the unit every scale-free threshold of R §1.2 is in.
     pub thick: f64,
     /// The unfiltered ray mode, reported beside `thick` so a fragment whose two values disagree
@@ -175,7 +181,14 @@ impl Fragment {
             res as f32,
         );
 
-        let labels = segment_working_mesh(&working, thick, res, name);
+        // R §3.4 and R §3.5.3–3.5.5 both run on the working mesh's `f64` geometry, and both must
+        // run on the geometry derived from the **narrowed** vertices, for the reason
+        // `WorkingMesh::from_parts` derives its own arrays from them: a fragment computed from the
+        // file and the same fragment read back from the cache have to be the same fragment.
+        let v64: Vec<[f64; 3]> = working.v.iter().map(|p| p.to_f64()).collect();
+        let geom = face_geometry(&v64, &working.f);
+        let labels = segment_working_mesh(&working, &v64, &geom, thick, res, name);
+        let brk = breaklines_of(&v64, &working.f, &geom, &labels, thick, name);
 
         Ok(Self {
             id: 0,
@@ -183,6 +196,7 @@ impl Fragment {
             source,
             mesh: working,
             labels,
+            brk,
             thick,
             thick_mode,
             watertight,
@@ -212,9 +226,22 @@ impl Fragment {
         let path = path.as_ref();
         let cap = u32::try_from(target_faces).unwrap_or(u32::MAX);
         if let Some(cache) = cache
-            && let Some(fragment) = cache::load_valid(cache, path, cap, name)
+            && let Some(mut fragment) = cache::load_valid(cache, path, cap, name)
         {
             tracing::debug!(fragment = name, cache = %cache.display(), "cache hit");
+            // R §3.7: a cache that is valid but was built with other match-array parameters has
+            // those arrays recomputed, not the whole fragment. In phase 1 the knobs are
+            // constants, so this can only fire on a cache written by another build.
+            if fragment.brk.params != BrkParams::at(fragment.thick) {
+                tracing::info!(
+                    fragment = name,
+                    "the cached breaklines were built with other parameters; recomputing them"
+                );
+                fragment.rebuild_breaklines();
+                if let Err(e) = cache::write(&fragment, cache) {
+                    tracing::warn!(fragment = name, "the cache could not be updated: {e}");
+                }
+            }
             return Ok((fragment, true));
         }
         let fragment = Self::from_mesh_file_named(path, target_faces, name)?;
@@ -224,6 +251,17 @@ impl Fragment {
             tracing::warn!(fragment = name, "the cache could not be written: {e}");
         }
         Ok((fragment, false))
+    }
+
+    /// R §3.5.3–3.5.5 again, at this fragment's own `thick` and the shipped knobs.
+    ///
+    /// The one caller is [`Fragment::load_or_build`], for a cache whose `brk_params` are not this
+    /// run's; a fragment built from its file already has them.
+    pub fn rebuild_breaklines(&mut self) {
+        let v64: Vec<[f64; 3]> = self.mesh.v.iter().map(|p| p.to_f64()).collect();
+        let geom = face_geometry(&v64, &self.mesh.f);
+        self.brk =
+            breakline::build(&v64, &self.mesh.f, &geom, &self.labels, BrkParams::at(self.thick));
     }
 
     /// Number of faces of the working mesh.
@@ -288,15 +326,20 @@ impl Fragment {
 ///
 /// A mesh with no triangle gets no labels; nothing downstream reads them, and `RayScene` refuses
 /// such a mesh anyway.
-fn segment_working_mesh(working: &WorkingMesh, thick: f64, res: f64, name: &str) -> Vec<FaceLabel> {
-    let v64: Vec<[f64; 3]> = working.v.iter().map(|p| p.to_f64()).collect();
-    let geom = face_geometry(&v64, &working.f);
-    let Some(scene) = RayScene::new(&v64, &working.f) else { return Vec::new() };
+fn segment_working_mesh(
+    working: &WorkingMesh,
+    v64: &[[f64; 3]],
+    geom: &FaceGeometry,
+    thick: f64,
+    res: f64,
+    name: &str,
+) -> Vec<FaceLabel> {
+    let Some(scene) = RayScene::new(v64, &working.f) else { return Vec::new() };
     let started = std::time::Instant::now();
     let seg = segment::segment_faces(
         &scene,
         &working.f,
-        &geom,
+        geom,
         thick,
         res,
         &segment::SegParams::default(),
@@ -311,6 +354,36 @@ fn segment_working_mesh(working: &WorkingMesh, thick: f64, res: f64, name: &str)
         "segmentation"
     );
     seg.labels
+}
+
+/// R §3.5.3–3.5.5 for one labelled working mesh, with the log line the pipeline prints.
+///
+/// A mesh with no label — the empty mesh `segment_working_mesh` refuses — has no breakline
+/// either, and `build` would index the labels it does not have.
+fn breaklines_of(
+    v64: &[[f64; 3]],
+    f: &[[u32; 3]],
+    geom: &FaceGeometry,
+    labels: &[FaceLabel],
+    thick: f64,
+    name: &str,
+) -> Breaklines {
+    let params = BrkParams::at(thick);
+    if labels.len() != f.len() {
+        return Breaklines { params, ..Breaklines::default() };
+    }
+    let started = std::time::Instant::now();
+    let brk = breakline::build(v64, f, geom, labels, params);
+    let valid = brk.valid().iter().filter(|&&v| v).count();
+    tracing::info!(
+        fragment = name,
+        points = brk.len(),
+        valid,
+        subsampled = brk.sub.len(),
+        seconds = started.elapsed().as_secs_f64(),
+        "breaklines"
+    );
+    brk
 }
 
 /// The file's identity for the cache validity rule of R §3.7.

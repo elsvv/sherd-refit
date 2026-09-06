@@ -334,9 +334,12 @@ valid = |ns| > 0.5 ∧ |nf| > 0.5 ∧ |ns × f| > 0.5
 If there are no breakline points, `ns = nf = 0`.
 
 **3.5.5 Hypothesis subset.** Voxel-downsample `P_brk` with voxel `0.5·t` (same Open3D call and
-bounds convention as §3.4.1); `sub` = lowest-index point per occupied voxel in hash-map order
-(**PMC-4**: port sorts ascending — this changes hypothesis order and therefore tie-breaking in
-§5.2–5.3; must re-verify); `brk_sub = sub[valid[sub]]`.
+bounds convention as §3.4.1 — the code's comment there says `voxel t/3` and is stale, the code
+reads `brk_voxel · t` with `brk_voxel = 0.5`); `sub` = lowest-index point per occupied voxel in
+hash-map order (**PMC-4**: port sorts ascending — this changes hypothesis order and therefore
+tie-breaking in §5.2–5.3; must re-verify. The *bucket* rule is exact, as §3.4.1 records, and the
+sorted subsets were measured equal entry for entry on all 66 fixture fragments in step B2);
+`brk_sub = sub[valid[sub]]`.
 
 **3.5.6 Shell margin.** `d_brk[i]` = distance from `S[i]` to the nearest breakline point (inf if
 none). `margin = ¬frac[sp] ∧ (d_brk > 0.12·t) ∧ (d_brk < 1.5·t)` (**PMC-5**: these two are not

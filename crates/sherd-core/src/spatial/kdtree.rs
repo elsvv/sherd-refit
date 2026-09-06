@@ -5,8 +5,9 @@
 //! instead of one grid per ICP ladder rung
 //! (`docs/superpowers/notes/2026-09-06-e3e4-spatial.md` §5).
 //!
-//! [`PointTree`] is the one wrapper the algorithm needs, and it is deliberately `f64`. The two
-//! callers in R §3.4 — `coarse_grid`'s nearest representative and `ball_matrix`'s radius query —
+//! [`PointTree`] is the one wrapper the algorithm needs, and it is deliberately `f64`. Its callers
+//! in R §3.4 and R §3.5 — `coarse_grid`'s nearest representative, `ball_matrix`'s radius query,
+//! and the breakline distance `0.15·t` selects the macro-normal annulus by —
 //! run on the `f64` face centroids the reference computes, and scipy's `cKDTree` compares squared
 //! `f64` distances against `r²`. Narrowing the coordinates to `f32` would move a point across the
 //! ball boundary whenever `|C − q|` sits within an `f32` ulp of the radius, which on a 200 000-face
@@ -46,7 +47,18 @@ impl PointTree {
     /// though it does not document that as a guarantee; nothing in R depends on which of two
     /// coincident points is returned.
     pub fn nearest(&self, query: &[f64; 3]) -> u32 {
-        self.tree.query(query).nearest_one::<SquaredEuclidean<f64>>().execute().item
+        self.nearest_distance(query).0
+    }
+
+    /// The nearest point and how far away it is — `cKDTree.query(x)` in full.
+    ///
+    /// The distance is the Euclidean one, `sqrt` of the squared distance the search minimises, so
+    /// it is scipy's number to the last bit on any pair of coordinates where the two libraries
+    /// accumulate `Σ(a−b)²` the same way. R §3.5.4 and R §3.5.6 compare it against `0.15·t`,
+    /// `0.12·t` and `1.5·t`, thresholds no real distance sits on.
+    pub fn nearest_distance(&self, query: &[f64; 3]) -> (u32, f64) {
+        let hit = self.tree.query(query).nearest_one::<SquaredEuclidean<f64>>().execute();
+        (hit.item, hit.distance.sqrt())
     }
 
     /// Every point within `radius` of `query` (inclusive), ascending by index.
@@ -105,6 +117,10 @@ mod tests {
         assert_eq!(tree.len(), 25);
         assert!(!tree.is_empty());
         assert_eq!(tree.nearest(&[0.1, 0.1, 0.0]), 0);
+        let (i, d) = tree.nearest_distance(&[0.1, 0.2, 0.0]);
+        assert_eq!(i, 0);
+        assert!((d - 0.2_f64.hypot(0.1)).abs() < 1e-15, "{d}");
+        assert_eq!(tree.nearest_distance(&[3.0, 4.0, 0.0]), (19, 0.0), "a point of the tree");
         assert_eq!(tree.nearest(&[3.9, 4.1, 0.0]), 24);
         // A query far away still answers: the search is unbounded, as `cKDTree.query` is.
         assert_eq!(tree.nearest(&[100.0, 100.0, 0.0]), 24);

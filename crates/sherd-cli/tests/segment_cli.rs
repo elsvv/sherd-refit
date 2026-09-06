@@ -71,7 +71,8 @@ fn two_runs_agree(input: &Path) {
     for out in [&first_out, &second_out] {
         assert!(out.contains("miss"), "a cold run computes: {out}");
         assert!(out.contains("fracture"), "the table carries R §3.4's label fraction: {out}");
-        assert!(out.contains("segmentation"), "the summary says where it stops: {out}");
+        assert!(out.contains("brk"), "and R §3.5's breakline counts: {out}");
+        assert!(out.contains("breaklines"), "the summary says where it stops: {out}");
     }
 
     // A third run over the first directory must hit every cache and change nothing.

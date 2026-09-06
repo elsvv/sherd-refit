@@ -193,15 +193,22 @@ was corrected to follow (phase-1a verification, finding F11):
 A `safetensors` file. Tensors (all little-endian): `V f32[n,3]`, `F u32[m,3]`, `labels u8[m]`,
 `S f32[20000,3]`, `sp u32`, `Pf f32`, `fp u32`, `brk_P/brk_ns/brk_nf/brk_f f32[k,3]`,
 `brk_sub u32`, `margin_idx u32`, optional `features/*`. Phase 1a writes `V` and `F`, step B1
-`labels`; each later stage adds its own tensors beside them, and the reader ignores what it does
-not know. `cache_version` moves when the set changes *meaning* — which includes a tensor becoming
-one the reader requires: `labels` took it from 1 to 2, so a cache written before the segmentation
-existed is refused and recomputed rather than read back with no labels.
+`labels`, step B2 the five `brk_*`; each later stage adds its own tensors beside them, and the
+reader ignores what it does not know. `cache_version` moves when the set changes *meaning* —
+which includes a tensor becoming one the reader requires: `labels` took it from 1 to 2 and the
+`brk_*` from 2 to 3, so a cache written before either existed is refused and recomputed rather
+than read back half empty. The `brk_*` tensors are `f32` for the same reason `V` is (§4.1), and
+the reader checks what the writer cannot: the four frame arrays must describe the same points,
+and `brk_sub` must index them.
 
 Metadata: `format=sherd-cache`, `cache_version`, `algo_ref`, `core_version`, `name`,
 `source_path`, `source_size`, `source_mtime_ns`, `source_sha256` (optional), `target_faces`,
 `face_budget`, `area0`, `thick`, `thick_mode`, `res`, `watertight`, `n_boundary`,
-`n_orig_vertices`, `n_orig_faces`, `md_params` (JSON), `features` (JSON), `backend`.
+`n_orig_vertices`, `n_orig_faces`, `brk_params` (JSON: `t` and the three radii of R §3.5.4–3.5.5),
+`md_params` (JSON: the sampled half of R §3.7's `mdp_*`), `features` (JSON), `backend`. R §3.7's
+rule that a valid cache with other match-array parameters has *only those arrays* recomputed is
+implemented per half: `brk_params` that are not the run's rebuild the breaklines and rewrite the
+file, leaving the mesh and the labels alone.
 
 **Two corrections the implementation forced, and this document follows it** (phase-1a
 verification, finding F11):
@@ -593,6 +600,23 @@ the **minimum** of its twelve and the port's sits inside the cloud. The port is 
 two fragments — the estimator's sample is. E6 is therefore now argued for by evidence rather than
 by anticipation.
 
+**The breakline row is the same finding one stage on, and one of its three native columns is
+self-contradictory** (step B2, `notes/2026-09-06-b2-breaklines.md` §4). Injected, the row is met
+with nothing left over: on all 66 fragments the count and the subset are exact, the point arrays
+agree in order to 3.7e-5 and the frames to 4.5e-6 degrees, and every residual is reproduced
+exactly by rounding the reference's own arrays to `f32` — the §4.1 narrowing and nothing else.
+Natively, 33 of 198 comparisons fall outside the row. 15 of them are `p99 distance`, and the
+cause is upstream and measured: 3 115 of 271 592 point-to-set distances exceed `0.5 t`, and on
+every fragment whose working mesh is identical to the reference's each of them lies within
+`0.169 t` of a face the two segmentations label differently. 5 are `dihedral KS`, four of them on
+fragments whose `t` or whose mesh is the reference's only to within the rows above. The remaining
+13 are `count`, all on synthetic_20, and they are the contradiction: `res` is allowed ±10 %
+natively, the port's decimator lands +15 % on the median breakline spacing of that set, and a
+breakline crossing a coarser mesh has proportionally fewer edges to cross — the *curve* agrees,
+`count × spacing` being within 2.9 % on average. A count gate of ±10 % underneath a `res` gate of
+±10 % has no headroom, and it belongs with §13 question 2 rather than with the port. No row is
+widened here either.
+
 ### 10.3 Benchmark gates
 
 Quality: exactly R§13 on every listed set, run natively (no injection), CPU and GPU. Runtime
@@ -658,6 +682,7 @@ shorten phase 1+2 to ≈ 14 weeks because GPU work can start once the CPU ICP is
 | 1a | workspace, IO (E2), cleaning, components, thickness, decimation (E1), Taubin, working mesh, cache | 2.5 | native tolerances of §10.2 up to "working mesh" on all fixtures | decimation choice; PLY edge cases |
 | 1b | BVH, hash grid (E3, E4), segmentation, breaklines, match arrays | 2.5 | segmentation ≥ 0.995 injected / ≥ 0.97 native; breakline gates | BVH correctness; `voxel_down_sample` semantics |
 | 1b, step B1 | done: segmentation (R §3.4), `spatial::bvh`, `spatial::kdtree`, the `labels` tensor, the `segmentation` parity row | | injected 1.000000000 on all 68 fragments; native 66 of 68 (§10.2 on the two others) | `voxel_down_sample` semantics settled: the bucket rule is exact, only the voxel *order* is a hash artefact (PMC-4) |
+| 1b, step B2 | done: breaklines and frames (R §3.5.3–3.5.5), the five `brk_*` tensors, the `breakline` parity row | | injected exact on all 66 fragments (the only residuals are the `f32` cache narrowing); native 165 of 198 checks, every failure inherited (§10.2) | none new; the native `count` row is found to contradict the `res` row above it |
 | 1c | hypotheses, coarse, NMS, ICP (E5), verification, `match_pair`, screening flags | 2.5 | stage-2 injected tolerances on every fixture pair | ICP corner cases (empty correspondences), tie handling |
 | 1d | assembly, refinement, recentre, report/transforms/meshes, renderer, CLI, determinism tests | 2 | R§13 gates natively; CI green on 4 OSs | none major |
 | 1e | profiling and CPU tuning to §10.3 CPU gates | 1.5 | CPU gates | 2 h collection gate has 1.6× margin only |
@@ -690,7 +715,12 @@ automatic fallback.
    **Now open again on evidence:** step B1 showed the thickness sample's seed spread breaking the
    native segmentation gate on 2 of 68 fragments, with the port's `t` nearer the estimator's
    centre than the fixture's on one of them — §10.2's t-propagation paragraph and
-   `notes/2026-09-06-b1-segmentation.md` §5. E6 would remove the class rather than absorb it.)
+   `notes/2026-09-06-b1-segmentation.md` §5. E6 would remove the class rather than absorb it.
+   Step B2 carried the same evidence one stage further: 3 115 of 271 592 native breakline
+   point-to-set distances exceed `0.5 t`, and on the fragments whose working mesh is *identical*
+   to the reference's — 44 of 66, all nine of pot_B — every one of them lies within `0.169 t` of a
+   face the two segmentations label differently, so the whole of the native breakline shortfall is
+   `t` arriving at the segmentation, not breakline code. `notes/2026-09-06-b2-breaklines.md` §4.)
 3. **PMC items to apply in phase 1** (R§12): proposed to apply PMC-4, 6, 11, 12, 13, 14 in
    phase 1 (no result change expected), PMC-1, 7, 8 in phase 1 with re-verification, and to
    leave PMC-5 for a later algorithm change. Confirm.

@@ -187,11 +187,39 @@ pub struct CoarseGrid {
 /// each list, so the representative of a voxel is its lowest-indexed face; that rule is exact
 /// here, only the *order of the voxels* differs (PMC-4).
 pub fn coarse_grid(centroids: &[[f64; 3]], spacing: f64) -> CoarseGrid {
-    if centroids.is_empty() || !spacing.is_finite() || spacing <= 0.0 {
-        return CoarseGrid { rep: Vec::new(), near: vec![0; centroids.len()] };
+    let rep = voxel_representatives(centroids, spacing);
+    if rep.is_empty() {
+        return CoarseGrid { rep, near: vec![0; centroids.len()] };
+    }
+
+    let points: Vec<[f64; 3]> = rep.iter().map(|&r| centroids[r as usize]).collect();
+    let near = match PointTree::build(&points) {
+        Some(tree) => centroids.par_iter().map(|c| tree.nearest(c)).collect(),
+        None => vec![0; centroids.len()],
+    };
+    CoarseGrid { rep, near }
+}
+
+/// Open3D's `voxel_down_sample_and_trace`, reduced to what R reads off it: the lowest-indexed
+/// point of every occupied voxel, ascending.
+///
+/// Both callers pass the bounds the reference passes — `min_bound = P.min(0) − 1`,
+/// `max_bound = P.max(0) + 1` — and Open3D indexes a point by
+/// `⌊(p − min_bound)/voxel_size⌋` per axis, so the upper bound never enters the arithmetic and is
+/// not taken here. `AddPoint` appends to a voxel's list in increasing point index, so `l[0]` is
+/// the lowest-indexed point in the voxel and that rule is *exact*; what Open3D leaves
+/// unspecified is only the order of the voxels, an `unordered_map`'s (PMC-4). Sorting the
+/// representatives ascending fixes that order without changing the set.
+///
+/// R §3.4.1 calls this on the face centroids at `t/8` and R §3.5.5 on the breakline points at
+/// `0.5·t`; an empty point set, or a spacing that is not a positive finite number, has no
+/// representatives.
+pub fn voxel_representatives(points: &[[f64; 3]], spacing: f64) -> Vec<u32> {
+    if points.is_empty() || !spacing.is_finite() || spacing <= 0.0 {
+        return Vec::new();
     }
     let mut min_bound = [f64::INFINITY; 3];
-    for c in centroids {
+    for c in points {
         for k in 0..3 {
             min_bound[k] = min_bound[k].min(c[k]);
         }
@@ -200,14 +228,14 @@ pub fn coarse_grid(centroids: &[[f64; 3]], spacing: f64) -> CoarseGrid {
         *m -= 1.0;
     }
 
-    // (voxel, face) sorted: the faces of one voxel end up adjacent and ascending, so the first of
-    // each run is the reference's `l[0]`. Sorting rather than hashing is what makes `rep`
+    // (voxel, index) sorted: the points of one voxel end up adjacent and ascending, so the first
+    // of each run is the reference's `l[0]`. Sorting rather than hashing is what makes the result
     // reproducible across machines (D §7).
     #[allow(
         clippy::cast_possible_truncation,
         reason = "a voxel index outside i64 needs a mesh larger than 9e18 voxels across"
     )]
-    let mut cells: Vec<([i64; 3], u32)> = centroids
+    let mut cells: Vec<([i64; 3], u32)> = points
         .iter()
         .enumerate()
         .map(|(i, c)| {
@@ -216,7 +244,7 @@ pub fn coarse_grid(centroids: &[[f64; 3]], spacing: f64) -> CoarseGrid {
                 ((c[1] - min_bound[1]) / spacing).floor() as i64,
                 ((c[2] - min_bound[2]) / spacing).floor() as i64,
             ];
-            (v, u32::try_from(i).expect("face count fits in u32"))
+            (v, u32::try_from(i).expect("the point count fits in u32"))
         })
         .collect();
     cells.sort_unstable();
@@ -227,13 +255,7 @@ pub fn coarse_grid(centroids: &[[f64; 3]], spacing: f64) -> CoarseGrid {
         }
     }
     rep.sort_unstable();
-
-    let points: Vec<[f64; 3]> = rep.iter().map(|&r| centroids[r as usize]).collect();
-    let near = match PointTree::build(&points) {
-        Some(tree) => centroids.par_iter().map(|c| tree.nearest(c)).collect(),
-        None => vec![0; centroids.len()],
-    };
-    CoarseGrid { rep, near }
+    rep
 }
 
 /// The area-weighted mean normal over each query point's ball, and whether that ball was empty.

@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use sherd_core::fragment::Fragment;
+use sherd_core::fragment::breakline::BrkParams;
 use sherd_core::fragment::cache;
 
 fn slab_piece(name: &str) -> PathBuf {
@@ -68,6 +69,43 @@ fn a_warm_run_is_the_same_run_as_a_cold_one() {
         (warm.n_orig_vertices, warm.n_orig_faces),
         (cold.n_orig_vertices, cold.n_orig_faces)
     );
+    assert_eq!(warm.labels, cold.labels, "labels");
+    // The breaklines are stored, not derived, so this is the file's own round trip (R §3.5.3–3.5.5).
+    assert!(!cold.brk.is_empty(), "the slab has a break to find");
+    assert_eq!(warm.brk, cold.brk, "breakline points, frames, subset and parameters");
+    assert_eq!(warm.brk.params, BrkParams::at(cold.thick));
+
+    std::fs::remove_dir_all(&out).ok();
+}
+
+/// R §3.7's other half: a cache that is valid but was built with other match-array parameters has
+/// those arrays recomputed rather than the whole fragment thrown away.
+///
+/// In this build the knobs are constants, so the only way to reach the branch is to write a cache
+/// that claims other ones — which is exactly what a cache from another build would be.
+#[test]
+fn a_cache_built_with_other_breakline_parameters_has_them_recomputed() {
+    let out = scratch("brkparams");
+    let source = slab_piece("pieceA");
+    let path = cache::cache_path(&out, "pieceA");
+
+    let (mut fragment, _) =
+        Fragment::load_or_build(&source, TARGET_FACES, "pieceA", Some(&path)).expect("cold");
+    let wanted = fragment.brk.clone();
+    assert_eq!(wanted.params, BrkParams::at(fragment.thick));
+
+    // A cache whose breaklines were built at another outer radius: the arrays are wrong for this
+    // run, and their `brk_params` say so.
+    fragment.brk.params = BrkParams { macro_outer: 0.35, ..wanted.params };
+    fragment.brk.sub.clear();
+    cache::write(&fragment, &path).expect("the doctored cache is written");
+
+    let (back, from_cache) =
+        Fragment::load_or_build(&source, TARGET_FACES, "pieceA", Some(&path)).expect("warm");
+    assert!(from_cache, "the mesh and the labels still came from the cache");
+    assert_eq!(back.brk, wanted, "the breaklines were rebuilt at this run's parameters");
+    // And the corrected arrays were written back, so the next run does no work at all.
+    assert_eq!(cache::read(&path).expect("the cache reads").brk, wanted);
 
     std::fs::remove_dir_all(&out).ok();
 }

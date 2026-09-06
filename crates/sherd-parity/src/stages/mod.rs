@@ -7,9 +7,10 @@
 //! [`Check`](crate::report::Check)s.
 //!
 //! Plan step S4 filled in the first three rows of D §10.2's table — `load`, `thickness` and
-//! `working mesh` — and step B1 the fourth, `segmentation`. `breakline`, `hypotheses` and the rest
-//! follow their stages in phases 1b–1d, as new modules beside these.
+//! `working mesh` — step B1 the fourth, `segmentation`, and step B2 the fifth, `breakline`.
+//! `hypotheses` and the rest follow their stages in phases 1b–1d, as new modules beside these.
 
+pub mod breakline;
 pub mod load;
 pub mod segmentation;
 pub mod thickness;
@@ -36,11 +37,14 @@ pub enum Stage {
     WorkingMesh,
     /// R §3.4 — shell against fracture, face by face.
     Segmentation,
+    /// R §3.5.3–3.5.5 — the breakline points, their frames and the hypothesis subset.
+    Breakline,
 }
 
 impl Stage {
     /// Every stage this build can run, in pipeline order.
-    pub const ALL: [Self; 4] = [Self::Load, Self::Thickness, Self::WorkingMesh, Self::Segmentation];
+    pub const ALL: [Self; 5] =
+        [Self::Load, Self::Thickness, Self::WorkingMesh, Self::Segmentation, Self::Breakline];
 
     /// The name the command line and the table use.
     pub fn as_str(self) -> &'static str {
@@ -49,6 +53,7 @@ impl Stage {
             Self::Thickness => "thickness",
             Self::WorkingMesh => "working-mesh",
             Self::Segmentation => "segmentation",
+            Self::Breakline => "breakline",
         }
     }
 
@@ -215,6 +220,7 @@ impl Collection {
             Stage::Thickness => thickness::run(self, mode),
             Stage::WorkingMesh => working_mesh::run(self, mode),
             Stage::Segmentation => segmentation::run(self, mode),
+            Stage::Breakline => breakline::run(self, mode),
         }
     }
 
@@ -283,7 +289,7 @@ mod tests {
             assert_eq!(Stage::parse(stage.as_str()), Some(stage));
             assert_eq!(stage.to_string(), stage.as_str());
         }
-        assert_eq!(Stage::parse("breakline"), None, "R §3.5, not this build");
+        assert_eq!(Stage::parse("hypotheses"), None, "R §5.1, not this build");
     }
 
     /// Finding F2: `target_faces = 0` and a manifest with no `target_faces` key are the same

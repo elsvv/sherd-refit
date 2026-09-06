@@ -86,7 +86,9 @@ pub const ALGO_REF: &str = "2026-09-06/9d4b9d3";
 /// Layout version of `<out>/cache/<name>.sherd` (D §4.2). Bumped when the tensor set or the
 /// metadata keys change, independently of [`ALGO_REF`].
 ///
-/// `2`: step B1 added `labels u8[m]` (R §3.4). Every tensor the port reads back must be in the
-/// file, so a version-1 cache — written before the segmentation existed — is refused and its
-/// fragment recomputed, rather than being read back with no labels at all.
-pub const CACHE_VERSION: u32 = 2;
+/// `2`: step B1 added `labels u8[m]` (R §3.4). `3`: step B2 added the five breakline tensors
+/// `brk_P`, `brk_ns`, `brk_nf`, `brk_f` (f32 `[k, 3]`) and `brk_sub` (u32 `[j]`) of R §3.5.3–3.5.5,
+/// with their `brk_params` in the metadata. Every tensor the port reads back must be in the file,
+/// so an older cache is refused and its fragment recomputed, rather than being read back half
+/// empty.
+pub const CACHE_VERSION: u32 = 3;

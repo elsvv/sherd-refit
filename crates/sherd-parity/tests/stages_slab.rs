@@ -170,13 +170,15 @@ fn without_the_input_directory_native_mode_skips_and_injected_mode_does_not() {
     let native = collection.run_all(&Stage::ALL, Mode::Native).unwrap();
     assert_eq!(
         native.iter().map(sherd_parity::StageReport::status).collect::<Vec<_>>(),
-        ["SKIP", "SKIP", "SKIP", "SKIP"]
+        ["SKIP"; Stage::ALL.len()]
     );
     let injected = collection.run_all(&Stage::ALL, Mode::Injected).unwrap();
-    // `load` needs the file in both modes — its input *is* the file. The other three run off the
-    // dump alone.
+    // `load` needs the file in both modes — its input *is* the file. The others run off the dump
+    // alone.
     assert_eq!(injected[0].status(), "SKIP");
-    assert_eq!(injected[1].status(), "PASS");
-    assert_eq!(injected[2].status(), "PASS");
-    assert_eq!(injected[3].status(), "PASS");
+    assert!(
+        injected[1..].iter().all(|r| r.status() == "PASS"),
+        "{:?}",
+        injected.iter().map(|r| (r.stage, r.status())).collect::<Vec<_>>()
+    );
 }

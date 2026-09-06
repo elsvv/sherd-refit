@@ -3,8 +3,8 @@
 //! The subcommands are D §9's: `run` and `segment` mirror the Python's, flag for flag, and
 //! `parity`, `bench` and `info` are new. Phase 1a implemented `info`, `segment` up to the working
 //! mesh and `parity` for the stages the port computes; step B1 added R §3.4's shell/fracture
-//! labels to `segment` and its own `parity` row. `run` and `bench` arrive with the pipeline they
-//! drive (phase 1d) and report that plainly until then.
+//! labels to `segment` and its own `parity` row, step B2 R §3.5's breaklines and theirs. `run` and
+//! `bench` arrive with the pipeline they drive (phase 1d) and report that plainly until then.
 
 use std::path::PathBuf;
 
@@ -33,15 +33,15 @@ enum Command {
     /// Assemble a collection of fragments (R §2–§11).
     Run(RunArgs),
 
-    /// Preprocess every fragment and write the fragment cache (R §3.1–3.4).
+    /// Preprocess every fragment and write the fragment cache (R §3.1–3.5.5).
     ///
     /// Reads every mesh of INPUT in the reference's collection order, cleans it, keeps the largest
     /// component, measures the wall thickness, decimates to the adaptive face budget, smooths,
-    /// labels every face shell or fracture, and writes `<OUT>/cache/<name>.sherd`. A second run
-    /// over the same files reuses those caches.
+    /// labels every face shell or fracture, traces the breakline and its frames, and writes
+    /// `<OUT>/cache/<name>.sherd`. A second run over the same files reuses those caches.
     ///
-    /// The breaklines, the match arrays and the segmentation preview the reference's `segment`
-    /// also produces are the remaining steps of phase 1b.
+    /// The sampled match arrays and the segmentation preview the reference's `segment` also
+    /// produces are the remaining steps of phase 1b.
     Segment(SegmentArgs),
 
     /// Run the port's stages against a Python fixture dump and report D §10.2's tolerances.
@@ -105,8 +105,8 @@ struct ParityArgs {
     /// itself does not carry (levels `slim` and `min`, D §10.1).
     #[arg(long)]
     input: Option<PathBuf>,
-    /// Stage to compare: `load`, `thickness`, `working-mesh`, `segmentation`, or `all`.
-    /// Repeatable.
+    /// Stage to compare: `load`, `thickness`, `working-mesh`, `segmentation`, `breakline`, or
+    /// `all`. Repeatable.
     #[arg(long, default_value = "all")]
     stage: Vec<String>,
     /// Feed each stage the Python stage's own inputs instead of the port's upstream results
@@ -198,8 +198,18 @@ fn segment(args: &SegmentArgs) -> Result<()> {
     let wall = started.elapsed().as_secs_f64();
 
     println!(
-        "{:<28} {:>9} {:>10} {:>9} {:>8} {:>7} {:>8} {:>6} {:>6}",
-        "fragment", "faces", "from", "t", "res", "t/res", "fracture", "closed", "cache"
+        "{:<28} {:>9} {:>10} {:>9} {:>8} {:>7} {:>8} {:>7} {:>6} {:>6} {:>6}",
+        "fragment",
+        "faces",
+        "from",
+        "t",
+        "res",
+        "t/res",
+        "fracture",
+        "brk",
+        "sub",
+        "closed",
+        "cache"
     );
     let mut failed = 0;
     let mut total = 0.0;
@@ -209,7 +219,7 @@ fn segment(args: &SegmentArgs) -> Result<()> {
                 let fr = &p.fragment;
                 total += p.seconds;
                 println!(
-                    "{:<28} {:>9} {:>10} {:>9.3} {:>8.3} {:>7.1} {:>8.3} {:>6} {:>6}",
+                    "{:<28} {:>9} {:>10} {:>9.3} {:>8.3} {:>7.1} {:>8.3} {:>7} {:>6} {:>6} {:>6}",
                     fr.name,
                     fr.n_faces(),
                     fr.n_orig_faces,
@@ -217,6 +227,8 @@ fn segment(args: &SegmentArgs) -> Result<()> {
                     fr.res(),
                     fr.thick / fr.res().max(1e-9),
                     fr.fracture_fraction(),
+                    fr.brk.len(),
+                    fr.brk.sub.len(),
                     fr.watertight,
                     if p.cached { "hit" } else { "miss" }
                 );
@@ -235,8 +247,8 @@ fn segment(args: &SegmentArgs) -> Result<()> {
         println!("caches in {}", args.out.join("cache").display());
     }
     println!(
-        "the breaklines and match arrays of R §3.5 are the next step of phase 1b; this run stopped \
-         at the segmentation"
+        "the sampled match arrays of R §3.5.1-3.5.2 and §3.5.6 are the next step of phase 1b; this \
+         run stopped at the breaklines"
     );
     if failed > 0 {
         bail!("{failed} of {} fragments could not be preprocessed", entries.len());
@@ -384,8 +396,9 @@ mod tests {
             requested_stages(&["segmentation".to_owned()]).unwrap(),
             vec![Stage::Segmentation]
         );
-        let err = requested_stages(&["breakline".to_owned()]).unwrap_err().to_string();
-        assert!(err.contains("segmentation"), "{err}");
+        assert_eq!(requested_stages(&["breakline".to_owned()]).unwrap(), vec![Stage::Breakline]);
+        let err = requested_stages(&["hypotheses".to_owned()]).unwrap_err().to_string();
+        assert!(err.contains("breakline"), "{err}");
     }
 
     #[test]

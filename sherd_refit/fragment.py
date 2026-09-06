@@ -388,16 +388,17 @@ class Fragment:
 MD_ARRAYS = ("S", "sp", "Pf", "fp", "brk_P", "brk_ns", "brk_nf", "brk_f", "brk_sub", "margin_idx")
 MD_PARAMS = dict(t=float, seed=int, surface_points=int, frac_per_t2=float,
                  min_frac_points=int, max_frac_points=int, margin_points=int,
-                 macro_inner=float, macro_outer=float)
+                 macro_inner=float, macro_outer=float, brk_voxel=float)
 
 
 def md_params(t: float, seed: int = 0, surface_points: int = 20000, frac_per_t2: float = 150.0,
               min_frac_points: int = 5000, max_frac_points: int = 12000, margin_points: int = 6000,
-              macro_inner: float = 0.15, macro_outer: float = 0.60) -> dict:
+              macro_inner: float = 0.15, macro_outer: float = 0.60, brk_voxel: float = 1 / 3) -> dict:
     """The knobs `match_arrays` depends on, normalised so that two dicts compare equal."""
     return dict(t=float(t), seed=int(seed), surface_points=int(surface_points), frac_per_t2=float(frac_per_t2),
                 min_frac_points=int(min_frac_points), max_frac_points=int(max_frac_points),
-                margin_points=int(margin_points), macro_inner=float(macro_inner), macro_outer=float(macro_outer))
+                margin_points=int(margin_points), macro_inner=float(macro_inner), macro_outer=float(macro_outer),
+                brk_voxel=float(brk_voxel))
 
 
 def macro_normals(C, FN, A, mask, P, tree_P, inner: float, outer: float):
@@ -478,7 +479,7 @@ def match_arrays(fr: Fragment, t: float, **kw) -> dict:
     # subsample for hypotheses (voxel t/3), valid frames only
     if len(P):
         pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(P))
-        _, _, lists = pc.voxel_down_sample_and_trace(t / 3.0, P.min(0) - 1, P.max(0) + 1)
+        _, _, lists = pc.voxel_down_sample_and_trace(p["brk_voxel"] * t, P.min(0) - 1, P.max(0) + 1)
         sub = np.array([l[0] for l in lists], dtype=int)
         brk_sub = sub[valid[sub]]
     else:
@@ -508,10 +509,11 @@ class MatchData:
     def __init__(self, fr: Fragment, t: float, seed: int = 0, surface_points: int = 20000,
                  frac_per_t2: float = 150.0, min_frac_points: int = 5000, max_frac_points: int = 12000,
                  margin_points: int = 6000, macro_inner: float = 0.15, macro_outer: float = 0.60,
-                 arrays: dict | None = None):
+                 brk_voxel: float = 1 / 3, arrays: dict | None = None):
         kw = dict(seed=seed, surface_points=surface_points, frac_per_t2=frac_per_t2,
                   min_frac_points=min_frac_points, max_frac_points=max_frac_points,
-                  margin_points=margin_points, macro_inner=macro_inner, macro_outer=macro_outer)
+                  margin_points=margin_points, macro_inner=macro_inner, macro_outer=macro_outer,
+                  brk_voxel=brk_voxel)
         want = md_params(t, **kw)
         arrays = fr.md if arrays is None else arrays
         if arrays is None or arrays.get("params") != want:

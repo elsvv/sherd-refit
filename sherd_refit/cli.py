@@ -17,8 +17,10 @@ def build_parser():
     r.add_argument("--target-faces", type=int, default=200000, help="working-mesh face budget per fragment")
     r.add_argument("--workers", type=int, default=None, help="parallel processes (default: cores-1)")
     r.add_argument("--threads", type=int, default=None, help="threads per matching process (default: cores / processes)")
-    r.add_argument("--candidates", type=int, default=40, help="candidates refined with full ICP per pair")
-    r.add_argument("--stage1", type=int, default=400, help="hypotheses refined with breakline ICP per pair")
+    r.add_argument("--candidates", type=int, default=Params.stage2, help="candidates refined with full ICP per pair")
+    r.add_argument("--stage1", type=int, default=Params.stage1, help="hypotheses refined with breakline ICP per pair")
+    r.add_argument("--brk-voxel", type=float, default=Params.brk_voxel, help="t, voxel the breakline is thinned to before frames are paired")
+    r.add_argument("--dihedral-tol", type=float, default=Params.dihedral_tol, help="degrees, tolerance on |dih_A + dih_B - 180| for a hypothesis")
     r.add_argument("--min-tight", type=float, default=Params.min_tight, help="min tight-contact fraction to accept a join")
     r.add_argument("--max-gap", type=float, default=Params.max_gap, help="k for the max median fracture gap; the pair's limit is max(k t, m res)")
     r.add_argument("--max-pen", type=float, default=Params.max_pen, help="max penetrating surface fraction")
@@ -50,7 +52,7 @@ def main(argv=None):
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
     from . import pipeline
     if args.cmd == "run":
-        p = Params(stage1=args.stage1, stage2=args.candidates, min_tight=args.min_tight, max_gap=args.max_gap, max_pen=args.max_pen,
+        p = Params(stage1=args.stage1, stage2=args.candidates, brk_voxel=args.brk_voxel, dihedral_tol=args.dihedral_tol, min_tight=args.min_tight, max_gap=args.max_gap, max_pen=args.max_pen,
                    min_seam=args.min_seam, thick_ratio=args.thick_ratio, early_reject_tight=args.early_reject_tight, stage1_floor=args.stage1_floor,
                    screen_top_k=args.screen_top_k, screen_points=args.screen_points, screen_min_pairs=args.screen_min_pairs,
                    margin_points=args.margin_points, surface_points=args.surface_points, frac_per_t2=args.frac_density)

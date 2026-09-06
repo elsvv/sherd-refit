@@ -108,7 +108,8 @@ def _md_kw(p: Params) -> dict:
     """The `match_arrays` knobs taken from `Params` (everything except `t`)."""
     return dict(seed=p.seed, surface_points=p.surface_points, frac_per_t2=p.frac_per_t2,
                 min_frac_points=p.min_frac_points, max_frac_points=p.max_frac_points,
-                margin_points=p.margin_points, macro_inner=p.macro_inner, macro_outer=p.macro_outer)
+                margin_points=p.margin_points, macro_inner=p.macro_inner, macro_outer=p.macro_outer,
+                brk_voxel=p.brk_voxel)
 
 
 def _preprocess_one(args):

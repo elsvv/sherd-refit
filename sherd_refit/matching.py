@@ -27,11 +27,11 @@ class Params:
     and it stops the pipeline from demanding a precision the mesh cannot carry.  On a mesh with
     more than `k / m` edges across the wall the first term wins and nothing changes.
     """
-    dihedral_tol: float = 40.0      # degrees, |dih_A + dih_B - 180| tolerance for a hypothesis
+    dihedral_tol: float = 25.0      # degrees, |dih_A + dih_B - 180| tolerance for a hypothesis
     coarse_delta: float = 0.15      # t, breakline proximity for the coarse score
     coarse_points: int = 60         # B breakline points used by the coarse score
-    stage1: int = 400               # hypotheses refined with breakline ICP
-    stage2: int = 40                # candidates refined with full ICP
+    stage1: int = 250               # hypotheses refined with breakline ICP
+    stage2: int = 10                # candidates refined with full ICP
     stage1_delta: float = 0.06      # t, breakline proximity when stage-1 poses are re-scored
     tight_delta: float = 0.01       # t, distance for the tight-contact fraction
     facing_delta: float = 0.3       # t, fracture points considered "facing" the other fragment
@@ -77,6 +77,7 @@ class Params:
     surface_points: int = 20000         # whole-surface samples per fragment (penetration test and shell margin)
     macro_inner: float = 0.15           # t, faces this close to the breakline are left out of the macro normals
     macro_outer: float = 0.60           # t, outer radius of the macro-normal neighbourhood
+    brk_voxel: float = 0.5              # t, voxel the breakline is thinned to before frames are paired
     frac_per_t2: float = 150.0          # fracture samples per t^2 of fracture area
     min_frac_points: int = 5000
     max_frac_points: int = 12000

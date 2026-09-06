@@ -85,7 +85,7 @@ def dump(input_dir: str, out_dir: str, level: str = "full", target_faces: int = 
     import scipy
     extra = dict(
         commit=_git("rev-parse", "HEAD", repo=repo),
-        dirty=bool(_git("status", "--porcelain", repo=repo)),
+        dirty=bool(_git("status", "--porcelain", "--untracked-files=no", repo=repo)),
         level=level,
         python=platform.python_version(),
         numpy=numpy.__version__, scipy=scipy.__version__, open3d=open3d.__version__,

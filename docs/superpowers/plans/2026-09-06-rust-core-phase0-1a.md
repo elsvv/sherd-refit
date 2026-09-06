@@ -27,5 +27,6 @@ passes the experiment — own code only where no crate does (justify in the expe
 | S3 | mesh ops: face geometry, edge adjacency, `closed_enough`, decimation (chosen crate) with the adaptive face budget (R), Taubin smoothing with Open3D's weights (R), working-mesh assembly | fixtures "working mesh" stage within D §10.2 native tolerances on all fixtures |
 | S4 | thickness (histogram mode, R), fragment cache (safetensors, versioned), fixture reader (`npyz`), `sherd-refit parity --stage working-mesh` in sherd-cli, determinism test (two runs byte-identical) | `parity` reports pass for the working-mesh stage on every fixture |
 | V | independent verification agent: rebuild from scratch, run all tests and the parity command on all fixtures, review the code against R for silent deviations | written report; gates green or a precise defect list |
+| F | apply V's findings F1–F12 and the open issues of the S1/S3/S4 notes: the decisions the team took on each, the code changes they call for, and R/D/README brought back in step with the tree | every finding closed or explicitly deferred with a reason; gates and the full parity still green |
 
-Later phases (1b–1e, 2, 3) follow D §12 after this plan's V step passes.
+Later phases (1b–1e, 2, 3) follow D §12 after this plan's V and F steps pass.

@@ -559,8 +559,10 @@ Sizes: terracotta ≈ 240 MB, pot A ≈ 250 MB, synthetic 20 ≈ 850 MB at level
 table is the measured one and this line is the order of magnitude. For `mixed_all` and
 `synthetic_170` only `mesh`, `seg.frac_final`, `md.*`, `result.candidates.json` and the assembly
 are dumped (≈ 0.6 GB). Fixtures are stored outside git (§10.5) and regenerated whenever the
-reference changes; the current set comes from commit `09fb4d4`, R §3.2's deterministic ray set
-(task T1). The Rust CLI writes the same layout with `--dump-fixtures`.
+reference changes; the current set comes from commit **`09fb4d4`** (R §3.2's deterministic ray set,
+task T1, plus the sample uniforms of §10.2's D6 columns), and the committed `fixtures/slab/dump`
+from `f0da041` with the same `sherd_refit/`. The Rust CLI writes the same layout with
+`--dump-fixtures`.
 
 ### 10.2 Stage comparison and tolerances (`tools/compare_fixtures.py REF NEW`)
 
@@ -630,6 +632,15 @@ floor is kept under the row, because two values that land in adjacent bins of a 
 differ by a bin's width whatever else is true; on these fragments the 2 % is what binds, the bin
 being 1.7–5.7 % of `t`. The injected row is unchanged and still met bit-exactly on the 48
 fragments whose dump carries `load.V0`.
+
+**The measurements would allow a far tighter relative gate and the row is deliberately not taking
+it.** 7.1e-6 is 3.5e-4 of the ±2 %, so a 0.1 % row would still pass with a hundredfold margin on
+today's fixtures — but `t` is the *mode of a histogram*, a discontinuous function of the hits: on a
+fragment whose filtered distances put two bins in contention, one grazing ray resolved differently
+by `parry3d` and Embree (PMC-17) moves the answer by a whole bin, which is 1.7–5.7 % of `t` here.
+The bin is therefore the unit this row can honestly be stated in, the floor already puts it there,
+and the 2 % above it is the smaller of the two on every benchmark fragment. Tightening the relative
+half would buy nothing and would fail the first fragment that has a tie.
 
 **The consequence travelled, and it travelled the right way.** `t` is the unit of every threshold
 in R §1.2, so the fragments whose `t` used to differ by 4–7 % had `coarse`, `stage1`, `tight`,

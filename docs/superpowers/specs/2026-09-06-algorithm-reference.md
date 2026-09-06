@@ -1,10 +1,12 @@
 # sherd-refit — frozen algorithm reference
 
-**Date:** 2026-09-06. **Reference implementation:** `sherd_refit/*.py` at commit `fbfebca`
+**Date:** 2026-09-07. **Reference implementation:** `sherd_refit/*.py` at commit `09fb4d4`
 (branch `rust-core`), running on Open3D 0.19.0, numpy 2.5.2, scipy ≥ 1.11, Python 3.12.
-The document was frozen at `9d4b9d3`; `fbfebca` is the one algorithm change made since, §3.2's
-deterministic ray set (task T1, dated addendum at the end of §12), and the parity fixtures are
-regenerated from it.
+The document was frozen at `9d4b9d3`; the one algorithm change made since is `fbfebca`, §3.2's
+deterministic ray set (task T1, dated addendum at the end of §12), and `9347cfe` added the sample
+uniforms to the fixture dump without touching what the pipeline computes. **The parity fixtures are
+regenerated from `09fb4d4`** — the committed `fixtures/slab/dump` from `f0da041`, the same
+`sherd_refit/` a commit later.
 **Purpose:** the algorithm exactly as the Python computes it, stage by stage, so that the Rust
 port can be implemented and verified from this document alone. Where the design spec
 (`2026-09-05-fracture-reassembly-design.md`) and the code differ, the code is authoritative and

@@ -20,7 +20,7 @@ log = logging.getLogger("sherd_refit")
 MESH_EXT = (".ply", ".obj", ".stl", ".off")
 FACES_PER_T2 = 600      # working-mesh faces per t^2 of surface (~12 edges across the wall)
 MIN_FACES = 50000
-CACHE_VERSION = 6       # bump when preprocessing/segmentation changes so stale caches are recomputed
+CACHE_VERSION = 7       # bump when preprocessing/segmentation changes so stale caches are recomputed
 
 
 def load_mesh(path: str) -> o3d.geometry.TriangleMesh:
@@ -387,15 +387,46 @@ class Fragment:
 
 MD_ARRAYS = ("S", "sp", "Pf", "fp", "brk_P", "brk_ns", "brk_nf", "brk_f", "brk_sub", "margin_idx")
 MD_PARAMS = dict(t=float, seed=int, surface_points=int, frac_per_t2=float,
-                 min_frac_points=int, max_frac_points=int, margin_points=int)
+                 min_frac_points=int, max_frac_points=int, margin_points=int,
+                 macro_inner=float, macro_outer=float)
 
 
 def md_params(t: float, seed: int = 0, surface_points: int = 20000, frac_per_t2: float = 150.0,
-              min_frac_points: int = 5000, max_frac_points: int = 12000, margin_points: int = 6000) -> dict:
+              min_frac_points: int = 5000, max_frac_points: int = 12000, margin_points: int = 6000,
+              macro_inner: float = 0.15, macro_outer: float = 0.60) -> dict:
     """The knobs `match_arrays` depends on, normalised so that two dicts compare equal."""
     return dict(t=float(t), seed=int(seed), surface_points=int(surface_points), frac_per_t2=float(frac_per_t2),
                 min_frac_points=int(min_frac_points), max_frac_points=int(max_frac_points),
-                margin_points=int(margin_points))
+                margin_points=int(margin_points), macro_inner=float(macro_inner), macro_outer=float(macro_outer))
+
+
+def macro_normals(C, FN, A, mask, P, tree_P, inner: float, outer: float):
+    """Area-weighted mean normal of the faces in `mask` that lie between `inner` and `outer` of each
+    breakline point.
+
+    The inner radius is the whole point.  Both the shell and the fracture round over into each
+    other at the crease -- the arris is worn, and the working mesh has been Taubin-smoothed on top
+    of that -- so faces next to the breakline lean towards the other surface and pull both macro
+    normals together.  Measured at the ground-truth poses over ~1 800 breakline points that really
+    do meet, the two dihedrals of a mating pair sum to 141 degrees with the old neighbourhood
+    (everything within 0.35 t) where the geometry says 180, and to 179 once the innermost 0.15 t
+    is left out.  See docs/superpowers/notes/2026-09-06-scale-pairs.md.
+
+    Points that find nothing in the annulus (a narrow strip, a chain end) fall back to the full
+    neighbourhood rather than losing their frame.
+    """
+    n = np.zeros((len(P), 3))
+    if not len(P) or not mask.any():
+        return n
+    allf = np.where(mask)[0]
+    far = np.where(mask & (tree_P.query(C, workers=threads())[0] >= inner))[0]
+    if len(far):
+        n, _ = smoothed_normals(ball_matrix(C[far], P, outer), FN[far], A[far])
+    bad = np.linalg.norm(n, axis=1) < 0.5
+    if bad.any():
+        n2, _ = smoothed_normals(ball_matrix(C[allf], P[bad], outer), FN[allf], A[allf])
+        n[bad] = n2
+    return n
 
 
 def match_arrays(fr: Fragment, t: float, **kw) -> dict:
@@ -435,10 +466,9 @@ def match_arrays(fr: Fragment, t: float, **kw) -> dict:
     ke = ke[cross]
     P = 0.5 * (V[ke[:, 0]] + V[ke[:, 1]])
     brk_tree = cKDTree(P) if len(P) else None
-    sh_idx, fr_idx = np.where(~frac)[0], np.where(frac)[0]
-    if len(P) and len(sh_idx) and len(fr_idx):
-        Ws = ball_matrix(C[sh_idx], P, 0.35 * t); Wf = ball_matrix(C[fr_idx], P, 0.35 * t)
-        ns, _ = smoothed_normals(Ws, FN[sh_idx], A[sh_idx]); nf, _ = smoothed_normals(Wf, FN[fr_idx], A[fr_idx])
+    if len(P):
+        ns = macro_normals(C, FN, A, ~frac, P, brk_tree, p["macro_inner"] * t, p["macro_outer"] * t)
+        nf = macro_normals(C, FN, A, frac, P, brk_tree, p["macro_inner"] * t, p["macro_outer"] * t)
     else:
         ns = np.zeros((len(P), 3)); nf = np.zeros((len(P), 3))
     f = nf - np.einsum("ij,ij->i", nf, ns)[:, None] * ns
@@ -477,15 +507,15 @@ class MatchData:
 
     def __init__(self, fr: Fragment, t: float, seed: int = 0, surface_points: int = 20000,
                  frac_per_t2: float = 150.0, min_frac_points: int = 5000, max_frac_points: int = 12000,
-                 margin_points: int = 6000, arrays: dict | None = None):
-        want = md_params(t, seed=seed, surface_points=surface_points, frac_per_t2=frac_per_t2,
-                         min_frac_points=min_frac_points, max_frac_points=max_frac_points,
-                         margin_points=margin_points)
+                 margin_points: int = 6000, macro_inner: float = 0.15, macro_outer: float = 0.60,
+                 arrays: dict | None = None):
+        kw = dict(seed=seed, surface_points=surface_points, frac_per_t2=frac_per_t2,
+                  min_frac_points=min_frac_points, max_frac_points=max_frac_points,
+                  margin_points=margin_points, macro_inner=macro_inner, macro_outer=macro_outer)
+        want = md_params(t, **kw)
         arrays = fr.md if arrays is None else arrays
         if arrays is None or arrays.get("params") != want:
-            arrays = match_arrays(fr, t, seed=seed, surface_points=surface_points, frac_per_t2=frac_per_t2,
-                                  min_frac_points=min_frac_points, max_frac_points=max_frac_points,
-                                  margin_points=margin_points)
+            arrays = match_arrays(fr, t, **kw)
             self.from_cache = False
         else:
             self.from_cache = True

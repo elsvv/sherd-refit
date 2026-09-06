@@ -143,17 +143,21 @@ pub struct Fragment {
     thick: f64, thick_mode: f64,           // f64, not f32 -- see below
     watertight: bool, n_boundary: u32, n_orig_vertices: u32, n_orig_faces: u32, target_faces: u32,
     face_budget: u32, area0: f64,          // R§3.3's budget and its numerator; the fixtures carry both
+    area: f64, frac_area: f64,             // R§3.4's two sums, kept rather than recomputed
     mesh: WorkingMesh, labels: Vec<FaceLabel>,
-    md: Option<MatchArrays>,               // built at `thick`
+    brk: Breaklines, samples: Samples,     // both built at `thick`
     features: Features,                    // roadmap items 4 and 6, §11
     bvh_full: OnceLock<Arc<Bvh>>, bvh_frac: OnceLock<Arc<Bvh>>,   // built on first use, shared
 }
-pub struct MdParams { t: f32, seed: u64, surface_points: u32, frac_per_t2: f32, min_frac_points: u32, max_frac_points: u32, margin_points: u32, macro_inner: f32, macro_outer: f32, brk_voxel: f32 }
-pub struct MatchArrays { params: MdParams, s: Vec<Vec3f>, sp: Vec<u32>, pf: Vec<Vec3f>, fp: Vec<u32>,
-                         brk_p: Vec<Vec3f>, brk_ns: Vec<Vec3f>, brk_nf: Vec<Vec3f>, brk_f: Vec<Vec3f>, brk_sub: Vec<u32>, margin_idx: Vec<u32> }
-pub struct MatchData<'a> { fr: &'a Fragment, t: f32, arrays: Cow<'a, MatchArrays>,
-                           brk_t: Vec<Vec3f>, brk_dih: Vec<f32>, pc_reg: Cloud, pc_frac: Cloud, pc_brk: Cloud, pc_brk_full: Cloud,
-                           pm: Cloud, kd_brk: KdTree, kd_margin: KdTree, grids: GridCache /* keyed by (cloud, radius) */ }
+pub struct BrkParams { t: f64, macro_inner: f64, macro_outer: f64, brk_voxel: f64 }
+pub struct Breaklines { params: BrkParams, p: Vec<Vec3f>, ns: Vec<Vec3f>, nf: Vec<Vec3f>, f: Vec<Vec3f>, sub: Vec<u32> }
+pub struct SampleParams { t: f64, seed: u64, surface_points: u32, frac_per_t2: f64, min_frac_points: u32, max_frac_points: u32, margin_points: u32 }
+pub struct Samples { params: SampleParams, s: Vec<Vec3f>, sp: Vec<u32>, pf: Vec<Vec3f>, fp: Vec<u32>, margin_idx: Vec<u32> }
+pub struct MatchData<'a> { fragment: &'a Fragment, t: f64, brk: Cow<'a, Breaklines>, samples: Cow<'a, Samples>,
+                           surface_normals: Vec<Vec3f>, surface_fracture: Vec<bool>, fracture_normals: Vec<Vec3f>,
+                           brk_tangent: Vec<Vec3f>, brk_dih: Vec<f64>, margin: Cloud,
+                           pc_reg: Cloud, pc_frac: Cloud, pc_brk: Cloud, pc_brk_full: Cloud,
+                           kd_brk: Option<PointTree>, kd_margin: Option<PointTree>, frac_area: f64 }
 pub struct Cloud { p: Vec<Vec3f>, n: Vec<Vec3f> }                                // SoA-friendly, `Pod`
 pub struct Pose(nalgebra::Isometry3<f64>);                                          // candidate T, poses
 pub struct Scores { tight_a, tight_b, tight, gap_a, gap_b, gap, contact_a, contact_b, contact, seam, gap_limit, tight_delta, cont, cont_n, pen, pen_depth: f64, pen_unavailable: bool, partial: bool, brk: f64, brk_best: f64 }
@@ -167,6 +171,13 @@ pub struct RunOptions { target_faces: u32, threads: Option<usize>, backend: Back
 
 `Scores` is a struct, not a map: the report writer serialises it to the same JSON keys as the
 Python (`R§6.5`), including the optional ones only when set.
+
+`MatchArrays`/`MdParams` were one struct in the original sketch; the implementation split them in
+two along the line R §3.7 already draws, because the two halves are invalidated by different
+knobs: `Breaklines`/`BrkParams` (steps B2, R §3.5.3–3.5.5) carry `t` and the three radii, and
+`Samples`/`SampleParams` (step B3, R §3.5.1–3.5.2 and §3.5.6) carry `t`, the seed and the four
+counts. A cache whose one half is stale has only that half recomputed (§4.2). `t` is `f64` in both,
+for the reason `thick` is.
 
 Three notes on the types above, all of them things the implementation settled and this document
 was corrected to follow (phase-1a verification, finding F11):
@@ -193,22 +204,29 @@ was corrected to follow (phase-1a verification, finding F11):
 A `safetensors` file. Tensors (all little-endian): `V f32[n,3]`, `F u32[m,3]`, `labels u8[m]`,
 `S f32[20000,3]`, `sp u32`, `Pf f32`, `fp u32`, `brk_P/brk_ns/brk_nf/brk_f f32[k,3]`,
 `brk_sub u32`, `margin_idx u32`, optional `features/*`. Phase 1a writes `V` and `F`, step B1
-`labels`, step B2 the five `brk_*`; each later stage adds its own tensors beside them, and the
-reader ignores what it does not know. `cache_version` moves when the set changes *meaning* —
-which includes a tensor becoming one the reader requires: `labels` took it from 1 to 2 and the
-`brk_*` from 2 to 3, so a cache written before either existed is refused and recomputed rather
-than read back half empty. The `brk_*` tensors are `f32` for the same reason `V` is (§4.1), and
-the reader checks what the writer cannot: the four frame arrays must describe the same points,
-and `brk_sub` must index them.
+`labels`, step B2 the five `brk_*`, step B3 the five sampled ones; each later stage adds its own
+tensors beside them, and the reader ignores what it does not know. `cache_version` moves when the
+set changes *meaning* — which includes a tensor becoming one the reader requires: `labels` took it
+from 1 to 2, the `brk_*` from 2 to 3 and `S`/`sp`/`Pf`/`fp`/`margin_idx` from 3 to 4, so a cache
+written before any of them existed is refused and recomputed rather than read back half empty.
+`S` and `Pf` are `f32` for the same reason `V` is (§4.1), and everything derived from them —
+`d_brk`, R §3.5.6's band, `Pm` — is computed from the *narrowed* values, so every stored array is
+a function of the other stored arrays. The reader checks what the writer cannot: the four frame
+arrays must describe the same points and `brk_sub` must index them; `sp`/`fp` must describe
+`S`/`Pf` and name faces of `F`; and `margin_idx` must index `S`.
 
 Metadata: `format=sherd-cache`, `cache_version`, `algo_ref`, `core_version`, `name`,
 `source_path`, `source_size`, `source_mtime_ns`, `source_sha256` (optional), `target_faces`,
 `face_budget`, `area0`, `thick`, `thick_mode`, `res`, `watertight`, `n_boundary`,
-`n_orig_vertices`, `n_orig_faces`, `brk_params` (JSON: `t` and the three radii of R §3.5.4–3.5.5),
-`md_params` (JSON: the sampled half of R §3.7's `mdp_*`), `features` (JSON), `backend`. R §3.7's
-rule that a valid cache with other match-array parameters has *only those arrays* recomputed is
-implemented per half: `brk_params` that are not the run's rebuild the breaklines and rewrite the
-file, leaving the mesh and the labels alone.
+`n_orig_vertices`, `n_orig_faces`, `area`, `frac_area` (R §3.4's two sums, so that neither
+`stats()` nor R §3.5.2's sample count recomputes the face geometry on a cache hit), `brk_params`
+(JSON: `t` and the three radii of R §3.5.4–3.5.5), `md_params` (JSON: `t`, the seed and the four
+counts — the sampled half of R §3.7's `mdp_*`), `features` (JSON), `backend`. R §3.7's rule that a
+valid cache with other match-array parameters has *only those arrays* recomputed is implemented
+per half: `brk_params` that are not the run's rebuild the breaklines, `md_params` that are not the
+run's redraw the samples, and the file is rewritten with the mesh and the labels still coming off
+the disk. A rebuild of both runs the breaklines first, because the samples measure `d_brk` against
+them.
 
 **Two corrections the implementation forced, and this document follows it** (phase-1a
 verification, finding F11):
@@ -461,7 +479,7 @@ type) as a diagnostic, not a production mode.
 
 | source of nondeterminism | policy |
 |---|---|
-| sampling | `ChaCha8Rng` seeded from `p.seed` (and hard-coded 0 where the reference does), draws in the reference's order (R§10) |
+| sampling | `ChaCha8Rng` seeded from `p.seed` (and hard-coded 0 where the reference does), draws in the reference's order (R§10), **one stream per draw site** rather than one per fragment: the seed carries a fixed 64-bit tag per `Draw` (`Thickness` tagged zero, so R §3.2's stream is unchanged), because three samplers sharing one seed would draw the same uniforms and put a surface sample and a fracture sample on the same point of the same face (PMC-9, `fragment::samples`) |
 | unordered containers | none on any result path; voxel representatives sorted ascending (PMC-4) |
 | sorting | `sort_by` with explicit keys and ascending-index tie-break; stable sorts only |
 | parallel reductions | fixed-order trees on both executors; no floating-point atomics; rayon results collected by index |
@@ -555,6 +573,7 @@ by its nearest face on each mesh.
 | working mesh | faces, `res`, area, `watertight` | (mesh is injected) | faces ±5 %, `res` ±10 %, area ±0.5 %, same `watertight` |
 | segmentation | area-weighted label agreement; fracture fraction | ≥ 0.995; ±0.005 | ≥ 0.97; ±0.02 |
 | breakline | count; point-set Hausdorff; `dih` per matched point | exact; 1e-4 t; 0.1° | ±10 %; 0.5 t on 99 %; distribution KS < 0.05 |
+| samples | `n_surface`, `n_frac`; sample-to-face residual; `fp` on fracture faces; margin count and membership; sample normals | exact; 1e-9 t; exact; exact; 0.1° over faces conditioned to 1000 f32 ulps, with ≤ 0.1 % of samples left out | `n_frac` ±10 %; fracture-sample fraction ±0.02; margin fraction ±0.05; cross-set nearest-distance p95 of `S` and of `Pf` within a factor of two of the Poisson expectation `0.977·√(A/n)` |
 | hypotheses | `(pa, pb)` set | exact | count ±30 % |
 | coarse | `cs` per hypothesis | ≤ 1/60 + 1e-6 | — |
 | stage 1 | pose per kept hypothesis (by id); `s1` | 0.05° / 0.01 t; ±0.02 | — |
@@ -616,6 +635,53 @@ breakline crossing a coarser mesh has proportionally fewer edges to cross — th
 `count × spacing` being within 2.9 % on average. A count gate of ±10 % underneath a `res` gate of
 ±10 % has no headroom, and it belongs with §13 question 2 rather than with the port. No row is
 widened here either.
+
+**The samples row is a new one, and three of its five injected columns are exact by construction
+rather than by luck** (step B3, `notes/2026-09-06-b3-samples.md`). PMC-9 lets the port draw its
+20 000 surface points and its `n_frac` fracture points from a different generator, so the *arrays*
+cannot be compared point by point at all; what injected mode compares is everything that does not
+depend on which numbers the generator produced. On all 66 fragments of the seven collections
+`n_surface`, `n_frac`, the `fp`-on-fracture test, the margin count and the margin membership are
+**exact**, the reference's own samples sit on the faces their own `sp`/`fp` name to 3.3e-11 (the
+`f64` round-off of the reference's own barycentric expression), and the two normal checks are the
+D §4.1 narrowing at 0.029°/0.038° against 0.1°. `n_frac` is the strongest of these: R §3.5.2's
+`clip(⌊150·A_f/t²⌋, 5000, 12000)` is reproduced exactly on the 32 fragments whose count is
+strictly between the clamps as well as on the 34 that sit on one.
+
+**Its two normal columns needed a conditioning rule, and that rule is arithmetic rather than
+fitted.** Narrowing a vertex to `f32` moves it by up to one ulp of its coordinate, and moving a
+vertex by `δ` perpendicular to the opposite edge turns the face normal by `δ/h`, where `h` is that
+vertex's altitude. The reference's own decimated meshes carry slivers — the worst face of
+`frag_008` has edges 0.638, 0.0023, 0.640 at coordinates of 463, whose short edge is 77 `f32` ulps
+— so on three of the twenty synthetic fragments the worst normal at a sample moves by 0.155–0.397°
+with no port arithmetic involved. Measured against the model bound `ulp/h`, the observed angle is
+at most **1.39×** on every one of the 66 fragments, so the bound is the whole story. The row
+therefore takes the worst case over the faces with `h ≥ 1000 ulp` — which bounds the turn at 1e-3
+rad = 0.057°, under the 0.1° gate *by construction* — and gates the share of samples left out at
+0.1 % (measured maximum 0.033 %).
+
+**Natively, 390 of 396, and the six failures are on four fragments this table has already named.**
+`Pot_A_Piece_04` fails `n_frac` by 11.76 % where its `t` alone predicts 11.78 % (`A_f/t²` with `t`
++6.58 %, the fragment §10.2's thickness paragraph is written about); `Pot_B_Piece_01` fails three
+columns and already fails the *segmentation* row above (agreement 0.9142, fracture fraction
++8.17 pp — and the sampled estimate of that same fraction comes out +8.18 pp, which is the sampler
+agreeing with the area measurement to 0.01 pp rather than a second failure); `frag_010` fails
+`fracture fraction` by 2.63 pp and fails the segmentation row too (2.55 pp). The fourth is the
+interesting one. `Pot_G_Piece_05` **passes** the segmentation row (agreement 0.9833, fracture
+fraction +0.75 pp) and still fails `Pf spacing` at 2.89× the expectation, because 4.84 % of its
+fracture samples lie more than three expected spacings from the reference's cloud and **100 % of
+those sit on faces the reference labels shell** (the two working meshes are identical entry for
+entry, so nothing else can differ). That is B2's finding in its sharpest form: a p95 statistic over
+12 000 fracture samples has no headroom under an area-agreement row of 3 %, because the fracture
+is a tenth of the surface and a 1.7 % disagreement of the *total* area is 14 % of the *fracture*
+area. The two rows are not independent, and no percentile of the sample distance is; that belongs
+with §13 question 2, not with a widened gate.
+
+**What the row does establish is that the sampler itself is right.** The cross-set p95 of the
+20 000 surface samples agrees with the Poisson prediction `0.977·√(A/n)` to within **1.34 % on
+every one of the 66 fragments** (median 0.48 %), which says the port's draw is an independent
+sample of the same area-weighted distribution as the reference's, at the same density, on the same
+surface — the strongest statement available about a sample that PMC-9 forbids comparing directly.
 
 ### 10.3 Benchmark gates
 
@@ -683,6 +749,7 @@ shorten phase 1+2 to ≈ 14 weeks because GPU work can start once the CPU ICP is
 | 1b | BVH, hash grid (E3, E4), segmentation, breaklines, match arrays | 2.5 | segmentation ≥ 0.995 injected / ≥ 0.97 native; breakline gates | BVH correctness; `voxel_down_sample` semantics |
 | 1b, step B1 | done: segmentation (R §3.4), `spatial::bvh`, `spatial::kdtree`, the `labels` tensor, the `segmentation` parity row | | injected 1.000000000 on all 68 fragments; native 66 of 68 (§10.2 on the two others) | `voxel_down_sample` semantics settled: the bucket rule is exact, only the voxel *order* is a hash artefact (PMC-4) |
 | 1b, step B2 | done: breaklines and frames (R §3.5.3–3.5.5), the five `brk_*` tensors, the `breakline` parity row | | injected exact on all 66 fragments (the only residuals are the `f32` cache narrowing); native 165 of 198 checks, every failure inherited (§10.2) | none new; the native `count` row is found to contradict the `res` row above it |
+| 1b, step B3 | done: the sampled match arrays (R §3.5.1–3.5.2, §3.5.6), `MatchData` (R §3.6), the five sampled tensors, the `samples` parity row | | injected 660 of 660 on all 66 fragments (`n_frac`, the margin and the face indices exact); native 390 of 396, six failures on four fragments the segmentation and thickness rows already name (§10.2) | none new; the native `Pf spacing` column is found to inherit the `segmentation` row above it |
 | 1c | hypotheses, coarse, NMS, ICP (E5), verification, `match_pair`, screening flags | 2.5 | stage-2 injected tolerances on every fixture pair | ICP corner cases (empty correspondences), tie handling |
 | 1d | assembly, refinement, recentre, report/transforms/meshes, renderer, CLI, determinism tests | 2 | R§13 gates natively; CI green on 4 OSs | none major |
 | 1e | profiling and CPU tuning to §10.3 CPU gates | 1.5 | CPU gates | 2 h collection gate has 1.6× margin only |

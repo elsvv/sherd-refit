@@ -13,8 +13,9 @@
 //! fixture is intact and to read the run's parameters. Step S4 added the array reader ([`npy`],
 //! over `npyz`), the comparison vocabulary ([`report`]) and the stage runners behind
 //! `sherd-refit-rs parity --stage …` ([`stages`]) for the three stages the port computed then:
-//! `load`, `thickness` and `working mesh`. Step B1 added `segmentation`. The later rows of
-//! D §10.2's table join them with the stages they judge, in phases 1b–1d.
+//! `load`, `thickness` and `working mesh`. Step B1 added `segmentation`, step B2 `breakline` and
+//! step B3 `samples`. The later rows of D §10.2's table join them with the stages they judge, in
+//! phases 1c–1d.
 
 pub mod layout;
 pub mod manifest;

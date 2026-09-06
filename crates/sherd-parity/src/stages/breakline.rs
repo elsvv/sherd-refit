@@ -326,7 +326,7 @@ fn percentile99(a: &[[f64; 3]], b: &[[f64; 3]]) -> f64 {
 }
 
 /// numpy's `percentile(x, 100·q)` on an already sorted array: linear interpolation.
-fn percentile(sorted: &[f64], q: f64) -> f64 {
+pub(crate) fn percentile(sorted: &[f64], q: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
     }

@@ -343,8 +343,10 @@ sorted subsets were measured equal entry for entry on all 66 fixture fragments i
 
 **3.5.6 Shell margin.** `d_brk[i]` = distance from `S[i]` to the nearest breakline point (inf if
 none). `margin = ¬frac[sp] ∧ (d_brk > 0.12·t) ∧ (d_brk < 1.5·t)` (**PMC-5**: these two are not
-resolution-floored). `margin_idx = sort(rng.choice(where(margin), 6000, replace=False))` if more
-than 6000, else `where(margin)`.
+resolution-floored; both bounds are strict, and a fragment with no breakline has `d_brk = ∞`,
+which fails the outer test, so it has no margin at all). `margin_idx =
+sort(rng.choice(where(margin), 6000, replace=False))` if more than 6000, else `where(margin)` —
+which draws nothing at all when the margin already fits.
 
 Stored arrays (`MD_ARRAYS`): `S (n_s×3), sp (int32), Pf, fp (int32), brk_P, brk_ns, brk_nf,
 brk_f, brk_sub (int32), margin_idx (int32)` plus the parameter dict
@@ -359,7 +361,7 @@ brk_t   = ns × f                                   # tangent
 brk_dih = degrees( arccos( clip(ns·nf, −1, 1) ) )  # per breakline point
 Pm = S[margin_idx];  Nm = SN[margin_idx]
 pc_reg:  nf = |Pf|, nm = |Pm|;  if reg_points > 0 and nf+nm > reg_points:
-             nf' = max(1, round(nf·reg_points/(nf+nm))), nm' = reg_points − nf'   else nf' = nf, nm' = nm
+             nf' = max(1, round(nf·reg_points/(nf+nm))), nm' = max(0, reg_points − nf')   else nf' = nf, nm' = nm
          points = Pf[:nf'] ++ Pm[:nm'],  normals = Nf[:nf'] ++ Nm[:nm']        (prefixes, in sample order)
 pc_frac: (Pf, Nf);   pc_brk: (P_brk[brk_sub], ns[brk_sub]);   pc_brk_full: (P_brk, ns)
 brk_tree: KD-tree over P_brk;   tree_margin: KD-tree over Pm;   tree_frac: KD-tree over Pf (built, unused)
@@ -824,7 +826,7 @@ Not part of the contract. `timings` keys are listed in §11.2.
 | PMC-6 | unstable `argsort` for coarse and stage-1 ranking | numpy | stable sort, index tie-break | pair gates |
 | PMC-7 | signed-distance sign by one-ray parity (Embree) | Open3D | robust inside test (several rays or winding number) | `pen` within 0.0005 |
 | PMC-8 | assembly `MatchData` at `t_med` with 15000 samples | historical | own `t`, cached 20000 samples | assembly `pen` decisions on all benchmarks |
-| PMC-9 | numpy PCG64 sampling | library | portable RNG, same draw structure | injected-sample parity + statistical gates |
+| PMC-9 | numpy PCG64 sampling, one `rng_md` per fragment consumed by §3.5's three samplers in order | library | portable RNG (`ChaCha8Rng`), the same draw *order inside* each sampler and **one stream per draw site** rather than one per fragment, so that a rebuild at another `t` or `surface_points` (§4.2, §8) cannot move a sampler that did not change; the uniform itself is numpy's own `(word >> 11)·2⁻⁵³` | injected-sample parity + statistical gates |
 | PMC-10 | eigenvector sign convention in `principal_views` | numpy | sign fixed by convention (largest component positive) | visual only |
 | PMC-11 | penetration counts `sd < −pen` via full signed distance on all 20000 samples | direct | equivalent formulation: inside ∧ unsigned distance > pen, with AABB/early-exit prefilters | `pen` identical up to PMC-7 |
 | PMC-12 | fracture distances computed for all samples | direct | bounded closest-point query with early exit at `sc.facing` (exact for points inside the window; `≥ facing` otherwise); `contact` needs `d < 2·tight` which lies inside the window | identical scores |

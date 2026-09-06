@@ -3,8 +3,9 @@
 //! The subcommands are D §9's: `run` and `segment` mirror the Python's, flag for flag, and
 //! `parity`, `bench` and `info` are new. Phase 1a implemented `info`, `segment` up to the working
 //! mesh and `parity` for the stages the port computes; step B1 added R §3.4's shell/fracture
-//! labels to `segment` and its own `parity` row, step B2 R §3.5's breaklines and theirs. `run` and
-//! `bench` arrive with the pipeline they drive (phase 1d) and report that plainly until then.
+//! labels to `segment` and its own `parity` row, step B2 R §3.5's breaklines and theirs, and step
+//! B3 the sampled match arrays and the `samples` row. `run` and `bench` arrive with the pipeline
+//! they drive (phase 1d) and report that plainly until then.
 
 use std::path::PathBuf;
 
@@ -33,15 +34,16 @@ enum Command {
     /// Assemble a collection of fragments (R §2–§11).
     Run(RunArgs),
 
-    /// Preprocess every fragment and write the fragment cache (R §3.1–3.5.5).
+    /// Preprocess every fragment and write the fragment cache (R §3.1–3.7).
     ///
     /// Reads every mesh of INPUT in the reference's collection order, cleans it, keeps the largest
     /// component, measures the wall thickness, decimates to the adaptive face budget, smooths,
-    /// labels every face shell or fracture, traces the breakline and its frames, and writes
-    /// `<OUT>/cache/<name>.sherd`. A second run over the same files reuses those caches.
+    /// labels every face shell or fracture, traces the breakline and its frames, draws the
+    /// surface, fracture and shell-margin samples, and writes `<OUT>/cache/<name>.sherd`. A second
+    /// run over the same files reuses those caches.
     ///
-    /// The sampled match arrays and the segmentation preview the reference's `segment` also
-    /// produces are the remaining steps of phase 1b.
+    /// The segmentation preview the reference's `segment` also produces arrives with the renderer
+    /// (phase 1d).
     Segment(SegmentArgs),
 
     /// Run the port's stages against a Python fixture dump and report D §10.2's tolerances.
@@ -105,8 +107,8 @@ struct ParityArgs {
     /// itself does not carry (levels `slim` and `min`, D §10.1).
     #[arg(long)]
     input: Option<PathBuf>,
-    /// Stage to compare: `load`, `thickness`, `working-mesh`, `segmentation`, `breakline`, or
-    /// `all`. Repeatable.
+    /// Stage to compare: `load`, `thickness`, `working-mesh`, `segmentation`, `breakline`,
+    /// `samples`, or `all`. Repeatable.
     #[arg(long, default_value = "all")]
     stage: Vec<String>,
     /// Feed each stage the Python stage's own inputs instead of the port's upstream results
@@ -166,7 +168,7 @@ fn info() {
     println!("  default seed:        {}", Params::default().seed);
 }
 
-/// R §3.1–3.4 for a whole collection, with the cache of R §3.7 (plan steps S4 and B1).
+/// R §3.1–3.5 for a whole collection, with the cache of R §3.7 (plan steps S4, B1, B2 and B3).
 #[allow(clippy::cast_precision_loss, reason = "counts printed in a table")]
 fn segment(args: &SegmentArgs) -> Result<()> {
     if let Err(e) = pipeline::set_threads(args.threads) {
@@ -198,7 +200,7 @@ fn segment(args: &SegmentArgs) -> Result<()> {
     let wall = started.elapsed().as_secs_f64();
 
     println!(
-        "{:<28} {:>9} {:>10} {:>9} {:>8} {:>7} {:>8} {:>7} {:>6} {:>6} {:>6}",
+        "{:<28} {:>9} {:>10} {:>9} {:>8} {:>7} {:>8} {:>7} {:>6} {:>7} {:>7} {:>6} {:>6}",
         "fragment",
         "faces",
         "from",
@@ -208,6 +210,8 @@ fn segment(args: &SegmentArgs) -> Result<()> {
         "fracture",
         "brk",
         "sub",
+        "frac pts",
+        "margin",
         "closed",
         "cache"
     );
@@ -219,7 +223,8 @@ fn segment(args: &SegmentArgs) -> Result<()> {
                 let fr = &p.fragment;
                 total += p.seconds;
                 println!(
-                    "{:<28} {:>9} {:>10} {:>9.3} {:>8.3} {:>7.1} {:>8.3} {:>7} {:>6} {:>6} {:>6}",
+                    "{:<28} {:>9} {:>10} {:>9.3} {:>8.3} {:>7.1} {:>8.3} {:>7} {:>6} {:>7} {:>7} \
+                     {:>6} {:>6}",
                     fr.name,
                     fr.n_faces(),
                     fr.n_orig_faces,
@@ -229,6 +234,8 @@ fn segment(args: &SegmentArgs) -> Result<()> {
                     fr.fracture_fraction(),
                     fr.brk.len(),
                     fr.brk.sub.len(),
+                    fr.samples.n_fracture(),
+                    fr.samples.n_margin(),
                     fr.watertight,
                     if p.cached { "hit" } else { "miss" }
                 );
@@ -247,8 +254,8 @@ fn segment(args: &SegmentArgs) -> Result<()> {
         println!("caches in {}", args.out.join("cache").display());
     }
     println!(
-        "the sampled match arrays of R §3.5.1-3.5.2 and §3.5.6 are the next step of phase 1b; this \
-         run stopped at the breaklines"
+        "R §3.1-3.7 for every fragment: the working mesh, the labels, the breaklines and the \
+         match arrays. Matching (R §4-§6) is phase 1c."
     );
     if failed > 0 {
         bail!("{failed} of {} fragments could not be preprocessed", entries.len());
@@ -397,8 +404,9 @@ mod tests {
             vec![Stage::Segmentation]
         );
         assert_eq!(requested_stages(&["breakline".to_owned()]).unwrap(), vec![Stage::Breakline]);
+        assert_eq!(requested_stages(&["samples".to_owned()]).unwrap(), vec![Stage::Samples]);
         let err = requested_stages(&["hypotheses".to_owned()]).unwrap_err().to_string();
-        assert!(err.contains("breakline"), "{err}");
+        assert!(err.contains("samples"), "{err}");
     }
 
     #[test]

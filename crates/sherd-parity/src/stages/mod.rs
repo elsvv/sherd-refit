@@ -7,11 +7,13 @@
 //! [`Check`](crate::report::Check)s.
 //!
 //! Plan step S4 filled in the first three rows of D §10.2's table — `load`, `thickness` and
-//! `working mesh` — step B1 the fourth, `segmentation`, and step B2 the fifth, `breakline`.
-//! `hypotheses` and the rest follow their stages in phases 1b–1d, as new modules beside these.
+//! `working mesh` — step B1 the fourth, `segmentation`, step B2 the fifth, `breakline`, and step
+//! B3 the sixth, `samples`. `hypotheses` and the rest follow their stages in phases 1b–1d, as new
+//! modules beside these.
 
 pub mod breakline;
 pub mod load;
+pub mod samples;
 pub mod segmentation;
 pub mod thickness;
 pub mod working_mesh;
@@ -39,12 +41,20 @@ pub enum Stage {
     Segmentation,
     /// R §3.5.3–3.5.5 — the breakline points, their frames and the hypothesis subset.
     Breakline,
+    /// R §3.5.1–3.5.2, §3.5.6 — the surface, fracture and shell-margin samples.
+    Samples,
 }
 
 impl Stage {
     /// Every stage this build can run, in pipeline order.
-    pub const ALL: [Self; 5] =
-        [Self::Load, Self::Thickness, Self::WorkingMesh, Self::Segmentation, Self::Breakline];
+    pub const ALL: [Self; 6] = [
+        Self::Load,
+        Self::Thickness,
+        Self::WorkingMesh,
+        Self::Segmentation,
+        Self::Breakline,
+        Self::Samples,
+    ];
 
     /// The name the command line and the table use.
     pub fn as_str(self) -> &'static str {
@@ -54,6 +64,7 @@ impl Stage {
             Self::WorkingMesh => "working-mesh",
             Self::Segmentation => "segmentation",
             Self::Breakline => "breakline",
+            Self::Samples => "samples",
         }
     }
 
@@ -221,6 +232,7 @@ impl Collection {
             Stage::WorkingMesh => working_mesh::run(self, mode),
             Stage::Segmentation => segmentation::run(self, mode),
             Stage::Breakline => breakline::run(self, mode),
+            Stage::Samples => samples::run(self, mode),
         }
     }
 

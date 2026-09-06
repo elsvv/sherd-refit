@@ -34,7 +34,6 @@
 use nalgebra::Matrix3;
 use parry3d::math::Vector;
 use rand_chacha::ChaCha8Rng;
-use rand_chacha::rand_core::Rng;
 use rayon::prelude::*;
 
 use crate::mesh::geometry::FaceGeometry;
@@ -370,42 +369,10 @@ fn principal_axes(p: &[[f64; 3]]) -> Matrix3<f64> {
 
 /// `rng.choice(n_faces, min(n, n_faces), replace=False)`: distinct face indices, uniformly.
 ///
-/// A partial Fisher–Yates shuffle, so the draw is O(n) and needs no hash set (D §7 keeps unordered
-/// containers off every result path). The *sequence* is not numpy's — this is `ChaCha8Rng`, PMC-9
-/// — so in native mode the sampled faces differ from the reference's and the thickness comparison
-/// is statistical (±2 %, D §10.2). In injected mode the fixture's `thick.idx` is used instead.
+/// [`crate::rng::without_replacement`] does the drawing; this is the name R §3.2 gives it and the
+/// place its caller looks for it.
 pub fn sample_face_indices(n_faces: usize, n: usize, rng: &mut ChaCha8Rng) -> Vec<u32> {
-    let take = n.min(n_faces);
-    let mut pool: Vec<u32> = (0..u32::try_from(n_faces).expect("face count fits in u32")).collect();
-    for i in 0..take {
-        let span = u32::try_from(n_faces - i).expect("face count fits in u32");
-        let j = i + uniform_below(rng, span) as usize;
-        pool.swap(i, j);
-    }
-    pool.truncate(take);
-    pool
-}
-
-/// A uniform integer in `0..n`, by Lemire's multiply-shift with rejection (unbiased).
-fn uniform_below(rng: &mut ChaCha8Rng, n: u32) -> u32 {
-    debug_assert!(n > 0);
-    let mut m = u64::from(rng.next_u32()) * u64::from(n);
-    #[allow(clippy::cast_possible_truncation, reason = "the low word is the fractional part")]
-    let mut low = m as u32;
-    if low < n {
-        let threshold = n.wrapping_neg() % n;
-        while low < threshold {
-            m = u64::from(rng.next_u32()) * u64::from(n);
-            #[allow(clippy::cast_possible_truncation, reason = "the low word is the fraction")]
-            {
-                low = m as u32;
-            }
-        }
-    }
-    #[allow(clippy::cast_possible_truncation, reason = "the high word is below n")]
-    {
-        (m >> 32) as u32
-    }
+    crate::rng::without_replacement(n_faces, n, rng)
 }
 
 #[cfg(test)]

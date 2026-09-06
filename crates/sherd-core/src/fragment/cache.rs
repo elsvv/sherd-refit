@@ -18,14 +18,19 @@
 //! | `brk_P` | f32 | `[k, 3]` | §3.5.3 breakline points |
 //! | `brk_ns`, `brk_nf`, `brk_f` | f32 | `[k, 3]` | §3.5.4 macro normals and the in-plane axis |
 //! | `brk_sub` | u32 | `[j]` | §3.5.5 hypothesis subset |
+//! | `S` | f32 | `[n_s, 3]` | §3.5.1 whole-surface samples |
+//! | `sp` | u32 | `[n_s]` | the face each surface sample came from |
+//! | `Pf` | f32 | `[n_f, 3]` | §3.5.2 fracture samples |
+//! | `fp` | u32 | `[n_f]` | the face each fracture sample came from |
+//! | `margin_idx` | u32 | `[n_m]` | §3.5.6 shell margin, indices into `S` |
 //!
-//! D §4.2 lists the sampled match arrays (`S`, `sp`, `Pf`, `fp`, `margin_idx`) and the optional
-//! `features/*` beside them. Those stages are still ahead; the reader treats an unknown tensor as
-//! data it does not need yet and the writer adds them when they exist, so a newer cache does not
-//! confuse this build. A tensor the port *needs* is a different matter, and moving
-//! [`crate::CACHE_VERSION`] is how it is announced: `labels` took it from 1 to 2 in step B1 and
-//! the five `brk_*` tensors from 2 to 3 in step B2, so a cache written before either existed is
-//! refused by its version rather than read back half empty.
+//! D §4.2 lists the optional `features/*` beside them. Those stages are still ahead; the reader
+//! treats an unknown tensor as data it does not need yet and the writer adds them when they exist,
+//! so a newer cache does not confuse this build. A tensor the port *needs* is a different matter,
+//! and moving [`crate::CACHE_VERSION`] is how it is announced: `labels` took it from 1 to 2 in
+//! step B1, the five `brk_*` tensors from 2 to 3 in step B2 and the five sampled arrays from 3 to
+//! 4 in step B3, so a cache written before any of them existed is refused by its version rather
+//! than read back half empty.
 //!
 //! The `brk_*` tensors are `f32` because [`Breaklines`](crate::fragment::breakline::Breaklines)
 //! is (D §4.1), so the arrays a warm run reads back are the arrays a cold run computed, bit for
@@ -56,6 +61,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Fragment;
 use super::breakline::{Breaklines, BrkParams};
+use super::samples::{SampleParams, Samples};
 use crate::error::{Error, Result};
 use crate::types::{FaceLabel, SourceRef, WorkingMesh};
 use crate::vec3::Vec3f;
@@ -126,6 +132,12 @@ pub struct CacheMeta {
     pub watertight: bool,
     /// Unique edges used by a number of faces other than two.
     pub n_boundary: u32,
+    /// Total area of the working mesh (R §3.4's `area`), summed in `f64` where the segmentation
+    /// summed it. Additive to D §4.2, so that neither `stats()` nor R §3.5.2's sample count has to
+    /// recompute the face geometry on a cache hit.
+    pub area: f64,
+    /// Area of the faces labelled fracture (R §3.4's `fracture_area`), likewise.
+    pub frac_area: f64,
     /// Vertices after cleaning, before the largest-component pass (R §3.1).
     pub n_orig_vertices: u32,
     /// Triangles after cleaning, before the largest-component pass.
@@ -139,10 +151,11 @@ pub struct CacheMeta {
     /// build's `cache_version` refuses anyway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brk_params: Option<BrkParams>,
-    /// The parameters the sampled `md_*` tensors were built with (the rest of R §3.7's `mdp_*`),
-    /// once the next step writes them. Same rule as `brk_params`.
+    /// The parameters the five sampled tensors were built with — the rest of R §3.7's `mdp_*`.
+    /// Same rule as `brk_params`: a cache whose `md_params` are not the run's has *those* arrays
+    /// recomputed and rewritten, and nothing else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub md_params: Option<serde_json::Value>,
+    pub md_params: Option<SampleParams>,
     /// Roadmap items 4 and 6 (D §11); absent in phase 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<serde_json::Value>,
@@ -169,11 +182,13 @@ impl CacheMeta {
             res: f64::from(fragment.mesh.res),
             watertight: fragment.watertight,
             n_boundary: fragment.n_boundary,
+            area: fragment.area,
+            frac_area: fragment.frac_area,
             n_orig_vertices: fragment.n_orig_vertices,
             n_orig_faces: fragment.n_orig_faces,
             backend: "cpu".to_owned(),
             brk_params: Some(fragment.brk.params),
-            md_params: None,
+            md_params: Some(fragment.samples.params),
             features: None,
         }
     }
@@ -230,18 +245,29 @@ pub fn to_bytes(fragment: &Fragment) -> Result<Vec<u8>> {
     let nf = points_bytes(&brk.nf);
     let axis = points_bytes(&brk.f);
     let sub: Vec<u8> = brk.sub.iter().copied().flat_map(u32::to_le_bytes).collect();
+    let md = &fragment.samples;
+    let surface = points_bytes(&md.s);
+    let surface_faces: Vec<u8> = md.sp.iter().copied().flat_map(u32::to_le_bytes).collect();
+    let fracture = points_bytes(&md.pf);
+    let fracture_faces: Vec<u8> = md.fp.iter().copied().flat_map(u32::to_le_bytes).collect();
+    let margin: Vec<u8> = md.margin_idx.iter().copied().flat_map(u32::to_le_bytes).collect();
     // Every shape is the array's own length rather than a shared `k`: the writer states what it
     // holds and the reader is what checks that the five hang together, which is the only order in
     // which a file written elsewhere is checked at all.
     let tensors = vec![
         ("F", TensorView::new(Dtype::U32, vec![fragment.mesh.f.len(), 3], &f)),
+        ("Pf", TensorView::new(Dtype::F32, vec![md.pf.len(), 3], &fracture)),
+        ("S", TensorView::new(Dtype::F32, vec![md.s.len(), 3], &surface)),
         ("V", TensorView::new(Dtype::F32, vec![fragment.mesh.v.len(), 3], &v)),
         ("brk_P", TensorView::new(Dtype::F32, vec![brk.p.len(), 3], &points)),
         ("brk_f", TensorView::new(Dtype::F32, vec![brk.f.len(), 3], &axis)),
         ("brk_nf", TensorView::new(Dtype::F32, vec![brk.nf.len(), 3], &nf)),
         ("brk_ns", TensorView::new(Dtype::F32, vec![brk.ns.len(), 3], &ns)),
         ("brk_sub", TensorView::new(Dtype::U32, vec![brk.sub.len()], &sub)),
+        ("fp", TensorView::new(Dtype::U32, vec![md.fp.len()], &fracture_faces)),
         ("labels", TensorView::new(Dtype::U8, vec![fragment.labels.len()], &labels)),
+        ("margin_idx", TensorView::new(Dtype::U32, vec![md.margin_idx.len()], &margin)),
+        ("sp", TensorView::new(Dtype::U32, vec![md.sp.len()], &surface_faces)),
     ];
     let mut views = Vec::with_capacity(tensors.len());
     for (name, view) in tensors {
@@ -322,6 +348,29 @@ pub fn from_bytes(bytes: &[u8], path: impl AsRef<Path>) -> Result<Fragment> {
         return Err(Error::cache(path, format!("brk_sub {bad} is outside brk_P ({k})")));
     }
 
+    let md_params = meta.md_params.ok_or_else(|| Error::cache(path, "no md_params"))?;
+    let samples = Samples {
+        params: md_params,
+        s: read_points(&file, "S", path)?,
+        sp: read_u32(&file, "sp", path)?,
+        pf: read_points(&file, "Pf", path)?,
+        fp: read_u32(&file, "fp", path)?,
+        margin_idx: read_u32(&file, "margin_idx", path)?,
+    };
+    // The three rules the writer cannot break but a file from elsewhere can: every sample has a
+    // face, every face index is a face, and every margin index is a surface sample.
+    if samples.sp.len() != samples.s.len() || samples.fp.len() != samples.pf.len() {
+        return Err(Error::cache(path, "sp/fp do not describe S/Pf"));
+    }
+    let n_faces = u32::try_from(f.len()).unwrap_or(u32::MAX);
+    if let Some(bad) = samples.sp.iter().chain(&samples.fp).find(|&&i| i >= n_faces) {
+        return Err(Error::cache(path, format!("sample face {bad} is outside F ({n_faces})")));
+    }
+    let n_s = u32::try_from(samples.s.len()).unwrap_or(u32::MAX);
+    if let Some(bad) = samples.margin_idx.iter().find(|&&i| i >= n_s) {
+        return Err(Error::cache(path, format!("margin_idx {bad} is outside S ({n_s})")));
+    }
+
     #[allow(
         clippy::cast_possible_truncation,
         reason = "`res` was written from an f32 and round-trips exactly"
@@ -339,6 +388,7 @@ pub fn from_bytes(bytes: &[u8], path: impl AsRef<Path>) -> Result<Fragment> {
         mesh,
         labels,
         brk,
+        samples,
         thick: meta.thick,
         thick_mode: meta.thick_mode,
         watertight: meta.watertight,
@@ -348,6 +398,8 @@ pub fn from_bytes(bytes: &[u8], path: impl AsRef<Path>) -> Result<Fragment> {
         target_faces: meta.target_faces,
         face_budget: meta.face_budget,
         area0: meta.area0,
+        area: meta.area,
+        frac_area: meta.frac_area,
     })
 }
 
@@ -533,6 +585,7 @@ mod tests {
     };
     use crate::fragment::Fragment;
     use crate::fragment::breakline::{Breaklines, BrkParams};
+    use crate::fragment::samples::{SampleParams, Samples};
     use crate::types::{FaceLabel, SourceRef, WorkingMesh};
     use crate::vec3::vec3;
     use crate::{ALGO_REF, CACHE_VERSION};
@@ -577,6 +630,14 @@ mod tests {
                 f: vec![vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0)],
                 sub: vec![1],
             },
+            samples: Samples {
+                params: SampleParams::at(3.531_017_303_466_797),
+                s: vec![vec3(0.25, 0.25, 0.0), vec3(0.3, 0.1, 0.2), vec3(0.1, 0.4, 0.1)],
+                sp: vec![0, 1, 3],
+                pf: vec![vec3(0.3, 0.1, 0.2)],
+                fp: vec![1],
+                margin_idx: vec![0, 2],
+            },
             thick: 3.531_017_303_466_797,
             thick_mode: 4.044_1,
             watertight: true,
@@ -586,6 +647,8 @@ mod tests {
             target_faces: 200_000,
             face_budget: 50_000,
             area0: 17.529_384_756_291_3,
+            area: 2.115_384_756_291_31,
+            frac_area: 1.015_384_756_291_31,
         }
     }
 
@@ -630,6 +693,9 @@ mod tests {
         assert_eq!(back.mesh.f, fr.mesh.f, "faces");
         assert_eq!(back.labels, fr.labels, "labels");
         assert_eq!(back.brk, fr.brk, "the breakline arrays, frames, subset and parameters");
+        assert_eq!(back.samples, fr.samples, "the sampled arrays and their parameters");
+        assert_eq!(back.area.to_bits(), fr.area.to_bits(), "area");
+        assert_eq!(back.frac_area.to_bits(), fr.frac_area.to_bits(), "frac_area");
         assert_eq!(back.mesh.face_normals, fr.mesh.face_normals, "face normals");
         assert_eq!(back.mesh.face_areas, fr.mesh.face_areas, "face areas");
         assert_eq!(back.mesh.face_centroids, fr.mesh.face_centroids, "face centroids");
@@ -779,6 +845,38 @@ mod tests {
         let back = from_bytes(&to_bytes(&fr).unwrap(), &source).unwrap();
         assert!(back.brk.is_empty());
         assert_eq!(back.brk, fr.brk);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A cache whose sampled arrays do not hang together — a face index off the end of `F`, a
+    /// `margin_idx` off the end of `S`, an `sp` of the wrong length — is refused rather than read
+    /// back and indexed.
+    #[test]
+    fn a_cache_whose_samples_do_not_hang_together_is_refused() {
+        let dir = scratch("badmd");
+        let source = dir.join("pieceA.ply");
+        std::fs::write(&source, b"x").unwrap();
+
+        let mut fr = sample(&source);
+        fr.samples.sp.pop();
+        let err = from_bytes(&to_bytes(&fr).unwrap(), &source).unwrap_err().to_string();
+        assert!(err.contains("sp/fp do not describe S/Pf"), "{err}");
+
+        let mut fr = sample(&source);
+        fr.samples.fp = vec![9];
+        let err = from_bytes(&to_bytes(&fr).unwrap(), &source).unwrap_err().to_string();
+        assert!(err.contains("sample face 9 is outside F"), "{err}");
+
+        let mut fr = sample(&source);
+        fr.samples.margin_idx = vec![11];
+        let err = from_bytes(&to_bytes(&fr).unwrap(), &source).unwrap_err().to_string();
+        assert!(err.contains("margin_idx 11 is outside S"), "{err}");
+
+        // A fragment with no fracture and no margin is a legitimate fragment, not an error.
+        let mut fr = sample(&source);
+        fr.samples = Samples { params: SampleParams::at(fr.thick), ..Samples::default() };
+        let back = from_bytes(&to_bytes(&fr).unwrap(), &source).unwrap();
+        assert_eq!(back.samples, fr.samples);
         std::fs::remove_dir_all(&dir).ok();
     }
 

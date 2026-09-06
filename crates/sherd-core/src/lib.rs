@@ -23,7 +23,7 @@
 //! | [`collection`] | §2 | S4 |
 //! | [`io`] | §3.1, §11 | S2 |
 //! | [`mesh`] | §3.1 (clean, components) S2; §3.3 (the rest) S3; §3.4.6 islands B1 | S2, S3, B1 |
-//! | [`fragment`] | §3.2, §3.4–3.7 | S3 (mesh), S4 (cache), B1 (segmentation), phase 1b (the rest) |
+//! | [`fragment`] | §3.2, §3.4–3.7 | S3 (mesh), S4 (cache), B1 (segmentation), B2 (breaklines), B3 (samples) |
 //! | [`spatial`] | §3.2, §3.4.1–3.4.3, §6.1, §6.4 | B1 (rays, KD-tree), phase 1c (inside test) |
 //! | [`matching`] | §4–§7 | phase 1c |
 //! | [`assembly`] | §8 | phase 1d |
@@ -43,9 +43,13 @@
 //! `sherd-refit-rs parity`. Step B1 opened phase 1b with R §3.4's shell/fracture segmentation
 //! ([`fragment::segment`]) and the two spatial structures it runs on
 //! ([`spatial::bvh`], [`spatial::kdtree`]); its labels are the `labels` tensor of the cache and
-//! the `segmentation` row of the parity table. The remaining algorithm modules are documented but
-//! empty; they are filled in step by step, each step gated on the fixtures under `fixtures/` and
-//! on `tools/compare_fixtures.py`.
+//! the `segmentation` row of the parity table. Step B2 added R §3.5.3–3.5.5's breaklines and
+//! frames ([`fragment::breakline`]) and step B3 the sampled match arrays of R §3.5.1–3.5.2 and
+//! §3.5.6 with the runtime [`MatchData`](fragment::samples::MatchData) of R §3.6
+//! ([`fragment::samples`]), which completes R §3: the ten tensors of a fragment cache and the
+//! `breakline` and `samples` rows of the parity table. The remaining algorithm modules are
+//! documented but empty; they are filled in step by step, each step gated on the fixtures under
+//! `fixtures/` and on `tools/compare_fixtures.py`.
 
 pub mod assembly;
 pub mod collection;
@@ -88,7 +92,9 @@ pub const ALGO_REF: &str = "2026-09-06/9d4b9d3";
 ///
 /// `2`: step B1 added `labels u8[m]` (R §3.4). `3`: step B2 added the five breakline tensors
 /// `brk_P`, `brk_ns`, `brk_nf`, `brk_f` (f32 `[k, 3]`) and `brk_sub` (u32 `[j]`) of R §3.5.3–3.5.5,
-/// with their `brk_params` in the metadata. Every tensor the port reads back must be in the file,
-/// so an older cache is refused and its fragment recomputed, rather than being read back half
-/// empty.
-pub const CACHE_VERSION: u32 = 3;
+/// with their `brk_params` in the metadata. `4`: step B3 added the five sampled ones — `S`,
+/// `Pf` (f32 `[n, 3]`), `sp`, `fp`, `margin_idx` (u32 `[n]`) of R §3.5.1–3.5.2 and §3.5.6 — with
+/// their `md_params` and the two face areas of R §3.4. Every tensor the port reads back must be in
+/// the file, so an older cache is refused and its fragment recomputed, rather than being read back
+/// half empty.
+pub const CACHE_VERSION: u32 = 4;

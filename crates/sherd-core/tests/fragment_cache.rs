@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use sherd_core::fragment::Fragment;
 use sherd_core::fragment::breakline::BrkParams;
 use sherd_core::fragment::cache;
+use sherd_core::fragment::samples::SampleParams;
 
 fn slab_piece(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -74,6 +75,42 @@ fn a_warm_run_is_the_same_run_as_a_cold_one() {
     assert!(!cold.brk.is_empty(), "the slab has a break to find");
     assert_eq!(warm.brk, cold.brk, "breakline points, frames, subset and parameters");
     assert_eq!(warm.brk.params, BrkParams::at(cold.thick));
+    // And the sampled arrays, which are stored for the same reason (R §3.5.1–3.5.2, §3.5.6).
+    assert!(cold.samples.has_fracture() && cold.samples.n_margin() > 0);
+    assert_eq!(warm.samples, cold.samples, "S, sp, Pf, fp, margin_idx and their parameters");
+    assert_eq!(warm.samples.params, SampleParams::at(cold.thick));
+    assert_eq!(warm.area.to_bits(), cold.area.to_bits(), "area");
+    assert_eq!(warm.frac_area.to_bits(), cold.frac_area.to_bits(), "frac_area");
+
+    std::fs::remove_dir_all(&out).ok();
+}
+
+/// R §3.7's rule again for the *sampled* half: a cache whose `md_params` are not this run's has
+/// `S`, `sp`, `Pf`, `fp` and `margin_idx` recomputed, and the mesh, the labels and the breaklines
+/// still come off the disk.
+#[test]
+fn a_cache_built_with_other_sampling_parameters_has_the_arrays_recomputed() {
+    let out = scratch("mdparams");
+    let source = slab_piece("pieceA");
+    let path = cache::cache_path(&out, "pieceA");
+
+    let (mut fragment, _) =
+        Fragment::load_or_build(&source, TARGET_FACES, "pieceA", Some(&path)).expect("cold");
+    let wanted = fragment.samples.clone();
+    assert_eq!(wanted.params, SampleParams::at(fragment.thick));
+
+    // A cache whose samples were drawn at another count, with the arrays to match.
+    fragment.samples.params = SampleParams { surface_points: 500, ..wanted.params };
+    fragment.samples.s.truncate(500);
+    fragment.samples.sp.truncate(500);
+    fragment.samples.margin_idx.retain(|&i| i < 500);
+    cache::write(&fragment, &path).expect("the doctored cache is written");
+
+    let (back, from_cache) =
+        Fragment::load_or_build(&source, TARGET_FACES, "pieceA", Some(&path)).expect("warm");
+    assert!(from_cache, "the mesh, the labels and the breaklines still came from the cache");
+    assert_eq!(back.samples, wanted, "the arrays were redrawn at this run's parameters");
+    assert_eq!(cache::read(&path).expect("the cache reads").samples, wanted);
 
     std::fs::remove_dir_all(&out).ok();
 }

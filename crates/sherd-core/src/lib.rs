@@ -20,9 +20,10 @@
 //!
 //! | module | R sections | filled in |
 //! |---|---|---|
+//! | [`collection`] | §2 | S4 |
 //! | [`io`] | §3.1, §11 | S2 |
 //! | [`mesh`] | §3.1 (clean, components) S2; §3.3 (the rest) S3 | S2, S3 |
-//! | [`fragment`] | §3.2, §3.4–3.7 | S3, S4, phase 1b |
+//! | [`fragment`] | §3.2, §3.4–3.7 | S3 (mesh), S4 (cache), phase 1b (the rest) |
 //! | [`spatial`] | §3.2, §3.4.3, §6.1, §6.4 | phase 1b |
 //! | [`matching`] | §4–§7 | phase 1c |
 //! | [`assembly`] | §8 | phase 1d |
@@ -36,11 +37,15 @@
 //! largest-component passes in [`mesh`]. Step S3 added the rest of the preprocessing up to the
 //! working mesh: face geometry and `res`, edge adjacency and `closed_enough`, the adaptive face
 //! budget with `meshopt`'s decimation, Taubin smoothing, the wall thickness of R §3.2, and
-//! [`fragment::Fragment::from_mesh_file`], which runs all of it in the reference's order. The
-//! remaining algorithm modules are documented but empty; they are filled in step by step, each
-//! step gated on the fixtures under `fixtures/` and on `tools/compare_fixtures.py`.
+//! [`fragment::Fragment::from_mesh_file`], which runs all of it in the reference's order. Step S4
+//! added the fragment cache ([`fragment::cache`], D §4.2), collection discovery ([`collection`],
+//! R §2) and, in `sherd-parity`, the reader for the Python fixtures and the stage runners behind
+//! `sherd-refit-rs parity`. The remaining algorithm modules are documented but empty; they are
+//! filled in step by step, each step gated on the fixtures under `fixtures/` and on
+//! `tools/compare_fixtures.py`.
 
 pub mod assembly;
+pub mod collection;
 pub mod error;
 pub mod executor;
 pub mod fixture;
@@ -58,6 +63,7 @@ pub mod spatial;
 pub mod types;
 pub mod vec3;
 
+pub use collection::Entry;
 pub use error::{Error, Result};
 pub use executor::Backend;
 pub use mesh::Mesh;

@@ -9,12 +9,20 @@
 //! * **native mode** — the Rust stage runs on Rust's own upstream results, and the comparison is
 //!   statistical, within the tolerances of D §10.2.
 //!
-//! Phase 1a step S1 provides the dump's layout and its manifest, which is enough to check that a
-//! fixture is intact and to read the run's parameters. The array reader (`npyz`) and the stage
-//! runners behind `sherd-refit-rs parity --stage …` follow in plan step S4.
+//! Phase 1a step S1 provided the dump's layout and its manifest, which is enough to check that a
+//! fixture is intact and to read the run's parameters. Step S4 added the array reader ([`npy`],
+//! over `npyz`), the comparison vocabulary ([`report`]) and the stage runners behind
+//! `sherd-refit-rs parity --stage …` ([`stages`]) for the three stages the port computes so far:
+//! `load`, `thickness` and `working mesh`. The later rows of D §10.2's table join them with the
+//! stages they judge, in phases 1b–1d.
 
 pub mod layout;
 pub mod manifest;
+pub mod npy;
+pub mod report;
+pub mod stages;
 
 pub use layout::FixtureDir;
 pub use manifest::{Collection, FileEntry, Manifest, Pairs};
+pub use report::{Check, Mode, StageReport};
+pub use stages::Stage;

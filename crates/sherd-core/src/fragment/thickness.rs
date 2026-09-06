@@ -195,8 +195,40 @@ pub fn thickness_from_hits(
         return None;
     }
     let raw = hist_mode(&ok_d);
+    let far = looking_back(normals, idx, hits, &ok_d, &ok_at);
+    let t = if far.len() >= MIN_HITS { hist_mode(&far) } else { raw };
+    Some((t, raw))
+}
 
-    let far: Vec<f32> = ok_at
+/// The distances R §3.2 takes its *filtered* mode over: the hits whose face looks back along the
+/// ray it was hit by (`FN[prim] · dvec > 0.7`).
+///
+/// Exposed because the width of one bin of the histogram over exactly these distances —
+/// `percentile(far, 90) / 60` — is the resolution of the whole thickness estimate, and the parity
+/// harness reports `t` in those bins as well as in per cent (D §10.2, and §5 of the S3 note).
+pub fn filtered_distances(normals: &[[f64; 3]], idx: &[u32], hits: &RayHits) -> Vec<f32> {
+    let n_faces = normals.len();
+    let mut ok_d = Vec::with_capacity(hits.len());
+    let mut ok_at = Vec::with_capacity(hits.len());
+    for k in 0..hits.len() {
+        if hits.t_hit[k].is_finite() && (hits.prim[k] as usize) < n_faces {
+            ok_d.push(hits.t_hit[k]);
+            ok_at.push(k);
+        }
+    }
+    looking_back(normals, idx, hits, &ok_d, &ok_at)
+}
+
+/// The filter of R §3.2, over hits already known to be valid: `ok_d[j]` is the distance of ray
+/// `ok_at[j]`.
+fn looking_back(
+    normals: &[[f64; 3]],
+    idx: &[u32],
+    hits: &RayHits,
+    ok_d: &[f32],
+    ok_at: &[usize],
+) -> Vec<f32> {
+    ok_at
         .iter()
         .enumerate()
         .filter_map(|(j, &k)| {
@@ -207,10 +239,7 @@ pub fn thickness_from_hits(
             let dot = -((hit[0] * from[0] + hit[1] * from[1]) + hit[2] * from[2]);
             (dot > LOOKS_BACK_COS).then_some(ok_d[j])
         })
-        .collect();
-
-    let t = if far.len() >= MIN_HITS { hist_mode(&far) } else { raw };
-    Some((t, raw))
+        .collect()
 }
 
 /// `_hist_mode`: the centre of the fullest of 60 equal bins spanning `[0, p90]`.

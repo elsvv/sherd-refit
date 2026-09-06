@@ -6,8 +6,9 @@
 //! a rerun on the same collection starts at the matching stage.
 //!
 //! Step S3 fills in the preprocessing up to the working mesh — [`Fragment::from_mesh_file`] and
-//! everything it calls. The cache is S4; segmentation, breaklines and the match arrays follow in
-//! phase 1b, each adding its own field to [`Fragment`].
+//! everything it calls; step S4 the cache ([`cache`], [`Fragment::load_or_build`]).
+//! Segmentation, breaklines and the match arrays follow in phase 1b, each adding its own field to
+//! [`Fragment`] and its own tensor to the cache.
 
 pub mod breakline;
 pub mod cache;
@@ -146,7 +147,6 @@ impl Fragment {
                 "working mesh has boundary edges; penetration tests will be skipped for it"
             );
         }
-        let geom = face_geometry(&mesh.v, &mesh.f);
         let res = median_edge(&mesh.v, &mesh.f);
 
         tracing::info!(
@@ -160,15 +160,17 @@ impl Fragment {
             "working mesh"
         );
 
+        // The per-face arrays are derived by `WorkingMesh::from_parts` from the *narrowed*
+        // vertices, not from `mesh.v`, so that this fragment and the same fragment read back from
+        // the cache (`cache`, D §4.2) are bit-identical: the cache stores `V`, `F` and `res`, and
+        // both paths have to derive the rest the same way. `geom` above is R §3.2's, over the
+        // original component.
         #[allow(clippy::cast_possible_truncation, reason = "the working mesh is f32 (D §4.1, §7)")]
-        let working = WorkingMesh {
-            v: mesh.v.iter().copied().map(Vec3f::from_f64).collect(),
-            f: mesh.f,
-            face_normals: geom.normals.iter().copied().map(Vec3f::from_f64).collect(),
-            face_areas: geom.areas.iter().map(|&a| a as f32).collect(),
-            face_centroids: geom.centroids.iter().copied().map(Vec3f::from_f64).collect(),
-            res: res as f32,
-        };
+        let working = WorkingMesh::from_parts(
+            mesh.v.iter().copied().map(Vec3f::from_f64).collect(),
+            mesh.f,
+            res as f32,
+        );
 
         Ok(Self {
             id: 0,
@@ -185,6 +187,37 @@ impl Fragment {
             face_budget: u32::try_from(budget).unwrap_or(u32::MAX),
             area0,
         })
+    }
+
+    /// R §3.7's cache path through [`Fragment::from_mesh_file_named`]: the cached fragment when
+    /// a valid cache describes this file, otherwise the file itself, with the result written to
+    /// the cache.
+    ///
+    /// Returns the fragment and whether it came from the cache. Passing `None` for `cache`
+    /// bypasses the cache in both directions, which is what `--no-cache` and the parity harness
+    /// want. A cache that cannot be written is *not* an error — the fragment is already computed
+    /// and the run continues without it — but it is logged.
+    pub fn load_or_build(
+        path: impl AsRef<Path>,
+        target_faces: usize,
+        name: &str,
+        cache: Option<&Path>,
+    ) -> Result<(Self, bool)> {
+        let path = path.as_ref();
+        let cap = u32::try_from(target_faces).unwrap_or(u32::MAX);
+        if let Some(cache) = cache
+            && let Some(fragment) = cache::load_valid(cache, path, cap, name)
+        {
+            tracing::debug!(fragment = name, cache = %cache.display(), "cache hit");
+            return Ok((fragment, true));
+        }
+        let fragment = Self::from_mesh_file_named(path, target_faces, name)?;
+        if let Some(cache) = cache
+            && let Err(e) = cache::write(&fragment, cache)
+        {
+            tracing::warn!(fragment = name, "the cache could not be written: {e}");
+        }
+        Ok((fragment, false))
     }
 
     /// Number of faces of the working mesh.

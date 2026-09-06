@@ -72,6 +72,32 @@ pub struct WorkingMesh {
 }
 
 impl WorkingMesh {
+    /// The one way a working mesh is built (R §3.3): from its `f32` vertices, its triangles and
+    /// its `res`, with the three per-face arrays derived here and nowhere else.
+    ///
+    /// The derivation runs `face_geometry` in `f64` over the vertices **after** they have been
+    /// narrowed to `f32`, which is what makes a fragment read back from the cache
+    /// (`fragment::cache`, D §4.2) bit-identical to the same fragment computed from the file: the
+    /// cache stores `V`, `F` and `res` and nothing derived, so the two paths have to agree on how
+    /// the rest follows from them. Computing the normals from the wider pre-narrowing coordinates
+    /// instead would leave a cold run and a warm run a few ULP apart in every face normal.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the working mesh is f32 by design (D §4.1, §7)"
+    )]
+    pub fn from_parts(v: Vec<Vec3f>, f: Vec<[u32; 3]>, res: f32) -> Self {
+        let v64: Vec<[f64; 3]> = v.iter().map(|p| p.to_f64()).collect();
+        let geom = crate::mesh::geometry::face_geometry(&v64, &f);
+        Self {
+            v,
+            f,
+            face_normals: geom.normals.iter().copied().map(Vec3f::from_f64).collect(),
+            face_areas: geom.areas.iter().map(|&a| a as f32).collect(),
+            face_centroids: geom.centroids.iter().copied().map(Vec3f::from_f64).collect(),
+            res,
+        }
+    }
+
     /// Number of vertices.
     #[inline]
     pub fn n_vertices(&self) -> usize {

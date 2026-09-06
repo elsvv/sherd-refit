@@ -33,9 +33,12 @@
 //! Phase 1a step S1 was the scaffold: the cross-cutting types ([`Vec3f`], [`Params`],
 //! [`WorkingMesh`], [`Pose`], [`Error`]), the seeded RNG and the module tree. Step S2 added the
 //! load stage — every reader of [`io`], the PLY writer of R §11.4, and R §3.1's cleaning and
-//! largest-component passes in [`mesh`]. The remaining algorithm modules are documented but
-//! empty; they are filled in step by step, each step gated on the fixtures under `fixtures/` and
-//! on `tools/compare_fixtures.py`.
+//! largest-component passes in [`mesh`]. Step S3 added the rest of the preprocessing up to the
+//! working mesh: face geometry and `res`, edge adjacency and `closed_enough`, the adaptive face
+//! budget with `meshopt`'s decimation, Taubin smoothing, the wall thickness of R §3.2, and
+//! [`fragment::Fragment::from_mesh_file`], which runs all of it in the reference's order. The
+//! remaining algorithm modules are documented but empty; they are filled in step by step, each
+//! step gated on the fixtures under `fixtures/` and on `tools/compare_fixtures.py`.
 
 pub mod assembly;
 pub mod error;

@@ -44,7 +44,10 @@ kiddo = "6.2.0"                           # ImmutableKdTree<f32, 3> for radius-b
 safetensors = "0.8.0"                     # fragment cache (design §4.2)
 npyz = "0.9.1"                            # read the Python fixtures' .npy (design §10.1)
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+# `float_roundtrip`: without it serde_json's fast float path misrounds by one ULP
+# (`29.864871978759766` -> 0x403ddd6840000001 instead of ...0000), which is exactly the
+# difference between a fixture scalar and the float32 value it was written from (S3).
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
 sha2 = "0.11.0"                           # fixture manifest checksums
 image = { version = "0.25.10", default-features = false, features = [
     "png",

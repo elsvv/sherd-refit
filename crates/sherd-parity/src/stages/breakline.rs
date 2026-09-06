@@ -36,14 +36,25 @@
 //!
 //! **The length, not the count.** The row used to gate the number of points at ±10 %, and step B2
 //! measured that gate contradicting the one above it: `res` is allowed ±10 % natively, a breakline
-//! crossing a mesh with 15 % longer edges has proportionally fewer edges to cross, and on
-//! synthetic_20 the port came out 10 % short in the count while its `count × median
-//! nearest-neighbour spacing` — the length of the same curve — agreed to 2.9 % on average
+//! crossing a mesh with longer edges has proportionally fewer edges to cross, and on synthetic_20
+//! the port comes out 3–18 % short in the count while the curve it traces is the same one
 //! (`notes/2026-09-06-b2-breaklines.md` §4.2). A count gate under a `res` gate has no headroom by
-//! construction; the length is what "the same breakline" means when neither mesh is the other's,
-//! and it is what this row measures. The density is still visible: `spacing` is reported beside it
-//! against the same ±10 %, so a port that halved its point count *and* doubled its spacing would
-//! pass the length and fail the spacing.
+//! construction; the length is what "the same breakline" means when neither mesh is the other's.
+//!
+//! The length is the **sum of every point's distance to its nearest other point** — equivalently
+//! `count × mean nearest-neighbour spacing`, and the estimator matters. `count × median spacing`
+//! was the first form of this row and it is not a length: the spacing along a decimated mesh's
+//! breakline is heterogeneous, so the median is a robust summary of the *typical* gap rather than
+//! an additive one. Measured over the twenty synthetic_20 fragments, port against reference,
+//! `count × median` disagrees by 4.46 % on average and 11.17 % at worst, while the sum of the
+//! nearest-neighbour distances disagrees by **1.42 % on average and 3.95 % at worst**
+//! (`notes/2026-09-07-t1-deterministic-thickness.md` §5). The tolerance is the same ±10 %; only
+//! the quantity is the one that adds up.
+//!
+//! The point *density* is deliberately not a row of its own. It is a function of `res`, which the
+//! working-mesh row already gates at ±10 %, and gating it here as well would rebuild exactly the
+//! contradiction B2 found: on the terracotta the port's breakline spacing is 10.7–14.7 % wider
+//! than the reference's with the curve's length agreeing to under 1 %.
 
 use sherd_core::error::Result;
 use sherd_core::fragment::Fragment;
@@ -62,10 +73,8 @@ pub const INJECTED_HAUSDORFF_T: f64 = 1e-4;
 pub const INJECTED_DIH_DEG: f64 = 0.1;
 /// Diagnostic gate on the macro normals and the frame they span, in degrees.
 pub const INJECTED_FRAME_DEG: f64 = 0.1;
-/// D §10.2, native column: the curve's length, `count × median nearest-neighbour spacing`.
+/// D §10.2, native column: the curve's length, the sum of the nearest-neighbour distances.
 pub const NATIVE_CURVE_LENGTH: f64 = 0.10;
-/// The same allowance on the sampling density alone, reported beside the length.
-pub const NATIVE_SPACING: f64 = 0.10;
 /// D §10.2, native column: the 99th percentile of the symmetric point-to-set distance, in `t`.
 pub const NATIVE_P99_T: f64 = 0.5;
 /// D §10.2, native column: the two-sample KS statistic of the dihedral distributions.
@@ -181,16 +190,13 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
                     continue;
                 }
                 let points = ours.points_f64();
-                let (mine, yours) = (median_spacing(&points), median_spacing(&theirs.p));
-                #[allow(clippy::cast_precision_loss, reason = "point counts are far below 2^53")]
                 report.push(Check::relative(
                     name,
                     "curve length",
-                    ours.len() as f64 * mine,
-                    theirs.len() as f64 * yours,
+                    curve_length(&points),
+                    curve_length(&theirs.p),
                     NATIVE_CURVE_LENGTH,
                 ));
-                report.push(Check::relative(name, "spacing", mine, yours, NATIVE_SPACING));
                 report.push(distance_check(
                     name,
                     "p99 distance",
@@ -341,19 +347,19 @@ fn percentile99(a: &[[f64; 3]], b: &[[f64; 3]]) -> f64 {
     worst
 }
 
-/// The median distance from a breakline point to its nearest *other* breakline point — the
-/// sampling density of the curve, whose product with the point count is the curve's length.
+/// The length of the curve a breakline point set traces: the sum over the points of the distance
+/// to the nearest *other* point of the set.
 ///
-/// The median is R §0's: linear interpolation at `q = 0.5`, which for an even count is the mean of
-/// the two middle values, so the number is the one `numpy.median` would print. Zero for fewer than
-/// two points.
+/// Equivalently `count × mean nearest-neighbour spacing`. On a chain of points along a curve every
+/// term is one of the two gaps at that point, so the sum is the curve's length up to a factor that
+/// is the same on both sides — which is all a ratio needs. Zero for fewer than two points.
 ///
 /// The search is a radius query that doubles until it finds a neighbour, starting from the
 /// bounding-box diagonal over the point count — a breakline is a curve, so that seed is within a
 /// small factor of the answer and the first query almost always succeeds. A point that finds
 /// nothing before the radius passes the diagonal falls back to a scan, so an isolated point costs
 /// `O(n)` rather than an infinite loop.
-fn median_spacing(points: &[[f64; 3]]) -> f64 {
+fn curve_length(points: &[[f64; 3]]) -> f64 {
     if points.len() < 2 {
         return 0.0;
     }
@@ -369,7 +375,7 @@ fn median_spacing(points: &[[f64; 3]]) -> f64 {
     let diagonal = norm([hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]]);
     #[allow(clippy::cast_precision_loss, reason = "point counts are far below 2^53")]
     let seed = (diagonal / points.len() as f64).max(f64::MIN_POSITIVE);
-    let mut spacing: Vec<f64> = points
+    let spacing: Vec<f64> = points
         .iter()
         .enumerate()
         .map(|(i, p)| {
@@ -394,8 +400,17 @@ fn median_spacing(points: &[[f64; 3]]) -> f64 {
                 .fold(f64::INFINITY, f64::min)
         })
         .collect();
-    spacing.sort_by(f64::total_cmp);
-    percentile(&spacing, 0.5)
+    pairwise_sum(&spacing)
+}
+
+/// numpy's pairwise summation, so a sum of many thousands of terms is the reference's own.
+fn pairwise_sum(x: &[f64]) -> f64 {
+    const BLOCK: usize = 128;
+    if x.len() <= BLOCK {
+        return x.iter().sum();
+    }
+    let half = (x.len() / 2) & !7;
+    pairwise_sum(&x[..half]) + pairwise_sum(&x[half..])
 }
 
 /// The Euclidean distance between two points.
@@ -528,45 +543,45 @@ mod tests {
         let c = Collection::open(FixtureDir::new(slab_dump()), Some(&slab_input())).unwrap();
         let r = run(&c, Mode::Native).unwrap();
         assert_eq!(r.status(), "PASS", "{:?}", r.failures().map(Check::line).collect::<Vec<_>>());
-        assert_eq!(r.checks.len(), 8, "curve length, spacing, p99 distance and KS, two fragments");
-        // The row that replaced `count` (B2 §4.2): it is the product of the two it is made of, and
-        // it is what the ±10 % is spent on.
-        for name in ["curve length", "spacing"] {
-            let checks: Vec<&Check> = r.checks.iter().filter(|c| c.quantity == name).collect();
-            assert_eq!(checks.len(), 2, "{name}");
-            for check in checks {
-                assert!(check.measured > 0.0, "{}", check.line());
-                assert!((check.tolerance - super::NATIVE_CURVE_LENGTH).abs() < 1e-12);
-            }
+        assert_eq!(r.checks.len(), 6, "curve length, p99 distance and KS, two fragments");
+        // The row that replaced `count` (B2 §4.2), and the only place the ±10 % is spent.
+        let lengths: Vec<&Check> =
+            r.checks.iter().filter(|c| c.quantity == "curve length").collect();
+        assert_eq!(lengths.len(), 2);
+        for check in lengths {
+            assert!(check.measured > 0.0, "{}", check.line());
+            assert!((check.tolerance - super::NATIVE_CURVE_LENGTH).abs() < 1e-12);
         }
     }
 
-    /// `median_spacing` is the density half of the curve-length row, so its definition is a
-    /// result: the median distance to the *nearest other* point, R §0's median.
+    /// `curve_length` is the sum of the nearest-neighbour distances, which is what makes it a
+    /// length rather than a summary: it adds up along the curve.
     #[test]
-    fn the_spacing_is_the_median_nearest_neighbour_distance() {
-        // Five points on a line at unit spacing: every nearest neighbour is 1 away.
+    fn the_curve_length_is_the_sum_of_the_nearest_neighbour_distances() {
+        // Five points on a line at unit spacing: every nearest neighbour is 1 away, sum 5.
         let line: Vec<[f64; 3]> = (0..5).map(|i| [f64::from(i), 0.0, 0.0]).collect();
-        assert!((super::median_spacing(&line) - 1.0).abs() < 1e-12);
+        assert!((super::curve_length(&line) - 5.0).abs() < 1e-12);
 
-        // Four points whose nearest-neighbour distances are 1, 1, 2, 2: the median is 1.5, the
-        // mean of the two middle values, which is numpy's median for an even count.
+        // Gaps 1, 2, 2: nearest-neighbour distances 1, 1, 2, 2, sum 6. The *median* of those is
+        // 1.5 and `4 × 1.5 = 6` agrees here only because the set is small; on a real breakline the
+        // two differ by up to 11 % (see the module documentation).
         let uneven = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [3.0, 0.0, 0.0], [5.0, 0.0, 0.0]];
-        assert!(
-            (super::median_spacing(&uneven) - 1.5).abs() < 1e-12,
-            "{}",
-            super::median_spacing(&uneven)
-        );
+        assert!((super::curve_length(&uneven) - 6.0).abs() < 1e-12);
+
+        // Scaling the point set scales the length.
+        let scaled: Vec<[f64; 3]> = line.iter().map(|p| [p[0] * 3.0, 0.0, 0.0]).collect();
+        assert!((super::curve_length(&scaled) - 15.0).abs() < 1e-12);
 
         // Degenerate sets answer rather than loop: nothing to be near.
-        assert!((super::median_spacing(&[]) - 0.0).abs() < 1e-12);
-        assert!((super::median_spacing(&[[0.0; 3]]) - 0.0).abs() < 1e-12);
+        assert!((super::curve_length(&[]) - 0.0).abs() < 1e-12);
+        assert!((super::curve_length(&[[0.0; 3]]) - 0.0).abs() < 1e-12);
         // Coincident points are zero apart, and that is the honest answer.
-        assert!((super::median_spacing(&[[0.0; 3], [0.0; 3]]) - 0.0).abs() < 1e-12);
-        // A far outlier still finds its neighbour once the radius has grown past the diagonal.
+        assert!((super::curve_length(&[[0.0; 3], [0.0; 3]]) - 0.0).abs() < 1e-12);
+        // A far outlier still finds its neighbour once the radius has grown past the diagonal:
+        // the five points of `line` are 1 from a neighbour each, and the outlier is 999 996 away.
         let mut sparse = line.clone();
         sparse.push([1e6, 0.0, 0.0]);
-        assert!((super::median_spacing(&sparse) - 1.0).abs() < 1e-12);
+        assert!((super::curve_length(&sparse) - (5.0 + 999_996.0)).abs() < 1e-6);
     }
 
     #[test]

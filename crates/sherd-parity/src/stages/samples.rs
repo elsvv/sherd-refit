@@ -204,15 +204,23 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
                         continue;
                     }
                     let cdf = samples::cumulative_weights(&geom.areas, &all);
-                    let mut wrong = 0;
+                    let (mut wrong, mut probed) = (0, 0);
                     let mut lo = 0.0;
                     for (k, &hi) in cdf.iter().enumerate() {
-                        if hi > lo && samples::pick_face(&cdf, 0.5 * (lo + hi)) != k {
-                            wrong += 1;
+                        // A face whose interval is narrower than an ulp of the cdf has no
+                        // interior point to probe with, and no uniform can land in it either:
+                        // `frag_008` has one such sliver in 126 236 faces. Probing it would test
+                        // the arithmetic of the midpoint rather than the search.
+                        let mid = 0.5 * (lo + hi);
+                        if mid > lo && mid < hi {
+                            probed += 1;
+                            if samples::pick_face(&cdf, mid) != k {
+                                wrong += 1;
+                            }
                         }
                         lo = hi;
                     }
-                    report.push(Check::entries(name, quantity, wrong, cdf.len()));
+                    report.push(Check::entries(name, quantity, wrong, probed));
                 }
 
                 // --- R §3.5.6: the band, recomputed from the reference's own arrays -----------

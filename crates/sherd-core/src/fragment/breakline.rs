@@ -33,6 +33,11 @@
 //!
 //! # What this port does differently
 //!
+//! * **One validity mask.** R §3.5.4's `valid` is computed once in `f64`, filters
+//!   [`Breaklines::sub`], and is then *stored* ([`Breaklines::valid`]) rather than recomputed from
+//!   the narrowed frames. Recomputing it was defect D3 of the phase-1b verification: the `f64` and
+//!   the `f32` predicate disagree for a point whose `|ns|`, `|nf|` or `|ns × f|` sits within an
+//!   ulp of `0.5`, and a point that `sub` contains must never be one an accessor calls invalid.
 //! * **PMC-4.** [`Breaklines::sub`] is the reference's `brk_sub`, and the reference reads it out of
 //!   an Open3D hash map, so its *order* is unspecified; this port sorts it ascending. The set is
 //!   the same one either way (see [`voxel_representatives`]), but the order fixes the tie-breaking
@@ -130,6 +135,15 @@ pub struct Breaklines {
     /// `brk_sub`: the points of the `0.5 t` voxel subsample whose frame is valid (R §3.5.5),
     /// ascending (PMC-4).
     pub sub: Vec<u32>,
+    /// R §3.5.4's frame-validity mask, one entry per point — **the** mask, not a second opinion.
+    ///
+    /// It is computed once, in `f64`, before the frames are narrowed to `f32`, and it is the mask
+    /// [`sub`](Breaklines::sub) was filtered with. It is stored rather than recomputed because the
+    /// two are not the same function: `|ns|`, `|nf|` and `|ns × f|` sitting within an `f32` ulp of
+    /// `0.5` decide differently in the two precisions, and a point that `sub` contains must never
+    /// be one an accessor calls invalid (defect D3 of the phase-1b verification). R §5.1's
+    /// hypotheses read `sub`; anything else that wants the predicate reads this.
+    pub valid: Vec<bool>,
 }
 
 impl Breaklines {
@@ -175,16 +189,9 @@ impl Breaklines {
             .collect()
     }
 
-    /// R §3.5.4's frame-validity mask: both macro normals are directions, and so is `ns × f`.
-    pub fn valid(&self) -> Vec<bool> {
-        (0..self.len())
-            .map(|i| {
-                let (ns, f) = (self.ns[i].to_f64(), self.f[i].to_f64());
-                norm(ns) > VALID_MIN
-                    && norm(self.nf[i].to_f64()) > VALID_MIN
-                    && norm(cross(ns, f)) > VALID_MIN
-            })
-            .collect()
+    /// How many points carry a valid frame (R §3.5.4) — a count over [`valid`](Breaklines::valid).
+    pub fn n_valid(&self) -> usize {
+        self.valid.iter().filter(|&&v| v).count()
     }
 }
 
@@ -266,6 +273,7 @@ pub fn build_with(
         nf: nf.iter().map(|&n| Vec3f::from_f64(n)).collect(),
         f: f.iter().map(|&n| Vec3f::from_f64(n)).collect(),
         sub,
+        valid,
     }
 }
 
@@ -467,7 +475,7 @@ mod tests {
     #[test]
     fn the_frames_are_right_angled_and_the_tangent_runs_along_the_rim() {
         let brk = slab_breaklines(BrkParams::at(T));
-        let valid = brk.valid();
+        let valid = &brk.valid;
         let dih = brk.dihedrals();
         let tangent = brk.tangents();
         assert!(valid.iter().all(|&v| v), "every frame of a clean slab is valid");
@@ -512,7 +520,7 @@ mod tests {
             assert!(brk.is_empty(), "{label:?}");
             assert_eq!(brk.len(), 0);
             assert!(brk.sub.is_empty());
-            assert!(brk.valid().is_empty());
+            assert!(brk.valid.is_empty());
             assert!(brk.dihedrals().is_empty());
             assert!(brk.tangents().is_empty());
             assert_eq!(brk.params, BrkParams::at(4.0));
@@ -529,7 +537,7 @@ mod tests {
     fn an_empty_annulus_falls_back_to_the_whole_neighbourhood() {
         let brk = slab_breaklines(BrkParams { macro_inner: 10.0, ..BrkParams::at(T) });
         assert_eq!(brk.len(), 576);
-        assert!(brk.valid().iter().all(|&v| v), "the fallback keeps every frame");
+        assert!(brk.valid.iter().all(|&v| v), "the fallback keeps every frame");
         assert!(brk.dihedrals().iter().all(|&d| (d - 90.0).abs() < 1e-3));
         assert_eq!(brk.sub.len(), slab_breaklines(BrkParams::at(T)).sub.len());
     }
@@ -540,7 +548,7 @@ mod tests {
     fn a_point_with_no_neighbourhood_loses_its_frame_and_its_vote() {
         let brk = slab_breaklines(BrkParams { macro_outer: 1e-6, ..BrkParams::at(T) });
         assert_eq!(brk.len(), 576);
-        assert!(brk.valid().iter().all(|&v| !v), "no ball, no frame");
+        assert!(brk.valid.iter().all(|&v| !v), "no ball, no frame");
         assert!(brk.ns.iter().all(|n| n.norm() == 0.0));
         assert!(brk.nf.iter().all(|n| n.norm() == 0.0));
         assert!(brk.sub.is_empty(), "an invalid frame is not a hypothesis");

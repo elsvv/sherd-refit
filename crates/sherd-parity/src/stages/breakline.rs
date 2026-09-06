@@ -28,11 +28,22 @@
 //!
 //! # Native
 //!
-//! The port's working mesh is its own — a different decimation and a different `t` — so the two
-//! breaklines are two different point sets on nearly the same curve, and D §10.2 gates them
-//! loosely: the count within 10 %, the 99th percentile of the symmetric point-to-set distance
-//! within `0.5 t`, and the two dihedral distributions within a KS statistic of 0.05. The `t` the
-//! first two are measured in is the *reference's*, which is the fixture's own unit.
+//! The port's working mesh is its own — a different decimation — so the two breaklines are two
+//! different point sets on nearly the same curve, and D §10.2 gates them loosely: the curve's
+//! length within 10 %, the 99th percentile of the symmetric point-to-set distance within `0.5 t`,
+//! and the two dihedral distributions within a KS statistic of 0.05. The `t` the middle one is
+//! measured in is the *reference's*, which is the fixture's own unit.
+//!
+//! **The length, not the count.** The row used to gate the number of points at ±10 %, and step B2
+//! measured that gate contradicting the one above it: `res` is allowed ±10 % natively, a breakline
+//! crossing a mesh with 15 % longer edges has proportionally fewer edges to cross, and on
+//! synthetic_20 the port came out 10 % short in the count while its `count × median
+//! nearest-neighbour spacing` — the length of the same curve — agreed to 2.9 % on average
+//! (`notes/2026-09-06-b2-breaklines.md` §4.2). A count gate under a `res` gate has no headroom by
+//! construction; the length is what "the same breakline" means when neither mesh is the other's,
+//! and it is what this row measures. The density is still visible: `spacing` is reported beside it
+//! against the same ±10 %, so a port that halved its point count *and* doubled its spacing would
+//! pass the length and fail the spacing.
 
 use sherd_core::error::Result;
 use sherd_core::fragment::Fragment;
@@ -51,8 +62,10 @@ pub const INJECTED_HAUSDORFF_T: f64 = 1e-4;
 pub const INJECTED_DIH_DEG: f64 = 0.1;
 /// Diagnostic gate on the macro normals and the frame they span, in degrees.
 pub const INJECTED_FRAME_DEG: f64 = 0.1;
-/// D §10.2, native column: the number of breakline points.
-pub const NATIVE_COUNT: f64 = 0.10;
+/// D §10.2, native column: the curve's length, `count × median nearest-neighbour spacing`.
+pub const NATIVE_CURVE_LENGTH: f64 = 0.10;
+/// The same allowance on the sampling density alone, reported beside the length.
+pub const NATIVE_SPACING: f64 = 0.10;
 /// D §10.2, native column: the 99th percentile of the symmetric point-to-set distance, in `t`.
 pub const NATIVE_P99_T: f64 = 0.5;
 /// D §10.2, native column: the two-sample KS statistic of the dihedral distributions.
@@ -121,7 +134,7 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
                     ));
 
                     // --- the diagnosis: which half of the frame moved -------------------------
-                    let valid = ours.valid();
+                    let valid = &ours.valid;
                     let both: Vec<usize> =
                         (0..ours.len()).filter(|&i| valid[i] && theirs.valid[i]).collect();
                     let differing =
@@ -163,22 +176,25 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
                 let (fr, _) = Fragment::load_or_build(source, collection.target_faces, name, None)?;
                 let ours = &fr.brk;
 
-                #[allow(clippy::cast_precision_loss, reason = "point counts are far below 2^53")]
-                report.push(Check::relative(
-                    name,
-                    "count",
-                    ours.len() as f64,
-                    theirs.len() as f64,
-                    NATIVE_COUNT,
-                ));
                 if ours.is_empty() || theirs.p.is_empty() {
                     report.push(Check::flag(name, "has breakline", !ours.is_empty(), false));
                     continue;
                 }
+                let points = ours.points_f64();
+                let (mine, yours) = (median_spacing(&points), median_spacing(&theirs.p));
+                #[allow(clippy::cast_precision_loss, reason = "point counts are far below 2^53")]
+                report.push(Check::relative(
+                    name,
+                    "curve length",
+                    ours.len() as f64 * mine,
+                    theirs.len() as f64 * yours,
+                    NATIVE_CURVE_LENGTH,
+                ));
+                report.push(Check::relative(name, "spacing", mine, yours, NATIVE_SPACING));
                 report.push(distance_check(
                     name,
                     "p99 distance",
-                    percentile99(&ours.points_f64(), &theirs.p),
+                    percentile99(&points, &theirs.p),
                     NATIVE_P99_T * params.t,
                 ));
                 report.push(worst_check(
@@ -325,6 +341,68 @@ fn percentile99(a: &[[f64; 3]], b: &[[f64; 3]]) -> f64 {
     worst
 }
 
+/// The median distance from a breakline point to its nearest *other* breakline point — the
+/// sampling density of the curve, whose product with the point count is the curve's length.
+///
+/// The median is R §0's: linear interpolation at `q = 0.5`, which for an even count is the mean of
+/// the two middle values, so the number is the one `numpy.median` would print. Zero for fewer than
+/// two points.
+///
+/// The search is a radius query that doubles until it finds a neighbour, starting from the
+/// bounding-box diagonal over the point count — a breakline is a curve, so that seed is within a
+/// small factor of the answer and the first query almost always succeeds. A point that finds
+/// nothing before the radius passes the diagonal falls back to a scan, so an isolated point costs
+/// `O(n)` rather than an infinite loop.
+fn median_spacing(points: &[[f64; 3]]) -> f64 {
+    if points.len() < 2 {
+        return 0.0;
+    }
+    let Some(tree) = PointTree::build(points) else { return 0.0 };
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for p in points {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let diagonal = norm([hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]]);
+    #[allow(clippy::cast_precision_loss, reason = "point counts are far below 2^53")]
+    let seed = (diagonal / points.len() as f64).max(f64::MIN_POSITIVE);
+    let mut spacing: Vec<f64> = points
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let mut radius = seed;
+            while radius <= diagonal {
+                let best = tree
+                    .within(p, radius)
+                    .into_iter()
+                    .filter(|&j| j as usize != i)
+                    .map(|j| distance(p, &points[j as usize]))
+                    .fold(f64::INFINITY, f64::min);
+                if best.is_finite() {
+                    return best;
+                }
+                radius *= 2.0;
+            }
+            points
+                .iter()
+                .enumerate()
+                .filter(|&(j, _)| j != i)
+                .map(|(_, q)| distance(p, q))
+                .fold(f64::INFINITY, f64::min)
+        })
+        .collect();
+    spacing.sort_by(f64::total_cmp);
+    percentile(&spacing, 0.5)
+}
+
+/// The Euclidean distance between two points.
+fn distance(a: &[f64; 3], b: &[f64; 3]) -> f64 {
+    norm([a[0] - b[0], a[1] - b[1], a[2] - b[2]])
+}
+
 /// numpy's `percentile(x, 100·q)` on an already sorted array: linear interpolation.
 pub(crate) fn percentile(sorted: &[f64], q: f64) -> f64 {
     if sorted.is_empty() {
@@ -450,7 +528,45 @@ mod tests {
         let c = Collection::open(FixtureDir::new(slab_dump()), Some(&slab_input())).unwrap();
         let r = run(&c, Mode::Native).unwrap();
         assert_eq!(r.status(), "PASS", "{:?}", r.failures().map(Check::line).collect::<Vec<_>>());
-        assert_eq!(r.checks.len(), 6, "count, p99 distance and KS for two fragments");
+        assert_eq!(r.checks.len(), 8, "curve length, spacing, p99 distance and KS, two fragments");
+        // The row that replaced `count` (B2 §4.2): it is the product of the two it is made of, and
+        // it is what the ±10 % is spent on.
+        for name in ["curve length", "spacing"] {
+            let checks: Vec<&Check> = r.checks.iter().filter(|c| c.quantity == name).collect();
+            assert_eq!(checks.len(), 2, "{name}");
+            for check in checks {
+                assert!(check.measured > 0.0, "{}", check.line());
+                assert!((check.tolerance - super::NATIVE_CURVE_LENGTH).abs() < 1e-12);
+            }
+        }
+    }
+
+    /// `median_spacing` is the density half of the curve-length row, so its definition is a
+    /// result: the median distance to the *nearest other* point, R §0's median.
+    #[test]
+    fn the_spacing_is_the_median_nearest_neighbour_distance() {
+        // Five points on a line at unit spacing: every nearest neighbour is 1 away.
+        let line: Vec<[f64; 3]> = (0..5).map(|i| [f64::from(i), 0.0, 0.0]).collect();
+        assert!((super::median_spacing(&line) - 1.0).abs() < 1e-12);
+
+        // Four points whose nearest-neighbour distances are 1, 1, 2, 2: the median is 1.5, the
+        // mean of the two middle values, which is numpy's median for an even count.
+        let uneven = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [3.0, 0.0, 0.0], [5.0, 0.0, 0.0]];
+        assert!(
+            (super::median_spacing(&uneven) - 1.5).abs() < 1e-12,
+            "{}",
+            super::median_spacing(&uneven)
+        );
+
+        // Degenerate sets answer rather than loop: nothing to be near.
+        assert!((super::median_spacing(&[]) - 0.0).abs() < 1e-12);
+        assert!((super::median_spacing(&[[0.0; 3]]) - 0.0).abs() < 1e-12);
+        // Coincident points are zero apart, and that is the honest answer.
+        assert!((super::median_spacing(&[[0.0; 3], [0.0; 3]]) - 0.0).abs() < 1e-12);
+        // A far outlier still finds its neighbour once the radius has grown past the diagonal.
+        let mut sparse = line.clone();
+        sparse.push([1e6, 0.0, 0.0]);
+        assert!((super::median_spacing(&sparse) - 1.0).abs() < 1e-12);
     }
 
     #[test]

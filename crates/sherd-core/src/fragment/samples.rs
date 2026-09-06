@@ -284,18 +284,45 @@ pub fn sample_on_faces(
 
     // Draw first, map afterwards: the stream is consumed in one sequential pass whatever the
     // thread count, and the mapping is pure (D §7).
-    let picks: Vec<u32> = (0..n)
-        .map(|_| {
-            let u = rng::unit_f64(rng);
-            faces[cdf.partition_point(|&c| c <= u).min(faces.len() - 1)]
-        })
-        .collect();
+    let picks: Vec<u32> = (0..n).map(|_| faces[pick_face(&cdf, rng::unit_f64(rng))]).collect();
     let first: Vec<f64> = (0..n).map(|_| rng::unit_f64(rng)).collect();
     let second: Vec<f64> = (0..n).map(|_| rng::unit_f64(rng)).collect();
+    let points = points_from_uniforms(v, f, &picks, &first, &second);
+    (points, picks)
+}
 
-    let points = picks
+/// `searchsorted(cdf, u, 'right')`, clamped to the last face — the face a uniform picks.
+///
+/// `partition_point` counts the entries `≤ u`, which is `side='right'` exactly; `side='left'`
+/// would count the entries `< u` and differ only for a `u` that lands on a `cdf` entry to the last
+/// bit. The clamp is numpy's own: `searchsorted` can return `len(cdf)` for a `u` above the last
+/// entry, which rounding can produce even though the last entry is 1 by construction.
+///
+/// Exposed because the parity harness checks it against the reference's own `cdf` (defect D6 of
+/// the phase-1b verification): the port's face pick was reachable from no fixture before.
+#[inline]
+pub fn pick_face(cdf: &[f64], u: f64) -> usize {
+    cdf.partition_point(|&c| c <= u).min(cdf.len().saturating_sub(1))
+}
+
+/// The barycentric half of [`sample_on_faces`]: the fold and the point, from uniforms already
+/// drawn.
+///
+/// `picks[k]` is the face sample `k` landed on and `first[k]`, `second[k]` are the two uniforms
+/// **before** the fold, exactly as `rng.random(n)` produced them. Split out of the sampler so that
+/// the parity harness can run it on the reference's own `md.sp` and the `md.*_u` / `md.*_v` the
+/// dump carries, and compare the result with the reference's own points (defect D6): a port that
+/// folded the wrong way, or wrote `V1 + u(V0 − V1) + …`, passes every other injected check.
+pub fn points_from_uniforms(
+    v: &[[f64; 3]],
+    f: &[[u32; 3]],
+    picks: &[u32],
+    first: &[f64],
+    second: &[f64],
+) -> Vec<[f64; 3]> {
+    picks
         .iter()
-        .zip(first.iter().zip(&second))
+        .zip(first.iter().zip(second))
         .map(|(&face, (&bary_u, &bary_v))| {
             // The fold: a draw outside the triangle is reflected into it, which keeps the
             // distribution uniform over the triangle rather than over the parallelogram.
@@ -310,13 +337,15 @@ pub fn sample_on_faces(
                 origin[2] + alpha * (along_u[2] - origin[2]) + beta * (along_v[2] - origin[2]),
             ]
         })
-        .collect();
-    (points, picks)
+        .collect()
 }
 
 /// The normalised cumulative area of a face selection, as numpy's `choice` builds it: `p = A/ΣA`
 /// with `ΣA` numpy's pairwise sum, then a sequential `cumsum`, then a division by its last entry.
-fn cumulative_weights(areas: &[f64], faces: &[u32]) -> Vec<f64> {
+///
+/// Public because the parity harness rebuilds it from the dump's own mesh to check the face pick
+/// (defect D6).
+pub fn cumulative_weights(areas: &[f64], faces: &[u32]) -> Vec<f64> {
     let total = masked_area(areas, faces);
     #[allow(clippy::cast_precision_loss, reason = "a face count, far below 2^53")]
     let weight = |i: u32| {

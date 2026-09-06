@@ -18,6 +18,7 @@
 //! | `brk_P` | f32 | `[k, 3]` | §3.5.3 breakline points |
 //! | `brk_ns`, `brk_nf`, `brk_f` | f32 | `[k, 3]` | §3.5.4 macro normals and the in-plane axis |
 //! | `brk_sub` | u32 | `[j]` | §3.5.5 hypothesis subset |
+//! | `brk_valid` | bool | `[k]` | §3.5.4 frame-validity mask (the one `brk_sub` was filtered with) |
 //! | `S` | f32 | `[n_s, 3]` | §3.5.1 whole-surface samples |
 //! | `sp` | u32 | `[n_s]` | the face each surface sample came from |
 //! | `Pf` | f32 | `[n_f, 3]` | §3.5.2 fracture samples |
@@ -28,9 +29,9 @@
 //! treats an unknown tensor as data it does not need yet and the writer adds them when they exist,
 //! so a newer cache does not confuse this build. A tensor the port *needs* is a different matter,
 //! and moving [`crate::CACHE_VERSION`] is how it is announced: `labels` took it from 1 to 2 in
-//! step B1, the five `brk_*` tensors from 2 to 3 in step B2 and the five sampled arrays from 3 to
-//! 4 in step B3, so a cache written before any of them existed is refused by its version rather
-//! than read back half empty.
+//! step B1, the five `brk_*` tensors from 2 to 3 in step B2, the five sampled arrays from 3 to
+//! 4 in step B3 and `brk_valid` from 4 to 5 in task T1, so a cache written before any of them
+//! existed is refused by its version rather than read back half empty.
 //!
 //! The `brk_*` tensors are `f32` because [`Breaklines`](crate::fragment::breakline::Breaklines)
 //! is (D §4.1), so the arrays a warm run reads back are the arrays a cold run computed, bit for
@@ -245,6 +246,7 @@ pub fn to_bytes(fragment: &Fragment) -> Result<Vec<u8>> {
     let nf = points_bytes(&brk.nf);
     let axis = points_bytes(&brk.f);
     let sub: Vec<u8> = brk.sub.iter().copied().flat_map(u32::to_le_bytes).collect();
+    let brk_valid: Vec<u8> = brk.valid.iter().map(|&v| u8::from(v)).collect();
     let md = &fragment.samples;
     let surface = points_bytes(&md.s);
     let surface_faces: Vec<u8> = md.sp.iter().copied().flat_map(u32::to_le_bytes).collect();
@@ -264,6 +266,7 @@ pub fn to_bytes(fragment: &Fragment) -> Result<Vec<u8>> {
         ("brk_nf", TensorView::new(Dtype::F32, vec![brk.nf.len(), 3], &nf)),
         ("brk_ns", TensorView::new(Dtype::F32, vec![brk.ns.len(), 3], &ns)),
         ("brk_sub", TensorView::new(Dtype::U32, vec![brk.sub.len()], &sub)),
+        ("brk_valid", TensorView::new(Dtype::BOOL, vec![brk.valid.len()], &brk_valid)),
         ("fp", TensorView::new(Dtype::U32, vec![md.fp.len()], &fracture_faces)),
         ("labels", TensorView::new(Dtype::U8, vec![fragment.labels.len()], &labels)),
         ("margin_idx", TensorView::new(Dtype::U32, vec![md.margin_idx.len()], &margin)),
@@ -339,9 +342,13 @@ pub fn from_bytes(bytes: &[u8], path: impl AsRef<Path>) -> Result<Fragment> {
         nf: read_points(&file, "brk_nf", path)?,
         f: read_points(&file, "brk_f", path)?,
         sub: read_u32(&file, "brk_sub", path)?,
+        valid: read_bool(&file, "brk_valid", path)?,
     };
     if brk.ns.len() != brk.len() || brk.nf.len() != brk.len() || brk.f.len() != brk.len() {
         return Err(Error::cache(path, "the brk_* frames do not describe brk_P"));
+    }
+    if brk.valid.len() != brk.len() {
+        return Err(Error::cache(path, "brk_valid does not describe brk_P"));
     }
     let k = u32::try_from(brk.len()).unwrap_or(u32::MAX);
     if let Some(bad) = brk.sub.iter().find(|&&i| i >= k) {
@@ -549,6 +556,21 @@ fn read_u32(file: &safetensors::SafeTensors<'_>, name: &str, path: &Path) -> Res
     Ok(view.data().chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
 }
 
+/// One `bool[n]` tensor as a mask, checking its dtype and shape.
+///
+/// safetensors writes a `BOOL` as one byte per entry; anything but 0 reads as true, which is what
+/// numpy's `bool_` does with the same buffer.
+fn read_bool(file: &safetensors::SafeTensors<'_>, name: &str, path: &Path) -> Result<Vec<bool>> {
+    let view = file.tensor(name).map_err(|e| Error::cache(path, format!("tensor {name}: {e}")))?;
+    if view.dtype() != Dtype::BOOL || view.shape().len() != 1 {
+        return Err(Error::cache(
+            path,
+            format!("tensor {name} is {:?} {:?}, expected BOOL [n]", view.dtype(), view.shape()),
+        ));
+    }
+    Ok(view.data().iter().map(|&b| b != 0).collect())
+}
+
 /// `os.path.abspath`'s Rust equivalent: the path against the working directory, unresolved.
 ///
 /// Symbolic links are deliberately left alone — R §3.7 compares what the caller passed, not where
@@ -629,6 +651,7 @@ mod tests {
                 nf: vec![vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0)],
                 f: vec![vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0)],
                 sub: vec![1],
+                valid: vec![true, true],
             },
             samples: Samples {
                 params: SampleParams::at(3.531_017_303_466_797),

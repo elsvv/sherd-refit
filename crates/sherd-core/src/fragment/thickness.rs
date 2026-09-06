@@ -1,11 +1,12 @@
 //! Wall thickness `t` (R §3.2): the histogram mode of inward ray hits.
 //!
-//! Rays are cast inwards from the centroids of 20 000 randomly chosen faces of the *original*
-//! largest component — before decimation, because `t` is what sets the face budget. The hit
-//! distances are histogrammed and the mode of the histogram is the wall thickness:
+//! Rays are cast inwards from the centroids of the faces of the *original* largest component —
+//! before decimation, because `t` is what sets the face budget. The hit distances are
+//! histogrammed and the mode of the histogram is the wall thickness:
 //!
 //! ```text
-//! idx    = rng_pre.choice(len(C0), min(20000, len(C0)), replace=False)
+//! stride = ceil(n_faces / 300000)                      # 1 when they all fit
+//! idx    = arange(0, n_faces, stride)
 //! dvec   = −FN0[idx]
 //! origin = C0[idx] + dvec · 1e-3                       # PMC-1: step off the surface
 //! (d, prim) = first hit along (origin, dvec)
@@ -14,6 +15,17 @@
 //! far    = d[ok][ FN0[prim[ok]] · dvec[ok] > 0.7 ]     # the hit face looks back along the ray
 //! t      = hist_mode(far) if len(far) ≥ 100 else raw
 //! ```
+//!
+//! **The face set is deterministic and the estimator draws nothing.** It used to be
+//! `rng_pre.choice(n_faces, 20000, replace=False)`, and that sample was the estimate's largest
+//! error term: re-running the reference with nothing but the seed changed moved `t` by up to 6.8 %
+//! on `Pot_A_Piece_04_Mesh` and 5.8 % on `frag_019`, because a fragment whose filtered distances
+//! form a plateau rather than a peak puts several near-equal bins in contention. Since `t` is the
+//! unit of every threshold of R §1.2, that spread moved nine thresholds for every pair the
+//! fragment took part in, and it was what made the port's native `t` incomparable with the
+//! reference's. Task T1 removed the randomness from the *algorithm* on both sides rather than
+//! replicating numpy's PCG64: the stride rule above is now what R §3.2 says, and the two
+//! implementations evaluate the same estimator on the *same* faces.
 //!
 //! The `> 0.7` filter is the whole trick: a ray that leaves the outer shell and lands on the
 //! *inner* surface of the same wall hits a face whose normal points the way the ray travels, so
@@ -33,16 +45,13 @@
 
 use nalgebra::Matrix3;
 use parry3d::math::Vector;
-use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 
 use crate::mesh::geometry::FaceGeometry;
 pub use crate::spatial::bvh::RayScene;
 
-/// The reference hard-codes this seed for the thickness rays (R §3, `rng_pre = rng(0)`).
-pub const SEED: u64 = 0;
-/// Rays cast, or all faces when the mesh has fewer.
-pub const RAYS: usize = 20_000;
+/// Faces that cast a ray, at most: above this a fixed stride picks them (R §3.2, `THICK_FACES`).
+pub const RAYS: usize = 300_000;
 /// How far along the ray the origin is pushed off the surface (PMC-1).
 pub const RAY_OFFSET: f64 = 1e-3;
 /// A hit face "looks back along the ray" when its normal agrees with the ray direction this well.
@@ -91,10 +100,9 @@ pub fn estimate_thickness(
     v: &[[f64; 3]],
     f: &[[u32; 3]],
     geom: &FaceGeometry,
-    rng: &mut ChaCha8Rng,
 ) -> Option<(f32, f32)> {
     let scene = RayScene::new(v, f)?;
-    let idx = sample_face_indices(f.len(), RAYS, rng);
+    let idx = face_indices(f.len(), RAYS);
     let hits = cast_inward_rays(&scene, geom, &idx);
     thickness_from_hits(&geom.normals, &idx, &hits)
 }
@@ -367,12 +375,18 @@ fn principal_axes(p: &[[f64; 3]]) -> Matrix3<f64> {
     cov.symmetric_eigen().eigenvectors
 }
 
-/// `rng.choice(n_faces, min(n, n_faces), replace=False)`: distinct face indices, uniformly.
+/// `arange(0, n_faces, ceil(n_faces / n))`: every face when there are at most `n` of them, and a
+/// fixed stride over them otherwise (R §3.2).
 ///
-/// [`crate::rng::without_replacement`] does the drawing; this is the name R §3.2 gives it and the
-/// place its caller looks for it.
-pub fn sample_face_indices(n_faces: usize, n: usize, rng: &mut ChaCha8Rng) -> Vec<u32> {
-    crate::rng::without_replacement(n_faces, n, rng)
+/// The stride is `ceil(n_faces / n)`, so the count is `ceil(n_faces / stride)` and never exceeds
+/// `n`; at `n_faces ≤ n` the stride is 1 and the subset is the whole mesh, which is the same
+/// expression rather than a second branch. The reference spells it
+/// `np.arange(0, n_faces, max(1, -(-n_faces // n)))`, and the two must agree index for index,
+/// because the injected parity mode feeds this port the reference's own `thick.idx`.
+#[allow(clippy::cast_possible_truncation, reason = "face indices are u32 throughout the port")]
+pub fn face_indices(n_faces: usize, n: usize) -> Vec<u32> {
+    let stride = n_faces.div_ceil(n.max(1)).max(1);
+    (0..n_faces).step_by(stride).map(|i| i as u32).collect()
 }
 
 #[cfg(test)]
@@ -380,13 +394,11 @@ mod tests {
     #![allow(clippy::float_cmp, reason = "the histogram code is asserted exactly on purpose")]
 
     use super::{
-        MIN_HITS, MISS, RayHits, estimate_thickness, hist_mode, obb_min_extent, percentile90,
-        sample_face_indices, thickness_from_hits,
+        MIN_HITS, MISS, RAYS, RayHits, estimate_thickness, face_indices, hist_mode, obb_min_extent,
+        percentile90, thickness_from_hits,
     };
     use crate::mesh::Mesh;
     use crate::mesh::geometry::face_geometry;
-    use crate::rng::seeded;
-    use std::collections::HashSet;
 
     /// An axis-aligned box from `lo` to `hi`, outward normals, twelve triangles.
     fn box_mesh(lo: [f64; 3], hi: [f64; 3]) -> Mesh {
@@ -492,10 +504,11 @@ mod tests {
         m.f.extend(inner.f.iter().map(|t| [t[0] + offset, t[1] + offset, t[2] + offset]));
 
         let geom = face_geometry(&m.v, &m.f);
-        let mut rng = seeded(super::SEED);
-        let (t, raw) = estimate_thickness(&m.v, &m.f, &geom, &mut rng).expect("the rays hit");
+        let (t, raw) = estimate_thickness(&m.v, &m.f, &geom).expect("the rays hit");
         assert!((t - 10.0).abs() < 0.5, "wall estimate {t}, expected 10");
         assert!((raw - 10.0).abs() < 0.5, "plain mode {raw}");
+        // The estimator takes no generator and no seed: a second call is the same float.
+        assert_eq!(estimate_thickness(&m.v, &m.f, &geom), Some((t, raw)));
     }
 
     #[test]
@@ -539,21 +552,36 @@ mod tests {
         assert_ne!(t, raw, "the unfiltered mode also sees the side-on hits");
     }
 
+    /// R §3.2's face set: `arange(0, n_faces, ceil(n_faces / n))`, and it must agree with the
+    /// reference's expression index for index, because injected parity feeds the port the
+    /// reference's own `thick.idx`.
     #[test]
-    fn sampling_is_without_replacement_seeded_and_capped() {
-        let mut rng = seeded(0);
-        let a = sample_face_indices(1000, 20_000, &mut rng);
-        assert_eq!(a.len(), 1000, "asking for more faces than exist takes all of them");
-        assert_eq!(a.iter().copied().collect::<HashSet<_>>().len(), 1000);
+    fn the_face_set_is_every_face_or_a_fixed_stride() {
+        // At or below the cap the stride is 1 and every face casts a ray.
+        assert_eq!(face_indices(5, 300_000), vec![0, 1, 2, 3, 4]);
+        assert_eq!(face_indices(300_000, 300_000).len(), 300_000);
+        assert_eq!(face_indices(300_000, 300_000)[299_999], 299_999);
 
-        let mut rng = seeded(0);
-        let b = sample_face_indices(1000, 100, &mut rng);
-        assert_eq!(b.len(), 100);
-        assert_eq!(b.iter().copied().collect::<HashSet<_>>().len(), 100);
-        assert_eq!(b, a[..100], "the same stream draws the same prefix");
+        // Above it the stride is `ceil(n / cap)` and the count never exceeds the cap.
+        assert_eq!(face_indices(10, 4), vec![0, 3, 6, 9]); // ceil(10/4) = 3
+        assert_eq!(face_indices(9, 3), vec![0, 3, 6]); // ceil(9/3) = 3, exactly the cap
+        for n_faces in [300_001, 450_000, 600_000, 1_230_314_usize] {
+            let idx = face_indices(n_faces, RAYS);
+            let stride = n_faces.div_ceil(RAYS);
+            assert!(idx.len() <= RAYS, "{n_faces}: {} rays", idx.len());
+            assert_eq!(idx.len(), n_faces.div_ceil(stride));
+            assert_eq!(idx[0], 0);
+            assert!(idx.windows(2).all(|w| u64::from(w[1] - w[0]) == stride as u64));
+            assert!((idx[idx.len() - 1] as usize) < n_faces);
+        }
 
-        let mut rng = seeded(1);
-        assert_ne!(sample_face_indices(1000, 100, &mut rng), b);
+        // Degenerate inputs do not divide by zero or loop forever.
+        assert!(face_indices(0, 300_000).is_empty());
+        // A cap of zero is read as one, exactly as the reference's `max(n, 1)` reads it.
+        assert_eq!(face_indices(3, 0), vec![0]);
+
+        // It is a pure function of the counts: nothing to seed, nothing to reorder.
+        assert_eq!(face_indices(12_345, RAYS), face_indices(12_345, RAYS));
     }
 
     #[test]

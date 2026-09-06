@@ -94,7 +94,9 @@ pub const ALGO_REF: &str = "2026-09-06/9d4b9d3";
 /// `brk_P`, `brk_ns`, `brk_nf`, `brk_f` (f32 `[k, 3]`) and `brk_sub` (u32 `[j]`) of R §3.5.3–3.5.5,
 /// with their `brk_params` in the metadata. `4`: step B3 added the five sampled ones — `S`,
 /// `Pf` (f32 `[n, 3]`), `sp`, `fp`, `margin_idx` (u32 `[n]`) of R §3.5.1–3.5.2 and §3.5.6 — with
-/// their `md_params` and the two face areas of R §3.4. Every tensor the port reads back must be in
-/// the file, so an older cache is refused and its fragment recomputed, rather than being read back
-/// half empty.
-pub const CACHE_VERSION: u32 = 4;
+/// their `md_params` and the two face areas of R §3.4. `5`: task T1 added `brk_valid` (bool `[k]`),
+/// R §3.5.4's frame-validity mask, which used to be recomputed from the narrowed frames and is now
+/// the one the subset was filtered with (defect D3 of the phase-1b verification). Every tensor the
+/// port reads back must be in the file, so an older cache is refused and its fragment recomputed,
+/// rather than being read back half empty.
+pub const CACHE_VERSION: u32 = 5;

@@ -153,6 +153,68 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
                 let stray = theirs.fp.iter().filter(|&&i| !frac[i as usize]).count();
                 report.push(Check::entries(name, "fracture faces", stray, theirs.fp.len()));
 
+                // --- R §3.5.1's own construction, run on the reference's uniforms (D6) --------
+                // `S on face` above pins the index convention and the counts pin the clamp rule,
+                // but neither touches the fold or the barycentric expression: fed the dump's own
+                // `u` and `v`, the port has to *rebuild the reference's points*, and a fold the
+                // wrong way round or a permuted corner shows up immediately.
+                for (quantity, points, picks, pair) in [
+                    ("S from uniforms", &theirs.s, &theirs.sp, &theirs.s_uv),
+                    ("Pf from uniforms", &theirs.pf, &theirs.fp, &theirs.pf_uv),
+                ] {
+                    let Some((first, second)) = Reference::uniforms(pair, points.len()) else {
+                        continue;
+                    };
+                    let rebuilt =
+                        samples::points_from_uniforms(&mesh.v, &mesh.f, picks, first, second);
+                    // Exact bits on purpose: the two sides evaluate the same `f64` expression in
+                    // the same association, so anything but equality is a difference in the code.
+                    #[allow(clippy::float_cmp, reason = "the reconstruction is bit-exact or wrong")]
+                    let differing = rebuilt
+                        .iter()
+                        .zip(points)
+                        .filter(|(a, b)| a[0] != b[0] || a[1] != b[1] || a[2] != b[2])
+                        .count();
+                    report.push(Check::entries(name, quantity, differing, points.len()));
+                    report.push(distance_check(
+                        name,
+                        if quantity == "S from uniforms" { "S rebuilt" } else { "Pf rebuilt" },
+                        worst_gap(&rebuilt, points),
+                        tolerance,
+                    ));
+                }
+
+                // --- R §3.5.1's face pick, on the reference's own areas (D6) ------------------
+                // `cumulative_weights` and `pick_face` are the port's `searchsorted` half. The
+                // reference's uniforms for it are not in the dump (its `choice` consumes them
+                // internally), but the *inverse* is checkable without them: the midpoint of face
+                // `k`'s interval of the cdf must pick face `k`, on the reference's own face list
+                // and the reference's own areas. An off-by-one, a `side='left'`, an unnormalised
+                // cdf or a mis-ordered face list all fail it.
+                for (quantity, faces) in [
+                    ("surface pick", faces_with(&labels, false)),
+                    ("fracture pick", fracture_faces),
+                ] {
+                    let all: Vec<u32> = if quantity == "surface pick" {
+                        (0..u32::try_from(mesh.f.len()).unwrap_or(u32::MAX)).collect()
+                    } else {
+                        faces
+                    };
+                    if all.is_empty() {
+                        continue;
+                    }
+                    let cdf = samples::cumulative_weights(&geom.areas, &all);
+                    let mut wrong = 0;
+                    let mut lo = 0.0;
+                    for (k, &hi) in cdf.iter().enumerate() {
+                        if hi > lo && samples::pick_face(&cdf, 0.5 * (lo + hi)) != k {
+                            wrong += 1;
+                        }
+                        lo = hi;
+                    }
+                    report.push(Check::entries(name, quantity, wrong, cdf.len()));
+                }
+
                 // --- R §3.5.6: the band, recomputed from the reference's own arrays -----------
                 let d_brk = samples::breakline_distance(&theirs.s, &brk);
                 let mask = samples::margin_indices(&theirs.sp, &labels, &d_brk, params);
@@ -280,6 +342,27 @@ struct Reference {
     /// The margin **before** thinning, from `md.rng.json`; the kept count when the dump has no
     /// such file, which is only ever right when nothing was thinned.
     n_margin: usize,
+    /// `md.S_u` / `md.S_v`: the two uniforms behind each surface sample, **before** R §3.5.1's
+    /// fold. Empty when the dump predates them.
+    s_uv: (Vec<f64>, Vec<f64>),
+    /// `md.Pf_u` / `md.Pf_v`, the same for the fracture samples.
+    pf_uv: (Vec<f64>, Vec<f64>),
+}
+
+impl Reference {
+    /// The two uniform arrays of a draw, when the dump carries a full pair of the right length.
+    fn uniforms(pair: &(Vec<f64>, Vec<f64>), n: usize) -> Option<(&[f64], &[f64])> {
+        (pair.0.len() == n && pair.1.len() == n && n > 0).then_some((&pair.0, &pair.1))
+    }
+}
+
+/// One pair of `md.<key>_u` / `md.<key>_v` arrays, or two empty vectors when the dump has neither.
+fn uniform_pair(fragment: &super::FragmentFixture, key: &str) -> Result<(Vec<f64>, Vec<f64>)> {
+    let (u, v) = (format!("md.{key}_u.npy"), format!("md.{key}_v.npy"));
+    if !fragment.has(&u) || !fragment.has(&v) {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    Ok((npy::read_f64(fragment.file(&u))?, npy::read_f64(fragment.file(&v))?))
 }
 
 fn reference(fragment: &super::FragmentFixture) -> Result<Reference> {
@@ -310,6 +393,8 @@ fn reference(fragment: &super::FragmentFixture) -> Result<Reference> {
         },
         margin_idx,
         n_margin,
+        s_uv: uniform_pair(fragment, "S")?,
+        pf_uv: uniform_pair(fragment, "Pf")?,
     })
 }
 
@@ -373,6 +458,17 @@ fn on_face(points: &[[f64; 3]], faces: &[u32], v: &[[f64; 3]], f: &[[u32; 3]]) -
         .map(|(p, &face)| {
             let tri = f[face as usize];
             point_triangle_distance(*p, v[tri[0] as usize], v[tri[1] as usize], v[tri[2] as usize])
+        })
+        .fold(0.0_f64, f64::max)
+}
+
+/// The largest distance between two point arrays taken in order.
+fn worst_gap(a: &[[f64; 3]], b: &[[f64; 3]]) -> f64 {
+    a.iter()
+        .zip(b)
+        .map(|(p, q)| {
+            let d = sub(*p, *q);
+            dot(d, d).sqrt()
         })
         .fold(0.0_f64, f64::max)
 }
@@ -558,8 +654,27 @@ mod tests {
         assert_eq!(r.status(), "PASS", "{:?}", r.failures().map(Check::line).collect::<Vec<_>>());
         assert!(r.skips.is_empty());
         // Two fragments × (n_surface, n_frac, two `on face`, fracture faces, margin count,
-        // margin members, two normals, sliver samples).
-        assert_eq!(r.checks.len(), 20);
+        // margin members, two normals, sliver samples, two face picks), plus four more per
+        // fragment when the dump carries the sample uniforms of D6 (`md.S_u` and friends): the
+        // rebuilt-point count and the rebuilt-point distance, for each of the two draws.
+        let with_uniforms = c.fragments.iter().filter(|f| f.has("md.S_u.npy")).count();
+        assert_eq!(r.checks.len(), 24 + 4 * with_uniforms);
+        for quantity in ["surface pick", "fracture pick"] {
+            let picks: Vec<&Check> = r.checks.iter().filter(|c| c.quantity == quantity).collect();
+            assert_eq!(picks.len(), 2, "{quantity}");
+            // Every face of the reference's own cdf must be picked by the midpoint of its own
+            // interval: the port's `searchsorted` half, on the reference's areas.
+            for check in picks {
+                assert!((check.measured - 0.0).abs() < f64::EPSILON, "{}", check.line());
+            }
+        }
+        for check in r.checks.iter().filter(|c| c.quantity.ends_with("from uniforms")) {
+            assert!(
+                (check.measured - 0.0).abs() < f64::EPSILON,
+                "the reference's own points must be rebuilt bit for bit: {}",
+                check.line()
+            );
+        }
         let n_frac = r.checks.iter().find(|c| c.quantity == "n_frac").expect("the count rule");
         assert!(n_frac.measured >= 5000.0, "the clamp is the floor: {}", n_frac.line());
     }

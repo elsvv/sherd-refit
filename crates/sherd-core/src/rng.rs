@@ -27,8 +27,11 @@
 //! `ChaCha8Rng::seed_from_u64` runs its own SplitMix64 over the result, so two draws of the same
 //! run are as independent as two seeds are.
 //!
-//! [`Draw::Thickness`]'s tag is zero, so R §3.2's stream is exactly the one steps B1 and B2
-//! measured; the reference hard-codes its seed to 0 anyway (R §10).
+//! R §3.2's wall thickness used to be a fourth draw site, with a tag of zero. It is not a draw
+//! site any more — task T1 made the estimator cast a ray from every face (or from a fixed stride
+//! subset), so preprocessing draws nothing at random at all — and the variant is gone with it.
+//! The three tags that remain are unchanged, because each is the hash of its own name and none of
+//! them was the removed one.
 
 use rand_chacha::ChaCha8Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
@@ -40,10 +43,6 @@ use rand_chacha::rand_core::{Rng, SeedableRng};
 /// with a new tag and never renumber an existing one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Draw {
-    /// R §3.2's inward rays: `choice(n_faces, 20000, replace=False)`. Tagged zero, so this stream
-    /// is `seeded(0)` itself — the reference hard-codes the seed here, and steps B1 and B2
-    /// measured every native number in the tree against exactly this stream.
-    Thickness,
     /// R §3.5.1's whole-surface samples: `n` uniforms for the face pick, then `n` for `u`, then
     /// `n` for `v`.
     Surface,
@@ -62,7 +61,6 @@ impl Draw {
     /// the rule, and it is pinned by a test.
     pub const fn tag(self) -> u64 {
         match self {
-            Self::Thickness => 0,
             Self::Surface => fnv1a(b"surface"),
             Self::Fracture => fnv1a(b"fracture"),
             Self::Margin => fnv1a(b"margin"),
@@ -180,25 +178,21 @@ mod tests {
         assert_eq!(first_words(0), [0xa79a_3b6c, 0xb585_f767, 0xbad8_c037, 0x7746_a55f]);
     }
 
-    /// The tags are results, not conveniences: pinned, distinct, and zero for the wall so that
-    /// R §3.2's stream is the one steps B1 and B2 measured.
+    /// The tags are results, not conveniences: pinned, distinct, and none of them zero — an
+    /// unseparated stream is `seeded(seed)` itself, and no draw site may collide with it.
     #[test]
     fn the_draw_tags_are_pinned_and_distinct() {
-        assert_eq!(Draw::Thickness.tag(), 0);
         assert_eq!(Draw::Surface.tag(), 0x1826_0d59_cf7e_151c);
         assert_eq!(Draw::Fracture.tag(), 0x5f49_d730_66d9_516b);
         assert_eq!(Draw::Margin.tag(), 0x56b5_a72b_50ec_d75b);
 
-        let tags = [Draw::Thickness, Draw::Surface, Draw::Fracture, Draw::Margin].map(Draw::tag);
+        let tags = [Draw::Surface, Draw::Fracture, Draw::Margin].map(Draw::tag);
         for i in 0..tags.len() {
+            assert_ne!(tags[i], 0, "tag {i} would collide with the bare seed");
             for j in (i + 1)..tags.len() {
                 assert_ne!(tags[i], tags[j], "tags {i} and {j}");
             }
         }
-        assert_eq!(first_words(0), {
-            let mut r = seeded_for(0, Draw::Thickness);
-            [r.next_u32(), r.next_u32(), r.next_u32(), r.next_u32()]
-        });
     }
 
     /// Two draws of the same run must not hand out the same numbers — which is the whole reason

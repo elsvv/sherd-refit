@@ -13,17 +13,17 @@
 //!
 //! # Native
 //!
-//! The port draws its own 20 000 faces from `ChaCha8Rng` (PMC-9: numpy's PCG64 is not reproduced)
-//! and casts its own rays through `parry3d`, so `t` is a *different sample of the same estimator*.
-//! D §10.2's native tolerance is ±2 %, and plan step S3 measured that no implementation which does
-//! not reproduce numpy's stream can hold it: the reference's own estimate moves by up to 14.5 %
-//! when only the seed changes, because the filtered distances of a fragment with a plateau rather
-//! than a peak put several near-equal bins in contention. The gate applied here is therefore
-//! `max(2 %, 3 bins of the reference's own histogram)`, which is S3's recommendation to D §10.2,
-//! and the per-cent deviation is reported beside it so the raw D §10.2 number stays visible.
+//! The port casts its own rays through `parry3d` over the faces R §3.2's stride rule names, and
+//! those are the *same faces* the reference used: the estimator draws nothing (task T1), so the
+//! only thing between the two numbers is the ray caster and the `f32` arithmetic around it.
+//! D §10.2's native tolerance is therefore back at **±2 %**, where it stood before finding F1
+//! widened it to `max(2 %, 3 bins)` on the evidence that no implementation without numpy's PCG64
+//! could hold it. That evidence is spent: there is no sample to disagree about any more.
 //!
-//! One bin is `percentile(far, 90) / 60` over the distances of R §3.2's filtered set, computed
-//! from the dump's own rays (`filtered_distances`) — the reference's resolution, not the port's.
+//! One bin of the reference's own histogram — `percentile(far, 90) / 60` over the distances of
+//! R §3.2's filtered set, computed from the dump's own rays ([`bin_width`]) — is still reported
+//! beside the per-cent deviation, because it is the resolution below which the two numbers cannot
+//! be asked to agree at all.
 
 use sherd_core::error::Result;
 use sherd_core::fragment::Fragment;
@@ -37,9 +37,11 @@ use crate::report::{Check, Mode, StageReport, Unit};
 /// D §10.2's native tolerance on `t`, as a fraction.
 pub const NATIVE_RELATIVE: f64 = 0.02;
 
-/// The widening S3 recommends for D §10.2's native column: three bins of the reference's own
-/// thickness histogram, whichever is larger. One bin is 1.7–5.7 % of `t` on the benchmark sets.
-pub const NATIVE_BINS: f64 = 3.0;
+/// The floor under the native gate, in bins of the reference's own thickness histogram: two
+/// numbers that land in adjacent bins differ by one bin's width whatever else is true, and a
+/// fragment whose `t` is small against its bin would otherwise be gated below its own resolution.
+/// One bin is 1.7–5.7 % of `t` on the benchmark sets, so on those the ±2 % above is what binds.
+pub const NATIVE_BINS: f64 = 1.0;
 
 /// D §10.2's injected tolerance: the same bin, or one bin away when the counts tie.
 pub const INJECTED_BINS: f64 = 1.0;
@@ -168,8 +170,8 @@ fn push_bins(
     }
 }
 
-/// The native gate: `max(2 %, 3 bins)`, expressed as a relative check so the table shows the
-/// per-cent deviation D §10.2 talks about.
+/// The native gate: ±2 %, with a floor of one bin of the reference's own histogram, expressed as
+/// a relative check so the table shows the per-cent deviation D §10.2 talks about.
 fn push_native(
     report: &mut StageReport,
     scope: &str,

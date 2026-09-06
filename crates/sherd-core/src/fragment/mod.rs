@@ -126,8 +126,7 @@ impl Fragment {
         // --- R §3.2: the wall, measured on the original component ------------------------------
         let geom0 = face_geometry(&mesh.v, &mesh.f);
         let area0 = geom0.total_area();
-        let mut rng = crate::rng::seeded(thickness::SEED);
-        let estimate = thickness::estimate_thickness(&mesh.v, &mesh.f, &geom0, &mut rng);
+        let estimate = thickness::estimate_thickness(&mesh.v, &mesh.f, &geom0);
         let (thick, raw_mode) = match estimate {
             Some((t, m)) if t > 0.0 => (f64::from(t), f64::from(m)),
             other => {
@@ -412,7 +411,7 @@ fn breaklines_of(
     }
     let started = std::time::Instant::now();
     let brk = breakline::build(v64, f, geom, labels, params);
-    let valid = brk.valid().iter().filter(|&&v| v).count();
+    let valid = brk.n_valid();
     tracing::info!(
         fragment = name,
         points = brk.len(),

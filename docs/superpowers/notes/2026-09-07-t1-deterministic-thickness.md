@@ -76,7 +76,7 @@ outliers:
 terracotta fragments moved from 1.94 s wall / 6.19 s CPU to **2.71–3.38 s wall / 12.6–13.1 s CPU** —
 the ray count on that set goes up twelvefold and the wall clock does not, because the casts are the
 one embarrassingly parallel part of preprocessing. Two runs are still byte-identical, and so is
-`--threads 1` against the default (§7).
+`--threads 1` against the default (§8).
 
 ## 2. The Python side: the quality gates
 
@@ -94,7 +94,7 @@ against the staged ground truth.
 | synthetic 20 | 95 %, 1.000 | **95 %, 1.000** | pass |
 
 Cross-object joins 0 and group purity 1.000 on every set, before and after. `pytest -q`: **58
-passed** (54 before; the four new tests are in §6).
+passed** (54 before; the new tests are listed in §9).
 
 **The terracotta scores, since the task asks for them.** Same two joins, same group, 007 unplaced,
 both penetrations 0:

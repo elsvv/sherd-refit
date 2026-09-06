@@ -16,3 +16,6 @@ papers/
 # rules above would otherwise swallow (docs/superpowers/notes/2026-09-06-p0-fixtures.md).
 !fixtures/**/input/
 !fixtures/**/outputs/
+
+# Rust build artefacts; `Cargo.lock` is committed, `target/` is not.
+target/

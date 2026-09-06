@@ -293,3 +293,31 @@ CC BY 4.0 (автор моделей: LWL-Archäologie für Westfalen / Florian 
 решение с измеренными характеристиками данных и обоснованием порогов;
 `docs/superpowers/notes/2026-09-05-papers-*.md` — разбор литературы, на котором построен выбор
 метода; `papers/` — сами статьи.
+
+## Rust-ядро (в разработке)
+
+Параллельно с Python-версией в этом же репозитории собирается нативное ядро на Rust: тот же
+алгоритм, без Open3D и с прицелом на GPU. На Python-версию оно пока никак не влияет —
+разработка идёт в ветке `rust-core`.
+
+- Проектное решение и раскладка воркспейса:
+  `docs/superpowers/specs/2026-09-06-rust-core-design.md`; зафиксированный алгоритм, по которому
+  идёт перенос: `docs/superpowers/specs/2026-09-06-algorithm-reference.md`; план фаз:
+  `docs/superpowers/plans/2026-09-06-rust-core-phase0-1a.md`; выбор библиотек обоснован
+  замерами в `docs/superpowers/notes/2026-09-06-e*.md`.
+- Крейты: `crates/sherd-core` — алгоритм; `crates/sherd-cli` — бинарник `sherd-refit-rs`
+  (имя `sherd-refit` остаётся за Python-версией, пока фаза 1 не пройдёт свои проверки);
+  `crates/sherd-parity` — чтение эталонных дампов и сверка стадий с Python.
+- Сборка: нужен `rustup`; версия тулчейна закреплена в `rust-toolchain.toml` (1.97.0, минимум
+  1.89). Homebrew-овые `cargo`/`rustc` 1.88 слишком старые: если они стоят, уберите
+  `/opt/homebrew/bin` из `PATH` перед `~/.cargo/bin`.
+
+```bash
+cargo build --workspace
+cargo test --workspace                                    # или cargo nextest run --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Сейчас готов каркас: общие типы, `Params` (все 46 порогов сверяются с эталонным дампом
+`fixtures/slab/`), чтение манифеста фикстур, подкоманды `info` и `parity`. Стадии конвейера
+добавляются шагами S2–S4 плана; `run` и `segment` пока сообщают, в какой фазе они появятся.

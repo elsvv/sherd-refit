@@ -1,0 +1,77 @@
+name: rust
+
+# The Rust core lives beside the Python package during the transition, so this workflow only runs
+# when something under the Rust tree changes. (GitHub Actions does not expand YAML anchors, hence
+# the two copies of the path list.)
+on:
+  push:
+    branches: [main, rust-core]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "rustfmt.toml"
+      - "crates/**"
+      - "fixtures/**"
+      - ".github/workflows/rust.yml"
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "rustfmt.toml"
+      - "crates/**"
+      - "fixtures/**"
+      - ".github/workflows/rust.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Formatting and lints. `cargo deny` joins this job once a deny.toml exists (D §10.5: licences
+  # MIT/Apache/BSD/Zlib only; meshoptimizer is MIT).
+  check:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  # Test layers 1, 2 and 4 of D §10.4 on the four platforms the releases are built for;
+  # macos-14 is arm64, macos-13 is x86_64.
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, macos-13, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      # meshopt builds meshoptimizer from C++; every runner ships a compiler for it.
+      - run: cargo build --workspace --all-targets --locked
+      - run: cargo nextest run --workspace --all-targets --locked
+      - run: cargo test --workspace --doc --locked
+
+  # Layers 3, 5 and 6 — GPU cross-checks on software adapters, the injected and native parity runs
+  # against the large fixtures, and the benchmark gates on a self-hosted M2 Pro — arrive with the
+  # stages they test (D §10.5).

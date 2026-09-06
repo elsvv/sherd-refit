@@ -4,12 +4,13 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 import numpy as np
 import open3d as o3d
 from scipy.spatial import cKDTree
 
+from . import fixture
 from .fragment import MatchData
 from .geometry import threads, apply_transform, make_frames, single_threaded, worker_threads
 
@@ -171,11 +172,13 @@ class Candidate:
 
 # ---------------------------------------------------------------- hypotheses
 
-def hypotheses(A: MatchData, B: MatchData, p: Params, ia=None, ib=None):
+def hypotheses(A: MatchData, B: MatchData, p: Params, ia=None, ib=None, dump: bool = False):
     """Frame pairs whose dihedrals are complementary, as (rotations, translations) mapping b to a.
 
     `ia` / `ib` override the breakline subsets used, which is how the screening pass
-    (`screen_pair`) buys a cheaper version of the same test.
+    (`screen_pair`) buys a cheaper version of the same test.  With `dump` the breakline subsets
+    and the accepted frame pairs go to the fixture sink; `R` and `tr` follow from them, so the
+    dump carries the indices rather than 150 000 matrices.
     """
     ia = A.brk_sub if ia is None else ia
     ib = B.brk_sub if ib is None else ib
@@ -184,6 +187,11 @@ def hypotheses(A: MatchData, B: MatchData, p: Params, ia=None, ib=None):
     da, db = A.brk_dih[ia], B.brk_dih[ib]
     ok = np.abs(da[:, None] + db[None, :] - 180.0) < p.dihedral_tol
     pa, pb = np.where(ok)
+    if dump:
+        fixture.put("hyp.ia", np.asarray(ia), "pair")
+        fixture.put("hyp.ib", np.asarray(ib), "pair")
+        fixture.put("hyp.pa", pa, "pair")
+        fixture.put("hyp.pb", pb, "pair")
     RA = make_frames(A.brk_t[ia][pa], A.brk_ns[ia][pa], A.brk_f[ia][pa])
     RB = make_frames(-B.brk_t[ib][pb], B.brk_ns[ib][pb], -B.brk_f[ib][pb])
     R = np.einsum("nij,nkj->nik", RA, RB)
@@ -191,9 +199,11 @@ def hypotheses(A: MatchData, B: MatchData, p: Params, ia=None, ib=None):
     return R, tr
 
 
-def coarse_score(A: MatchData, B: MatchData, R, tr, sc: Scales, p: Params, rng, pool=None):
+def coarse_score(A: MatchData, B: MatchData, R, tr, sc: Scales, p: Params, rng, pool=None, dump: bool = False):
     pool = B.brk_sub if pool is None else pool
     idx = rng.choice(pool, min(p.coarse_points, len(pool)), replace=False)
+    if dump:
+        fixture.put("coarse.idx", idx, "pair")
     Q, QN = B.brk_P[idx], B.brk_ns[idx]
     delta = sc.coarse
     scores = np.zeros(len(R))
@@ -207,6 +217,8 @@ def coarse_score(A: MatchData, B: MatchData, R, tr, sc: Scales, p: Params, rng, 
         nn = np.zeros((len(d), 3)); nn[hit] = A.brk_ns[j[hit]]
         agree = hit & (np.einsum("ij,ij->i", nn, Nq) > 0.7)
         scores[s:s + chunk] = agree.reshape(len(Rc), -1).mean(1)
+    if dump:
+        fixture.put("coarse.cs", scores, "pair")
     return scores
 
 
@@ -435,7 +447,8 @@ def _map(fn, jobs: list, n_threads: int) -> list:
         return list(ex.map(wrapped, jobs))
 
 
-def _stage2(A: MatchData, B: MatchData, T0: np.ndarray, sc: Scales, p: Params, brk: float) -> Candidate:
+def _stage2(A: MatchData, B: MatchData, T0: np.ndarray, sc: Scales, p: Params, brk: float,
+            tr: "fixture.Trace | None" = None, ti: int = 0) -> Candidate:
     """Refine one stage-1 pose with the full ICP chain and verify it.
 
     With `Params.early_reject_tight > 0` a cheap tight-contact estimate is taken after the two
@@ -447,7 +460,11 @@ def _stage2(A: MatchData, B: MatchData, T0: np.ndarray, sc: Scales, p: Params, b
     See docs/superpowers/notes/2026-09-05-performance.md.
     """
     T = _icp(B.pc_reg, A.pc_reg, T0, sc.icp_dist(0.2), 30)
+    if tr is not None:
+        tr.put(ti, "T_reg1", T)
     T = _icp(B.pc_reg, A.pc_reg, T, sc.icp_dist(0.08), 30)
+    if tr is not None:
+        tr.put(ti, "T_reg2", T)
     if p.early_reject_tight > 0.0:
         frac = fracture_scores(A, B, T, sc, p)
         if frac["tight"] < p.early_reject_tight:
@@ -455,7 +472,11 @@ def _stage2(A: MatchData, B: MatchData, T0: np.ndarray, sc: Scales, p: Params, b
             s["brk"] = brk
             return Candidate(A.name, B.name, T, s)          # accepted stays False
     T = _icp(B.pc_frac, A.pc_frac, T, sc.icp_dist(0.08), 30)
+    if tr is not None:
+        tr.put(ti, "T_frac1", T)
     T = _icp(B.pc_frac, A.pc_frac, T, sc.icp_dist(0.04), 30)
+    if tr is not None:
+        tr.put(ti, "T_frac2", T)
     s = verify(A, B, T, sc, p)
     s["brk"] = brk
     c = Candidate(A.name, B.name, T, s)
@@ -472,15 +493,29 @@ def match_pair(A: MatchData, B: MatchData, p: Params, keep: int = 5, n_threads: 
     t0 = time.time()
     n_threads = worker_threads() if n_threads is None else max(1, n_threads)
     rng = np.random.default_rng(p.seed)
+    with fixture.auto_scope(f"pairs/{A.name}__{B.name}") as fx:
+        return _match_pair(A, B, p, keep, n_threads, rng, t0, fx)
+
+
+def _match_pair(A, B, p, keep, n_threads, rng, t0, fx) -> list[Candidate]:
+    """The body of `match_pair`, inside the pair's fixture scope."""
+    dump = fx is not None and fixture.want("pair")
     if not (A.has_frac and B.has_frac) or A.brk_tree is None or B.brk_tree is None:
         return []
     sc = Scales.for_fragments(p, A, B)
-    R, tr = hypotheses(A, B, p)
+    if fx is not None:
+        fixture.put("scales", asdict(sc), "result")
+        fixture.put("md_used", dict(a=A.name, b=B.name, t=float(A.t), t_a=float(A.fr.thick),
+                                    t_b=float(B.fr.thick), res_a=float(A.fr.res), res_b=float(B.fr.res),
+                                    a_from_cache=bool(A.from_cache), b_from_cache=bool(B.from_cache),
+                                    surface_points=int(p.surface_points)), "result")
+    R, tr = hypotheses(A, B, p, dump=dump)
     if len(R) == 0:
         log.info("%s-%s: no hypotheses", A.name, B.name)
         return []
-    cs = coarse_score(A, B, R, tr, sc, p, rng)
+    cs = coarse_score(A, B, R, tr, sc, p, rng, dump=dump)
     kept = nms(np.argsort(cs)[::-1][:5000], R, tr, cs, sc.nms, p.stage1, 0.1)
+    fixture.put("nms1.kept", np.asarray(kept, dtype=np.int64), "pair")
 
     def stage1(k):
         T = np.eye(4); T[:3, :3] = R[k]; T[:3, 3] = tr[k]
@@ -494,6 +529,9 @@ def match_pair(A: MatchData, B: MatchData, p: Params, keep: int = 5, n_threads: 
         log.info("%s-%s: nothing passed the coarse stage", A.name, B.name)
         return []
     s1 = np.array(s1)
+    if fixture.want("pair"):
+        fixture.put("s1.T", np.asarray(Ts, dtype=np.float64), "pair")
+        fixture.put("s1.score", s1, "pair")
     best1 = float(s1.max())
     if p.stage1_floor > 0.0 and best1 < p.stage1_floor:
         # Nothing the breakline stage found comes near a seam, and stage 2 is where all the time
@@ -502,10 +540,21 @@ def match_pair(A: MatchData, B: MatchData, p: Params, keep: int = 5, n_threads: 
         k = int(np.argmax(s1))
         log.info("%s-%s: best stage-1 breakline score %.3f below the floor %.3f, stage 2 skipped (%.1fs)",
                  A.name, B.name, best1, p.stage1_floor, time.time() - t0)
-        return [Candidate(A.name, B.name, Ts[k], _partial_scores(sc, best1))]
+        out1 = [Candidate(A.name, B.name, Ts[k], _partial_scores(sc, best1))]
+        fixture.put("result.candidates", [c.to_json() for c in out1], "result")
+        return out1
     Rs = np.array([T[:3, :3] for T in Ts]); trs = np.array([T[:3, 3] for T in Ts])
     kept2 = nms(np.argsort(s1)[::-1], Rs, trs, s1, sc.nms, p.stage2, 0.05)
-    cands = _map(lambda k: _stage2(A, B, Ts[k], sc, p, float(s1[k])), kept2, n_threads)
+    fixture.put("nms2.kept", np.asarray(kept2, dtype=np.int64), "pair")
+    tr2 = fixture.trace(fx, "pair")
+    cands = _map(lambda ik: _stage2(A, B, Ts[ik[1]], sc, p, float(s1[ik[1]]), tr=tr2, ti=ik[0]),
+                 list(enumerate(kept2)), n_threads)
+    if tr2 is not None:
+        tr2.write(len(kept2), prefix="s2.")
+    if fixture.want("result"):
+        fixture.put("s2.scores", [{k: float(v) for k, v in c.scores.items()} for c in cands], "result")
+        fixture.put("s2.T", np.asarray([c.T for c in cands], dtype=np.float64).reshape(-1, 4, 4), "result")
+        fixture.put("s2.accepted", np.asarray([c.accepted for c in cands], dtype=bool), "result")
     cands.sort(key=lambda c: -c.score)
     for c in cands:
         c.scores["brk_best"] = best1
@@ -515,4 +564,5 @@ def match_pair(A: MatchData, B: MatchData, p: Params, keep: int = 5, n_threads: 
              A.name, B.name, sc.t, sc.res, sc.t / max(sc.res, 1e-9), len(R), len(kept), len(kept2), n_threads,
              best.get("seam", 0), best.get("tight", 0), sc.tight / sc.t, best.get("gap", 0), sc.gap / sc.t,
              best.get("pen", 0), cands[0].accepted if cands else False, time.time() - t0)
+    fixture.put("result.candidates", [c.to_json() for c in cands[:keep]], "result")
     return cands[:keep]

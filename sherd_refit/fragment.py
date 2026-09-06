@@ -12,6 +12,7 @@ import numpy as np
 import open3d as o3d
 from scipy.spatial import cKDTree
 
+from . import fixture
 from .geometry import (threads, apply_transform, ball_matrix, drop_small_components, face_adjacency,
                        face_geometry, median_edge, sample_on_faces, smoothed_normals)
 
@@ -78,6 +79,9 @@ def estimate_thickness(scene, C, FN, rng, n=20000):
     rays = np.concatenate([C[idx] + dvec * 1e-3, dvec], 1).astype(np.float32)
     ans = scene.cast_rays(o3d.core.Tensor(rays))
     d = ans["t_hit"].numpy(); prim = ans["primitive_ids"].numpy()
+    fixture.put("thick.idx", idx, "thick")
+    fixture.put("thick.t_hit", d, "thick")
+    fixture.put("thick.prim", prim, "thick")
     ok = np.isfinite(d) & (prim < len(FN))
     if ok.sum() < 100:
         return None, None
@@ -144,6 +148,7 @@ def classify_faces(scene, C, FN, NS, thick, n_faces, votes=5, hit_normals=None):
         al = np.full(len(C), -1.0)
         al[ok] = np.einsum("ij,ij->i", hit_normals[prim[ok]], dvec[ok])
         good += (ok & (dh / thick > 0.5) & (dh / thick < 1.8) & (al > 0.7)).astype(int)
+    fixture.put("seg.good", good, "seg")
     return good >= votes
 
 
@@ -178,6 +183,8 @@ def refine_boundary(frac, fa, fb, C, FN, A, thick, grid, max_passes=60, angle_de
     ref_g, _ = smoothed_normals(W, FN[sidx], A[sidx])
     ref = ref_g[near]
     has_ref = (np.asarray(W.sum(1)).ravel() > 0)[near]
+    fixture.put("seg.ref", ref, "seg")
+    fixture.put("seg.has_ref", has_ref, "seg")
     frac = frac.copy()
     for _ in range(max_passes):
         cand = np.unique(np.concatenate([fa[frac[fa] & ~frac[fb]], fb[frac[fb] & ~frac[fa]]]))
@@ -204,16 +211,22 @@ def segment_faces(F, FN, A, C, scene, thick, res, sp: SegParams | None = None):
     W = ball_matrix(C, C[rep], radius, tree=ctree)
     NS_g, _ = smoothed_normals(W, FN, A)
     NS = NS_g[near]
+    fixture.put("seg.rep", rep, "seg")
+    fixture.put("seg.near", near, "seg")
+    fixture.put("seg.NS", NS, "seg")
     votes = sp.votes_coarse if res > sp.coarse_at * thick else sp.votes
     shell = classify_faces(scene, C, FN, NS, thick, len(F), votes=votes,
                            hit_normals=NS if sp.smoothed_hit_normal else FN)
     frac = ~shell
     raw_frac = float(A[frac].sum() / A.sum())
+    fixture.put("seg.frac_raw", frac, "seg")
     Wm = ball_matrix(C, C[rep], thick / 4.0, tree=ctree)
     frac = (np.asarray(Wm @ (A * frac)).ravel() > 0.5 * np.asarray(Wm @ A).ravel())[near]
+    fixture.put("seg.frac_majority", frac, "seg")
     fa, fb, _ = face_adjacency(F)
     frac = drop_small_components(frac, True, 0.5 * thick ** 2, fa, fb, A)
     frac = drop_small_components(frac, False, 2.0 * thick ** 2, fa, fb, A)
+    fixture.put("seg.frac_islands", frac, "seg")
     angle = sp.boundary_angle
     if sp.boundary_angle_auto and (~frac).any():
         # how far the shell's own faces already stray from their smoothed normal: on a coarse mesh
@@ -222,7 +235,10 @@ def segment_faces(F, FN, A, C, scene, thick, res, sp: SegParams | None = None):
         angle = max(angle, float(np.degrees(np.median(np.arccos(cos)))) + 15.0)
     frac = refine_boundary(frac, fa, fb, C, FN, A, thick, grid, angle_deg=angle)
     frac = drop_small_components(frac, True, 0.5 * thick ** 2, fa, fb, A)
-    return frac, dict(raw_fraction=raw_frac, votes=votes, smooth_radius=radius, boundary_angle=angle)
+    info = dict(raw_fraction=raw_frac, votes=votes, smooth_radius=radius, boundary_angle=angle)
+    fixture.put("seg.frac_final", frac, "seg_final")
+    fixture.put("seg.info", info, "seg")
+    return frac, info
 
 
 @dataclass
@@ -260,6 +276,10 @@ class Fragment:
         rng = np.random.default_rng(seed)
         # wall thickness from the original mesh, then a face budget that keeps ~12 edges across the wall
         V0 = np.asarray(m.vertices, dtype=np.float64); F0 = np.asarray(m.triangles, dtype=np.int64)
+        fixture.put("load.V0", V0, "orig")
+        fixture.put("load.F0", F0, "orig")
+        fixture.put("load.n_orig", dict(n_orig_vertices=n_orig_v, n_orig_faces=n_orig_f,
+                                        n_vertices=len(V0), n_faces=len(F0)), "counts")
         FN0, A0, C0 = face_geometry(V0, F0)
         scene0 = o3d.t.geometry.RaycastingScene()
         scene0.add_triangles(o3d.t.geometry.TriangleMesh(o3d.core.Tensor(V0.astype(np.float32)), o3d.core.Tensor(F0.astype(np.uint32))))
@@ -271,6 +291,10 @@ class Fragment:
         if thick_mode > 1.15 * thick:
             log.info("%s: wall %.2f, but the plain ray mode says %.2f -- a rim or a collar", name, thick, thick_mode)
         target = int(np.clip(FACES_PER_T2 * A0.sum() / thick ** 2, MIN_FACES, target_faces))
+        fixture.put("thick.t", float(thick), "counts")
+        fixture.put("thick.thick_mode", float(thick_mode), "counts")
+        fixture.put("thick.target", dict(target=int(target), area0=float(A0.sum()),
+                                         faces0=int(len(F0)), target_faces=int(target_faces)), "counts")
         del scene0, V0, F0, FN0, A0, C0
         if len(m.triangles) > target:
             m = m.simplify_quadric_decimation(target_number_of_triangles=target)
@@ -285,6 +309,14 @@ class Fragment:
             log.warning("%s: working mesh has %d boundary edges; penetration tests will be skipped for it", name, n_boundary)
         FN, A, C = face_geometry(V, F)
         res = median_edge(V, F)
+        fixture.put("mesh.V", V, "mesh")
+        fixture.put("mesh.F", F, "mesh")
+        fixture.put("mesh.res", float(res), "counts")
+        fixture.put("mesh.watertight", dict(watertight=bool(watertight), n_boundary=int(n_boundary)), "counts")
+        fixture.put("mesh.stats", dict(faces=int(len(F)), vertices=int(len(V)), area=float(A.sum()),
+                                       res=float(res), thick=float(thick), thick_mode=float(thick_mode),
+                                       target=int(target), watertight=bool(watertight),
+                                       n_boundary=int(n_boundary)), "counts")
         scene = o3d.t.geometry.RaycastingScene()
         scene.add_triangles(o3d.t.geometry.TriangleMesh(o3d.core.Tensor(V.astype(np.float32)), o3d.core.Tensor(F.astype(np.uint32))))
         log.info("%s: %d faces (from %d, budget %d), thickness %.2f, edge %.3f (%.1f per t), watertight=%s (%.1fs)",
@@ -494,9 +526,22 @@ def match_arrays(fr: Fragment, t: float, **kw) -> dict:
     # sample is still area-weighted, and the true joins' scores move by less than the sampling
     # noise of the metric itself.  Subsets come from the seeded rng, so two runs see the same points.
     margin_idx = _subsample(np.where(margin)[0], p["margin_points"], rng)
-    return dict(params=p, S=S, sp=sp.astype(np.int32), Pf=Pf, fp=fp.astype(np.int32), brk_P=P,
-                brk_ns=ns, brk_nf=nf, brk_f=f, brk_sub=brk_sub.astype(np.int32),
-                margin_idx=margin_idx.astype(np.int32))
+    out = dict(params=p, S=S, sp=sp.astype(np.int32), Pf=Pf, fp=fp.astype(np.int32), brk_P=P,
+               brk_ns=ns, brk_nf=nf, brk_f=f, brk_sub=brk_sub.astype(np.int32),
+               margin_idx=margin_idx.astype(np.int32))
+    if fixture.want("md"):
+        for k in MD_ARRAYS:
+            fixture.put("md." + k, out[k], "md")
+        fixture.put("md.params", p, "md")
+        fixture.put("md.brk_t", np.cross(ns, f), "md")
+        fixture.put("md.brk_dih", np.degrees(np.arccos(np.clip(np.einsum("ij,ij->i", ns, nf), -1, 1))), "md")
+        fixture.put("md.valid", valid, "md")
+        # the RNG draws this stream made, in order (R section 10); the port reproduces the
+        # structure, not numpy's bits, so the counts are what a parity check can compare
+        fixture.put("md.rng", dict(seed=int(p["seed"]), n_surface=int(len(S)), n_frac=int(n_frac),
+                                   n_margin=int(margin.sum()), margin_subsampled=bool(margin.sum() > p["margin_points"]),
+                                   n_brk=int(len(P)), n_brk_sub=int(len(brk_sub))), "md")
+    return out
 
 
 class MatchData:
@@ -517,7 +562,10 @@ class MatchData:
         want = md_params(t, **kw)
         arrays = fr.md if arrays is None else arrays
         if arrays is None or arrays.get("params") != want:
-            arrays = match_arrays(fr, t, **kw)
+            # a rebuild at a wall thickness other than the fragment's own: many pairs ask for the
+            # same one, so the dump is keyed by (t, surface_points) and shared
+            with fixture.auto_scope(f"fragments/{fr.name}/md_t/{fixture.t_key(t, surface_points)}"):
+                arrays = match_arrays(fr, t, **kw)
             self.from_cache = False
         else:
             self.from_cache = True

@@ -13,6 +13,7 @@ from dataclasses import asdict, replace
 
 import numpy as np
 
+from . import fixture
 from .assembly import assemble, recenter
 from .fragment import MESH_EXT, Fragment, MatchData, match_arrays, md_params
 from .geometry import apply_transform, sample_on_faces
@@ -119,20 +120,22 @@ def _preprocess_one(args):
     settings only has the arrays recomputed (a fraction of a second), not the segmentation.
     """
     path, name, cache_path, target_faces, md_kw = args
-    if os.path.exists(cache_path):
+    if os.path.exists(cache_path) and not fixture.enabled():
         try:
             fr = Fragment.load(cache_path)
             if fr.cache_valid_for(path, target_faces) and fr.name == name:
                 if fr.md is not None and fr.md["params"] == md_params(fr.thick, **md_kw):
                     return cache_path
                 log.info("%s: matching arrays are stale, recomputing them", fr.name)
-                fr.save(cache_path, md=match_arrays(fr, fr.thick, **md_kw))
+                with fixture.scope(f"fragments/{name}"):
+                    fr.save(cache_path, md=match_arrays(fr, fr.thick, **md_kw))
                 return cache_path
             log.info("%s: cache is stale (settings or file changed), recomputing", fr.name)
         except Exception as e:      # unreadable cache: recompute
             log.warning("%s: cannot read cache (%s), recomputing", cache_path, e)
-    fr = Fragment.from_mesh_file(path, target_faces=target_faces, name=name)
-    fr.save(cache_path, md=match_arrays(fr, fr.thick, **md_kw))
+    with fixture.scope(f"fragments/{name}"):
+        fr = Fragment.from_mesh_file(path, target_faces=target_faces, name=name)
+        fr.save(cache_path, md=match_arrays(fr, fr.thick, **md_kw))
     return cache_path
 
 
@@ -188,14 +191,21 @@ def _screen_block(args):
 def _match_block(args):
     """Match a group of pairs in one worker.  Both `MatchData` of a pair are built at the pair's
     own wall thickness, `min(t_A, t_B)`: the thicker of the two is often a rim, and the wall is
-    the thinner one.  Returns (pair index, candidates) so the caller can restore the pair order."""
-    jobs, params_dict, keep, n_threads = args
+    the thinner one.  Returns (pair index, candidates) so the caller can restore the pair order.
+
+    `group` names the fixture directory a pair's dump goes to (`pairs` or `pairs_second`), so
+    that the second pass does not overwrite the first pass's dump.  The pair's scope is entered
+    only around `match_pair`: a `MatchData` rebuilt at the pair's wall thickness still belongs to
+    its fragment, and dumping it once per fragment and thickness rather than once per pair is
+    what keeps a collection's fixture from growing with the square of its size."""
+    jobs, params_dict, keep, n_threads, group = args
     p = Params(**params_dict)
     out = []
     for k, ca, cb, t_pair in jobs:
         A = _cached_match_data(ca, t_pair, p)
         B = _cached_match_data(cb, t_pair, p)
-        out.append((k, [c.to_json() for c in match_pair(A, B, p, keep=keep, n_threads=n_threads)]))
+        with fixture.scope(f"{group}/{A.name}__{B.name}"):
+            out.append((k, [c.to_json() for c in match_pair(A, B, p, keep=keep, n_threads=n_threads)]))
     return out
 
 
@@ -217,7 +227,8 @@ def _pair_blocks(names: list[str], pairs: list[tuple], block: int) -> list[list[
 
 
 def _match_all(pairs: list[tuple], names: list[str], frags: dict, cache_of: dict, p: Params,
-               workers: int, threads: int | None, keep_per_pair: int, tag: str) -> list[list[Candidate]]:
+               workers: int, threads: int | None, keep_per_pair: int, tag: str,
+               group: str = "pairs") -> list[list[Candidate]]:
     """Match every pair in `pairs`, returning the candidates of each in the order given."""
     per_pair: list[list[Candidate]] = [[] for _ in pairs]
     if not pairs:
@@ -235,7 +246,7 @@ def _match_all(pairs: list[tuple], names: list[str], frags: dict, cache_of: dict
         # `min(t_A, t_B)`, so its two `MatchData` are keyed by that thickness and consecutive jobs
         # with the same one reuse the thinner fragment's outright
         jobs = [([(k, cache_of[pairs[k][0]], cache_of[pairs[k][1]], t_of(k)) for k in sorted(b, key=lambda k: (t_of(k), k))],
-                 asdict(p), keep_per_pair, per) for b in blocks]
+                 asdict(p), keep_per_pair, per, group) for b in blocks]
         with _worker_env(per), ProcessPoolExecutor(max_workers=procs, initializer=_init_worker,
                                                    initargs=(log.getEffectiveLevel(),)) as ex:
             for res in ex.map(_match_block, jobs):
@@ -245,7 +256,7 @@ def _match_all(pairs: list[tuple], names: list[str], frags: dict, cache_of: dict
         # in-process: this process's OpenMP was configured at start-up and cannot be changed any
         # more, so leave the parallelism inside Open3D's ICP where it already is
         jobs = [(k, cache_of[a], cache_of[b], t_of(k)) for k, (a, b) in enumerate(pairs)]
-        for k, cs in _match_block((jobs, asdict(p), keep_per_pair, 1)):
+        for k, cs in _match_block((jobs, asdict(p), keep_per_pair, 1, group)):
             per_pair[k] = [Candidate.from_json(d) for d in cs]
     return per_pair
 
@@ -290,6 +301,12 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
     if len(files) < 2:
         raise SystemExit(f"need at least two mesh files in {input_dir}, found {len(files)}")
     log.info("%d fragments in %s; %d workers", len(files), input_dir, workers)
+    fixture.put("collection", dict(input_dir=os.path.basename(os.path.normpath(input_dir)),
+                                   files=[os.path.basename(f) for f in files],
+                                   target_faces=int(target_faces), params=asdict(p),
+                                   keep_per_pair=int(keep_per_pair), refine=bool(refine),
+                                   preview=bool(preview), write_meshes=bool(write_meshes)),
+                "counts", scope_name="")
 
     # 1. preprocessing
     t0 = time.time()
@@ -321,6 +338,9 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
             pairs.append((a, b))
     if skipped:
         log.info("%d pairs skipped because wall thickness differs by more than %.1fx", len(skipped), p.thick_ratio)
+    fixture.put("pairs", dict(names=names, thickness_median=thick, resolution_median=res,
+                              pairs=[list(pr) for pr in pairs], skipped=[list(pr) for pr in skipped]),
+                "counts", scope_name="")
 
     # 2a. partner search: on a large collection almost every pair is between fragments that never
     # touched, and the coarse breakline stage on a capped subsample settles that in a tenth of a
@@ -339,6 +359,8 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
                 for k, s in res:
                     score[pairs[k]] = s
         keep = top_partners(score, names, p.screen_top_k)
+        fixture.put("scores", {f"{a}__{b}": v for (a, b), v in score.items()}, "screen", scope_name="screen")
+        fixture.put("kept", sorted(f"{a}__{b}" for a, b in keep), "screen", scope_name="screen")
         pairs = [pr for pr in pairs if pr in keep]
         timings["screen"] = time.time() - t0
         log.info("partner search: %d pairs screened in %.1fs, %d kept (top %d per fragment, %.1fx fewer)",
@@ -355,8 +377,14 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
 
     # 3. assembly
     t0 = time.time()
-    md = {n: _match_data(frags[n], thick, p, surface_points=15000) for n in names}
-    poses, groups, used, rejected = assemble(md, cands, p)
+    md = {}
+    for n in names:
+        with fixture.scope(f"assembly/md/{n}"):
+            md[n] = _match_data(frags[n], thick, p, surface_points=15000)
+    fixture.put("md_t_median", dict(t=float(thick), surface_points=15000, names=names),
+                "assembly", scope_name="assembly")
+    with fixture.scope("assembly"):
+        poses, groups, used, rejected = assemble(md, cands, p)
     timings["assembly"] = time.time() - t0
 
     # 3a. second pass: the cheap budget is chosen so that the correct pose is almost always inside
@@ -366,11 +394,13 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
     if retry:
         t0 = time.time()
         p2 = replace(p, stage1=p.second_pass_stage1, stage2=p.second_pass_stage2, stage1_floor=0.0)
-        again = _match_all(retry, names, frags, cache_of, p2, workers, threads, keep_per_pair, "second pass")
+        again = _match_all(retry, names, frags, cache_of, p2, workers, threads, keep_per_pair,
+                           "second pass", group="pairs_second")
         fresh = dict(zip(retry, again))
         cands = [c for pr, cs in zip(pairs, per_pair) for c in fresh.get(pr, cs)]
         timings["second_pass"] = time.time() - t0
-        poses, groups, used, rejected = assemble(md, cands, p)
+        with fixture.scope("assembly_second"):
+            poses, groups, used, rejected = assemble(md, cands, p)
         log.info("second pass: %d pairs rematched in %.1fs at stage1 %d / stage2 %d, %d accepted, %d groups",
                  len(retry), timings["second_pass"], p2.stage1, p2.stage2, sum(c.accepted for c in cands),
                  len([g for g in groups if len(g) > 1]))
@@ -390,9 +420,28 @@ def run(input_dir: str, out_dir: str, target_faces: int = 200000, workers: int |
         write_placed_meshes(out_dir, paths, poses, groups)
     if preview:
         write_previews(out_dir, frags, poses, groups)
+    _dump_outputs(out_dir)
     timings["output"] = time.time() - t0
     log.info("outputs written to %s", out_dir)
     return poses, groups, used, cands
+
+
+def _dump_outputs(out_dir: str):
+    """Copy `transforms.json` and `report.json` into the fixture sink.
+
+    `report.json` carries wall-clock timings, which differ between two runs of the same input;
+    they are replaced by null so that the dump stays byte-identical.  Everything the port has to
+    reproduce is elsewhere in the file.
+    """
+    import json
+    if not fixture.want("outputs"):
+        return
+    with open(os.path.join(out_dir, "transforms.json")) as f:
+        fixture.put("transforms", json.load(f), "outputs", scope_name="outputs")
+    with open(os.path.join(out_dir, "report.json")) as f:
+        rep = json.load(f)
+    rep["timings"] = {k: None for k in rep.get("timings", {})}
+    fixture.put("report", rep, "outputs", scope_name="outputs")
 
 
 def write_previews(out_dir, frags, poses, groups, n_points=250000):

@@ -6,6 +6,7 @@ import logging
 
 import numpy as np
 
+from . import fixture
 from .fragment import MatchData
 from .geometry import apply_transform, rotation_angle_deg
 from .matching import Candidate, Params, Scales
@@ -137,6 +138,11 @@ def assemble(md: dict[str, MatchData], cands: list[Candidate], p: Params,
     groups.sort(key=lambda g: -len(g))
     log.info("assembly: %d groups (%s), %d joins used, %d accepted joins rejected",
              len(groups), ", ".join(str(len(g)) for g in groups), len(used), len(rejected))
+    with fixture.auto_scope("assembly"):
+        fixture.put("poses", {n: np.asarray(T).tolist() for n, T in poses.items()}, "assembly")
+        fixture.put("groups", groups, "assembly")
+        fixture.put("used", [c.to_json() for c in used], "assembly")
+        fixture.put("rejected", [dict(c.to_json(), reason=why) for c, why in rejected], "assembly")
     return poses, groups, used, rejected
 
 

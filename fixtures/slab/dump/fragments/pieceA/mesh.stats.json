@@ -1,0 +1,11 @@
+{
+ "area": 86535.75766603698,
+ "faces": 45100,
+ "n_boundary": 0,
+ "res": 2.124466099155544,
+ "target": 58223,
+ "thick": 30.15234375,
+ "thick_mode": 30.30104637145996,
+ "vertices": 22552,
+ "watertight": true
+}

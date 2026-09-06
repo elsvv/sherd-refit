@@ -1,0 +1,12 @@
+{
+ "a": "pieceA",
+ "a_from_cache": true,
+ "b": "pieceB",
+ "b_from_cache": false,
+ "res_a": 2.124466099155544,
+ "res_b": 2.2784501327205304,
+ "surface_points": 20000,
+ "t": 30.15234375,
+ "t_a": 30.15234375,
+ "t_b": 30.161022186279297
+}

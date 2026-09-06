@@ -1,0 +1,12 @@
+{
+ "brk_voxel": 0.5,
+ "frac_per_t2": 150.0,
+ "macro_inner": 0.15,
+ "macro_outer": 0.6,
+ "margin_points": 6000,
+ "max_frac_points": 12000,
+ "min_frac_points": 5000,
+ "seed": 0,
+ "surface_points": 20000,
+ "t": 30.161022186279297
+}

@@ -1,0 +1,9 @@
+{
+ "margin_subsampled": true,
+ "n_brk": 857,
+ "n_brk_sub": 143,
+ "n_frac": 5000,
+ "n_margin": 10407,
+ "n_surface": 20000,
+ "seed": 0
+}

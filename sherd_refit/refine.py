@@ -33,12 +33,21 @@ def fracture_cloud(fr: Fragment, mesh: o3d.geometry.TriangleMesh, max_points: in
     return pc
 
 
-def refine_joins(frags: dict[str, Fragment], meshes: dict[str, o3d.geometry.TriangleMesh], poses: dict[str, np.ndarray],
+def refine_joins(frags: dict[str, Fragment], paths: dict[str, str], poses: dict[str, np.ndarray],
                  groups: list[list[str]], used: list[Candidate], p: Params | None = None) -> dict[str, np.ndarray]:
     """Re-run point-to-plane ICP on full-resolution fracture vertices for every join used by the
-    assembly, propagating corrections outward from each group's first fragment."""
+    assembly, propagating corrections outward from each group's first fragment.
+
+    The full-resolution meshes are read one at a time and only for fragments that ended up in a
+    group: on a collection of 164 they are hundreds of megabytes together, and the ones nothing
+    was joined to are never looked at.
+    """
     p = p or Params()
-    clouds = {n: fracture_cloud(frags[n], meshes[n]) for n in frags if len(np.asarray(meshes[n].vertices))}
+    clouds = {}
+    for n in {n for g in groups if len(g) > 1 for n in g}:
+        m = load_mesh(paths[n])
+        if len(np.asarray(m.vertices)):
+            clouds[n] = fracture_cloud(frags[n], m)
     poses = dict(poses)
     est = o3d.pipelines.registration.TransformationEstimationPointToPlane()
     for g in groups:

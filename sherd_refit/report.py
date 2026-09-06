@@ -76,6 +76,9 @@ def write_report(out_dir, frag_stats, thickness, cands, poses, groups, used, rej
               "max({tight_delta} t, {tight_res} res).").format(**params)
     if params.get("early_reject_tight", 0.0) > 0:
         legend += " n/a = not computed: the candidate was rejected early (tight below {early_reject_tight}).".format(**params)
+    if params.get("stage1_floor", 0.0) > 0:
+        legend += (" A pair whose best breakline score after stage 1 stays below {stage1_floor} is not taken to "
+                   "stage 2 at all; its row shows that pose with n/a scores.").format(**params)
     lines.append(legend)
     lines.append("")
     lines.append("| A | B | accepted | score | seam (t) | tight A/B | tight at (t) | gap (t) | gap limit (t) | penetration | normal agr. |")
@@ -101,13 +104,19 @@ def write_report(out_dir, frag_stats, thickness, cands, poses, groups, used, rej
                        candidates=[c.to_json() for c in cands]), f, indent=1)
 
 
-def write_placed_meshes(out_dir, meshes, poses, groups):
-    """Write each original mesh in its placed pose and one merged mesh per group with >= 2 fragments."""
+def write_placed_meshes(out_dir, paths, poses, groups):
+    """Write each original mesh in its placed pose and one merged mesh per group with >= 2 fragments.
+
+    Meshes are read from disk one at a time rather than held in a dictionary: a collection of 164
+    fragments is hundreds of megabytes at full resolution, and nothing here needs two of them at
+    once except the group being merged.
+    """
+    from .fragment import load_mesh
     placed_dir = os.path.join(out_dir, "placed")
     os.makedirs(placed_dir, exist_ok=True)
     files = {}
-    for n, m in meshes.items():
-        mm = o3d.geometry.TriangleMesh(m)
+    for n, path in paths.items():
+        mm = load_mesh(path)
         mm.transform(poses[n])
         p = os.path.join(placed_dir, f"{n}.ply")
         o3d.io.write_triangle_mesh(p, mm, write_ascii=False, compressed=False, write_vertex_normals=False, print_progress=False)
@@ -117,7 +126,7 @@ def write_placed_meshes(out_dir, meshes, poses, groups):
             continue
         merged = o3d.geometry.TriangleMesh()
         for n in g:
-            mm = o3d.geometry.TriangleMesh(meshes[n]); mm.transform(poses[n]); merged += mm
+            mm = load_mesh(paths[n]); mm.transform(poses[n]); merged += mm
         o3d.io.write_triangle_mesh(os.path.join(out_dir, f"assembly_{k}.ply"), merged, write_ascii=False, compressed=False,
                                    write_vertex_normals=False, print_progress=False)
     return files

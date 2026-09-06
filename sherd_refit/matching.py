@@ -68,9 +68,15 @@ class Params:
     min_seam: float = 3.0
     min_cont_n: float = 0.8
     early_reject_tight: float = 0.0     # >0: skip the fracture-only ICPs and the costly verification below this
+    stage1_floor: float = 0.0           # >0: skip stage 2 when the pair's best stage-1 breakline score is below this
     thick_ratio: float = 2.5            # a pair whose walls differ by more than this is not matched at all
+    screen_top_k: int = 0               # partners kept per fragment by the screening pass (0: no screening)
+    screen_points: int = 150            # breakline points per fragment the screening pass uses
+    screen_min_pairs: int = 200         # screening is skipped below this many pairs
     margin_points: int = 6000           # shell-margin points kept for the pc_reg ICP and the continuity test
     surface_points: int = 20000         # whole-surface samples per fragment (penetration test and shell margin)
+    macro_inner: float = 0.15           # t, faces this close to the breakline are left out of the macro normals
+    macro_outer: float = 0.60           # t, outer radius of the macro-normal neighbourhood
     frac_per_t2: float = 150.0          # fracture samples per t^2 of fracture area
     min_frac_points: int = 5000
     max_frac_points: int = 12000
@@ -160,8 +166,14 @@ class Candidate:
 
 # ---------------------------------------------------------------- hypotheses
 
-def hypotheses(A: MatchData, B: MatchData, p: Params):
-    ia, ib = A.brk_sub, B.brk_sub
+def hypotheses(A: MatchData, B: MatchData, p: Params, ia=None, ib=None):
+    """Frame pairs whose dihedrals are complementary, as (rotations, translations) mapping b to a.
+
+    `ia` / `ib` override the breakline subsets used, which is how the screening pass
+    (`screen_pair`) buys a cheaper version of the same test.
+    """
+    ia = A.brk_sub if ia is None else ia
+    ib = B.brk_sub if ib is None else ib
     if len(ia) == 0 or len(ib) == 0:
         return np.zeros((0, 3, 3)), np.zeros((0, 3))
     da, db = A.brk_dih[ia], B.brk_dih[ib]
@@ -174,8 +186,9 @@ def hypotheses(A: MatchData, B: MatchData, p: Params):
     return R, tr
 
 
-def coarse_score(A: MatchData, B: MatchData, R, tr, sc: Scales, p: Params, rng):
-    idx = rng.choice(B.brk_sub, min(p.coarse_points, len(B.brk_sub)), replace=False)
+def coarse_score(A: MatchData, B: MatchData, R, tr, sc: Scales, p: Params, rng, pool=None):
+    pool = B.brk_sub if pool is None else pool
+    idx = rng.choice(pool, min(p.coarse_points, len(pool)), replace=False)
     Q, QN = B.brk_P[idx], B.brk_ns[idx]
     delta = sc.coarse
     scores = np.zeros(len(R))
@@ -190,6 +203,66 @@ def coarse_score(A: MatchData, B: MatchData, R, tr, sc: Scales, p: Params, rng):
         agree = hit & (np.einsum("ij,ij->i", nn, Nq) > 0.7)
         scores[s:s + chunk] = agree.reshape(len(Rc), -1).mean(1)
     return scores
+
+
+def _cap(idx: np.ndarray, n: int, seed: int) -> np.ndarray:
+    """A deterministic subset of at most `n` breakline indices, order preserved."""
+    if n <= 0 or len(idx) <= n:
+        return idx
+    return np.sort(np.random.default_rng(seed).choice(idx, n, replace=False))
+
+
+def screen_pair(A: MatchData, B: MatchData, p: Params, points: int = 150) -> float:
+    """How well the two breaklines can be laid on top of each other, cheaply.
+
+    The matcher's own coarse stage, run on a capped subsample of both breaklines: every
+    dihedral-compatible pair of frames is turned into a pose and scored by how much of B's
+    breakline lands on A's.  Capping the two subsets at `points` makes the hypothesis count
+    `0.3 * points^2` instead of tens of thousands, which turns a one-second stage into 0.17
+    CPU-seconds -- cheap enough to run on all 12 589 pairs of a 164-fragment collection in five
+    minutes.
+
+    **It ranks a fragment's partners; it does not decide whether they touched.**  A true adjacent
+    pair overlaps on 5-22 % of its breakline even at the exact ground-truth pose, because one seam
+    is a fraction of a fragment's whole crack line, and the best of several thousand poses reaches
+    the same 10-28 % on pairs that never touched.  Keeping the best 15 partners per fragment keeps
+    47 % of the ground-truth adjacent pairs of `mixed_all`; the whole measurement, and three other
+    partner searches that do no better, are in
+    docs/superpowers/notes/2026-09-06-scale-pairs.md.
+
+    Returns the best coarse score; 0 when the pair has no usable breakline.
+    """
+    if A.brk_tree is None or B.brk_tree is None or len(A.brk_sub) == 0 or len(B.brk_sub) == 0:
+        return 0.0
+    sc = Scales.for_fragments(p, A, B)
+    ia, ib = _cap(A.brk_sub, points, p.seed), _cap(B.brk_sub, points, p.seed)
+    R, tr = hypotheses(A, B, p, ia=ia, ib=ib)
+    if len(R) == 0:
+        return 0.0
+    cs = coarse_score(A, B, R, tr, sc, p, np.random.default_rng(p.seed), pool=ib)
+    return float(cs.max())
+
+
+def top_partners(score: dict[tuple, float], names: list[str], k: int) -> set[tuple]:
+    """The union over fragments of each fragment's `k` best-scoring partners.
+
+    Per fragment rather than by one global threshold, because the coarse score is not comparable
+    across fragments: a large sherd with a long breakline scores lower everywhere than a small one
+    whose whole crack line can lie on its partner.  What matters is the ranking within a
+    fragment's own row, and a fragment with few neighbours costs only the `k` pairs it keeps.
+    """
+    order = {n: i for i, n in enumerate(names)}
+    per: dict[str, list] = {n: [] for n in names}
+    for (a, b), v in score.items():
+        per.setdefault(a, []).append((v, b))
+        per.setdefault(b, []).append((v, a))
+    keep = set()
+    for n, lst in per.items():
+        for _, m in sorted(lst, key=lambda x: (-x[0], x[1]))[:k]:
+            # the pair is written the way `itertools.combinations(names, 2)` writes it, so the
+            # caller can test membership against its own pair list
+            keep.add((n, m) if order[n] < order[m] else (m, n))
+    return keep
 
 
 def nms(order, R, tr, sc, trans_tol, topk, floor, rot_tol=2.9):
@@ -319,6 +392,16 @@ def verify(A: MatchData, B: MatchData, T: np.ndarray, sc: Scales, p: Params, ful
     return s
 
 
+def _partial_scores(sc: Scales, brk: float) -> dict:
+    """Scores for a candidate cut before stage 2: every field the report prints, with the ones
+    that were never computed set so that `accept` refuses them."""
+    s = dict(tightA=0.0, tightB=0.0, tight=0.0, gapA=1.0, gapB=1.0, gap=1.0,
+             contactA=0.0, contactB=0.0, contact=0.0, seam=0.0, cont=1.0, cont_n=-1.0,
+             pen=0.0, pen_depth=0.0, partial=1.0, brk=brk, brk_best=brk)
+    s.update(sc.limits())
+    return s
+
+
 def accept(s: dict, p: Params, sc: Scales) -> bool:
     """`gap` is reported in units of t, so it is compared against the pair's own gap limit."""
     return (s["tight"] >= p.min_tight and s["gap"] * sc.t <= sc.gap and s["pen"] <= p.max_pen
@@ -406,10 +489,21 @@ def match_pair(A: MatchData, B: MatchData, p: Params, keep: int = 5, n_threads: 
         log.info("%s-%s: nothing passed the coarse stage", A.name, B.name)
         return []
     s1 = np.array(s1)
+    best1 = float(s1.max())
+    if p.stage1_floor > 0.0 and best1 < p.stage1_floor:
+        # Nothing the breakline stage found comes near a seam, and stage 2 is where all the time
+        # goes.  The pair keeps its best stage-1 pose and is marked `partial`, so it still appears
+        # in the report and can never be accepted.
+        k = int(np.argmax(s1))
+        log.info("%s-%s: best stage-1 breakline score %.3f below the floor %.3f, stage 2 skipped (%.1fs)",
+                 A.name, B.name, best1, p.stage1_floor, time.time() - t0)
+        return [Candidate(A.name, B.name, Ts[k], _partial_scores(sc, best1))]
     Rs = np.array([T[:3, :3] for T in Ts]); trs = np.array([T[:3, 3] for T in Ts])
     kept2 = nms(np.argsort(s1)[::-1], Rs, trs, s1, sc.nms, p.stage2, 0.05)
     cands = _map(lambda k: _stage2(A, B, Ts[k], sc, p, float(s1[k])), kept2, n_threads)
     cands.sort(key=lambda c: -c.score)
+    for c in cands:
+        c.scores["brk_best"] = best1
     best = cands[0].scores if cands else {}
     log.info("%s-%s: t %.2f res %.2f (%.1f edges per t); %d hyp, %d/%d refined (%d threads), "
              "best seam %.1f tight %.2f (<%.3f t) gap %.3f (<%.3f t) pen %.3f accepted=%s (%.1fs)",

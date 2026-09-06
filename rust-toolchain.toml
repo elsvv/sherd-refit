@@ -1,0 +1,5 @@
+# Pinned so that every developer and every CI runner sees the same lints and the same codegen.
+# The MSRV of the tree is 1.89 (kiddo 6.2); Homebrew's cargo 1.88 cannot build it, use rustup.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,25 @@
+[package]
+name = "sherd-cli"
+description = "Command line front end of the Rust sherd-refit core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# `sherd-refit-rs` for as long as the Python package owns the name `sherd-refit`; the rename
+# happens when phase 1 passes its gates (D §13.6).
+[[bin]]
+name = "sherd-refit-rs"
+path = "src/main.rs"
+
+[dependencies]
+sherd-core.workspace = true
+sherd-parity.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

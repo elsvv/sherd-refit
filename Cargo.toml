@@ -1,0 +1,99 @@
+[workspace]
+resolver = "3"
+members = ["crates/sherd-core", "crates/sherd-cli", "crates/sherd-parity"]
+
+# `sherd-gpu` (wgpu executor) and `sherd-py` (pyo3 module) join the workspace in phases 2a and 3a;
+# their dependencies are deliberately absent here until then.
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"                     # kiddo 6.2 is the highest MSRV in the tree
+repository = "https://github.com/elsvv/sherd-refit"
+publish = false
+
+# Versions are pinned to what the phase-0 experiments actually measured; the notes under
+# `docs/superpowers/notes/` carry the numbers, and `Cargo.lock` is committed so every machine and
+# every CI runner builds the same tree.
+[workspace.dependencies]
+# --- core numerics and parallelism (design §3) -------------------------------------------------
+nalgebra = "0.34.2"                       # f64 poses, 6x6 LDLT, 3x3 SVD (Umeyama); §3 said 0.33
+bytemuck = { version = "1.25.2", features = ["derive"] }  # CPU/GPU-identical buffer layouts
+rayon = "1.12.0"
+rand_chacha = "0.10.0"                    # ChaCha8Rng, portable stream (design §7, PMC-9)
+
+# --- mesh IO: experiment E2 (docs/superpowers/notes/2026-09-06-e2-io.md) -----------------------
+ply-rs-bw = "4.0.1"                       # PLY read + write, byte-identical to Open3D's writer
+tobj = "4.0.5"                            # OBJ
+stl_io = "0.11.0"                         # STL (binary + ASCII)
+gltf = { version = "1.4.1", default-features = false, features = [
+    "utils",
+] } # GLB with COLOR_0; `import` dropped: 36 -> 17 transitive crates
+# OFF has no crate on crates.io: `sherd_core::io::off` is our own ~40-line reader (E2).
+
+# --- mesh operations: experiment E1 (…-e1-decimation.md) --------------------------------------
+meshopt = "0.6.2"                         # quadric decimation with SimplifyOptions::Regularize
+
+# --- spatial structures: experiments E3/E4 (…-e3e4-spatial.md) --------------------------------
+parry3d = { version = "0.30.2", features = [
+    "enhanced-determinism",
+] } # BVH: closest point, bounded closest point, rays
+kiddo = "6.2.0"                           # ImmutableKdTree<f32, 3> for radius-bounded NN on the CPU
+
+# --- storage, fixtures, output ----------------------------------------------------------------
+safetensors = "0.8.0"                     # fragment cache (design §4.2)
+npyz = "0.9.1"                            # read the Python fixtures' .npy (design §10.1)
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"                           # fixture manifest checksums
+image = { version = "0.25.10", default-features = false, features = [
+    "png",
+] } # preview PNGs
+
+# --- CLI, logging, errors ---------------------------------------------------------------------
+clap = { version = "4.6.6", features = ["derive"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+anyhow = "1.0.104"
+thiserror = "2.0.20"
+
+# --- test-only --------------------------------------------------------------------------------
+approx = "0.5.1"
+proptest = "1.11.0"
+
+# --- workspace members ------------------------------------------------------------------------
+sherd-core = { path = "crates/sherd-core" }
+sherd-parity = { path = "crates/sherd-parity" }
+
+# Lint baseline for every crate; each member opts in with `[lints] workspace = true`.
+[workspace.lints.rust]
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unsafe_code = "deny"                      # `#![allow(unsafe_code)]` per module, with a reason
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# A port of a frozen algorithm must not ship holes: these three are hard errors, not warnings.
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+# Opt-outs, each for a reason:
+module_name_repetitions = "allow"         # `mesh::MeshFormat` reads better than `mesh::Format`
+must_use_candidate = "allow"              # too noisy on small geometry helpers
+missing_errors_doc = "allow"              # the error type is documented once, on `Error`
+missing_panics_doc = "allow"
+doc_markdown = "allow"                    # the docs quote the reference's prose: Open3D, numpy, SfS++
+return_self_not_must_use = "allow"        # geometry helpers return `Self` everywhere
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"                # profiling in phase 1e without a fat binary
+
+# Dependencies are optimised even in debug builds: meshopt, parry3d and the IO crates dominate
+# test runtime, and the parity tests run on real scans.
+[profile.dev.package."*"]
+opt-level = 2

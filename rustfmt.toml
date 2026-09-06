@@ -1,0 +1,4 @@
+# The formatting `cargo fmt --check` enforces in CI. Wider than the default so that a struct
+# literal of three coordinates stays on one line, which most of the geometry is.
+max_width = 100
+use_small_heuristics = "Max"

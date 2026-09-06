@@ -68,28 +68,40 @@ feature of `sherd-cli` (`--features gpu`, on by default in release builds).
 
 ## 3. Dependencies
 
-| need | crate (version to pin at start) | why | risk / unknown | experiment that resolves it |
+**This table is the workspace, not a plan.** Every version below is what `Cargo.toml` pins and
+`Cargo.lock` resolves at the head of `rust-core`; the phase-0 experiments moved several of them and
+deleted two rows outright, and the table was re-synchronised with the tree after the phase-1a
+verification (S1 open issue 2). Rows for crates that are *not* in the workspace yet say so: their
+members (`sherd-gpu`, `sherd-py`, the desktop app) join in phases 2a and 3a, and pinning their
+dependencies before then would be guessing.
+
+| need | crate, as pinned | why | what phase 0 changed | experiment |
 |---|---|---|---|---|
-| linear algebra | `nalgebra` 0.33 | f64 poses, 6×6 LDLT, 3×3 SVD (Umeyama) | none | — |
-| small vectors in hot loops | own `Vec3f` newtype (`#[repr(C)]`, `bytemuck::Pod`) | identical layout on CPU and GPU buffers | none | — |
-| parallelism | `rayon` 1.10 | pairs, candidates, per-face loops | none | — |
-| GPU | `wgpu` 24 (pin the minor), `bytemuck`, `pollster` | Metal/Vulkan/DX12 from one WGSL source | driver bugs on Intel iGPU and older AMD; software adapters in CI; fast-math status of naga output | E7 (fast-math), E8 (adapter matrix) |
-| KD-tree (unbounded NN on CPU) | `kiddo` 5 (`ImmutableKdTree<f32,3>`) | seam and continuity tests, `near`, `d_brk`, margin | API churn between majors; f32 only for the immutable tree (fine) | — |
-| radius-bounded NN | own hash grid | ICP correspondences, coarse score, macro-normal balls; same layout as the GPU kernel | none beyond effort | unit tests vs brute force |
-| BVH: rays, closest point, inside | own flattened BVH (SAH binned build, 4 tris/leaf, 32-byte nodes) | Embree-equivalent semantics for §R3.2, §R3.4.3, §R6.1, §R6.4, shared with GPU | effort ≈ 1.5 weeks; performance vs Embree (expect 3–5× slower single-thread, irrelevant at these sizes) | E4 (parity vs Open3D distances on the terracotta) |
-| alternative considered | `parry3d` 0.17 | ready TriMesh QBVH with `project_point`, `cast_ray`, pseudo-normal inside test | second layout to maintain for the GPU; f32/f64 duplication; no bounded closest-point early exit | rejected unless the own BVH slips by > 2 weeks |
-| quadric decimation | `meshopt` 0.4 (meshoptimizer C via `cc`) | fast, topology-preserving, cross-platform, actively maintained | different collapse order than Open3D → different working mesh (PMC-2); `simplify` may stop above the target when topology blocks it; border locking behaviour | E1 |
-| decimation fallback | `baby_shark` 0.3 (`decimation::EdgeDecimator`) | pure Rust, Garland–Heckbert, closer to Open3D's algorithm | young API, speed unknown on 10 M faces | E1 |
-| mesh read | own PLY parser; `tobj` 4 (OBJ), `stl_io` 0.8, own OFF, `gltf` 1 (GLB with `COLOR_0`) | PLY is the main format and needs colours + big files fast; Open3D's writer output must round-trip | `mesh-loader` was considered (one crate for PLY/OBJ/STL) — colour support in PLY unverified | E2 |
-| mesh write | own PLY writer (binary LE, `uchar` RGB), `gltf-json` for GLB export | outputs must match Python's files byte-compatibly in layout | — | E2 |
-| cache | `safetensors` 0.4 | mmap-friendly, JSON header with metadata, readable from Python | 2-byte alignment only; we align tensors ourselves by ordering | — |
-| fixtures | `npyz` 0.8 (read `.npy`) + `serde_json` | Python writes `.npy`; no zip needed | — | — |
-| images | `image` 0.25 (PNG) + embedded 5×7 bitmap font | preview PNGs without a font stack | — | — |
-| CLI / logging / errors | `clap` 4, `tracing` + `tracing-subscriber`, `anyhow`, `thiserror` | — | — | — |
-| RNG | `rand_chacha` 0.9 (`ChaCha8Rng::seed_from_u64`) | portable, versioned stream guarantee across platforms | not numpy-compatible (PMC-9) | — |
-| Python bindings | `pyo3` 0.23 + `numpy` 0.23, `maturin` | transition and the parity harness | ABI3 wheels need `abi3-py310` feature | — |
-| desktop | `tauri` 2 | later | — | — |
-| tests | `cargo nextest`, `proptest`, `approx`, `criterion` | — | — | — |
+| linear algebra | `nalgebra` 0.34.2 | f64 poses, 6×6 LDLT, 3×3 SVD (Umeyama), the 3×3 symmetric eigen of R §3.2's OBB fallback | 0.33 → 0.34.2 (current at S1) | — |
+| small vectors in hot loops | own `Vec3f` (`#[repr(C)]`, `bytemuck` 1.25.2 `Pod`) | identical layout on CPU and GPU buffers | — | — |
+| parallelism | `rayon` 1.12.0 | fragments, pairs, candidates, per-face loops | 1.10 → 1.12.0 | — |
+| RNG | `rand_chacha` 0.10.0 (`ChaCha8Rng::seed_from_u64`) | portable, versioned stream guarantee across platforms | 0.9 → 0.10.0 | not numpy-compatible (PMC-9) |
+| BVH: rays, closest point, inside | `parry3d` 0.30.2, feature `enhanced-determinism`, `TriMesh` **without** `TriMeshFlags::ORIENTED` | R §3.2's rays, R §3.4.3's cone, R §6.1's closest point, R §6.4's inside test; also the convex hull of R §3.2's OBB fallback | **the own flattened BVH was dropped.** E3/E4 measured parry against Open3D's `RaycastingScene` and it passed, saving ≈ 1.5 weeks; the `ORIENTED` flag is off because its pseudo-normals are wrong on decimated fracture surfaces (29 of 30 000 points on one closed fragment), so the inside test is ray parity only | E3/E4 |
+| KD-tree and radius-bounded NN | `kiddo` 6.2.0 (`ImmutableKdTree<f32, 3>`) | seam and continuity tests, `near`, `d_brk`, margin, and ICP correspondences | **the own hash grid was dropped for the CPU**: E3 measured kiddo's bounded queries fast enough, so there is one structure to maintain instead of two. The GPU executor still wants a grid, and it arrives with it. kiddo's MSRV is what sets `rust-version = "1.89"` | E3 |
+| quadric decimation | `meshopt` 0.6.2, `SimplifyOptions::Regularize` | fast, topology-preserving, cross-platform, and it never moves a vertex — the readers' f64 coordinates survive decimation exactly | 0.4 → 0.6.2, and **`baby_shark` was dropped**: E1 measured meshopt 20× faster (1.73 s against 34.70 s) and inside every gate, but *only* with `Regularize` — plain meshopt misses the `res` gate on 13 of 14 meshes | E1 |
+| mesh read | `ply-rs-bw` 4.0.1 (PLY), `tobj` 4.0.5 (OBJ), `stl_io` 0.11.0 (STL), `gltf` 1.4.1 `default-features = false, features = ["utils"]` (GLB), own ~40-line OFF reader | PLY is the main format and needs colours and speed; the rest are the benchmark's | **no own PLY parser**: E2 measured `ply-rs-bw` bit-identical to Open3D on all eleven PLY variants and 0.057 s on a 25 MB scan. OFF has no crate at all, so that one is ours. `gltf`'s `import` feature is off: 36 → 17 transitive crates | E2 |
+| mesh write | own PLY writer (binary LE, `uchar` RGB) | R §11.4's files must match Open3D's byte for byte, and they do | `gltf-json` is not in the workspace: GLB export is D §9 and arrives with the desktop app | E2 |
+| cache | `safetensors` 0.8.0 | mmap-friendly, JSON header, readable from Python | 0.4 → 0.8.0. Its metadata is a `HashMap` serialised in iteration order, which is why §4.2's metadata is one JSON object under one key | — |
+| fixtures | `npyz` 0.9.1 (read `.npy`), `serde` 1.0.229, `serde_json` 1.0.151 **with `float_roundtrip`** | Python writes `.npy` and JSON scalars; no zip needed | `float_roundtrip` is mandatory, not a preference: without it serde_json's fast float path misrounds `29.864871978759766` by one ULP, which is the whole difference between a fixture scalar and the float32 it was written from | — |
+| fixture checksums | `sha2` 0.11.0 | `--verify-checksums` re-hashes a dump against its manifest | added in S1; not in the original table | — |
+| images | `image` 0.25.10, `default-features = false, features = ["png"]` + an embedded 5×7 bitmap font | preview PNGs without a font stack | — | — |
+| CLI / logging / errors | `clap` 4.6.6 (`derive`), `tracing` 0.1.44, `tracing-subscriber` 0.3.23 (`env-filter`), `anyhow` 1.0.104, `thiserror` 2.0.20 | — | thiserror 1 → 2 | — |
+| tests | `proptest` 1.11.0, `approx` 0.5.1, `cargo nextest` in CI | — | `criterion` is not in the workspace: the benchmark harness is phase 1e | — |
+| GPU | `wgpu` 24 (pin the minor), `bytemuck`, `pollster` | Metal/Vulkan/DX12 from one WGSL source | **not in the workspace yet** — `sherd-gpu` is phase 2a. E7/E8 measured the feasibility, not the pin | E7, E8 |
+| Python bindings | `pyo3` 0.23 + `numpy` 0.23, `maturin` | transition and the parity harness | **not in the workspace yet** — `sherd-py` is phase 3a | — |
+| desktop | `tauri` 2 | later | **not in the workspace yet** | — |
+
+Workspace-wide settings that are part of the contract rather than taste: `edition = "2024"`,
+`resolver = "3"`, `rust-version = "1.89"` (kiddo's MSRV, and `rust-toolchain.toml` pins 1.97.0),
+`Cargo.lock` committed, `unsafe_code = "deny"` with a per-module `allow` and a reason,
+`clippy::todo` / `unimplemented` / `dbg_macro` denied so a port of a frozen algorithm cannot ship a
+hole, `lto = "thin"` and `codegen-units = 1` in release, and `opt-level = 2` for dependencies in
+debug builds because the tests run on real scans.
 
 Experiments (each is a small Rust or Python script, run before the phase that depends on it):
 
@@ -128,7 +140,9 @@ pub struct SourceRef { path: PathBuf, size: u64, mtime_ns: i128, sha256: Option<
 pub struct WorkingMesh { v: Vec<Vec3f>, f: Vec<[u32;3]>, fn_: Vec<Vec3f>, area: Vec<f32>, centroid: Vec<Vec3f>, res: f32 }
 pub struct Fragment {
     id: FragId, name: String, source: SourceRef,
-    thick: f32, thick_mode: f32, watertight: bool, n_boundary: u32, n_orig_vertices: u32, n_orig_faces: u32, target_faces: u32,
+    thick: f64, thick_mode: f64,           // f64, not f32 -- see below
+    watertight: bool, n_boundary: u32, n_orig_vertices: u32, n_orig_faces: u32, target_faces: u32,
+    face_budget: u32, area0: f64,          // R§3.3's budget and its numerator; the fixtures carry both
     mesh: WorkingMesh, labels: Vec<FaceLabel>,
     md: Option<MatchArrays>,               // built at `thick`
     features: Features,                    // roadmap items 4 and 6, §11
@@ -154,15 +168,56 @@ pub struct RunOptions { target_faces: u32, threads: Option<usize>, backend: Back
 `Scores` is a struct, not a map: the report writer serialises it to the same JSON keys as the
 Python (`R§6.5`), including the optional ones only when set.
 
+Three notes on the types above, all of them things the implementation settled and this document
+was corrected to follow (phase-1a verification, finding F11):
+
+* **`thick` and `thick_mode` are `f64`**, though the ray estimate is an `f32` value that an `f64`
+  holds exactly. `t` is the unit of every threshold in R §1.2 and every `k·t` is computed in
+  `f64`, and R §3.2's OBB fallback is a genuine `f64`; the wider type is the strict superset and
+  costs nothing (the cache carries them as text either way).
+* **`face_budget` and `area0` are part of the struct**, because the fixture sink dumps
+  `thick.target` as `{target, area0, faces0, target_faces}` and the parity harness compares the
+  first two directly.
+* **`WorkingMesh` is `f32`** — `v`, and `res` with it — and `fn_`, `area` and `centroid` are
+  derived from the *narrowed* vertices, not from the `f64` ones they came from. That is what makes
+  a cold run and a cache hit bit-identical, since the cache stores `V`, `F` and `res` and both
+  paths must derive the rest the same way. Everything upstream of the narrowing — the readers,
+  cleaning, decimation, Taubin, `face_geometry`, `median_edge`, `ΣA` — is `f64`, which is what
+  makes the injected parity comparisons exact. R §0 says the reference is `f64` throughout, so
+  this is a deviation from it and R §12 carries it as **PMC-15**; the ≈6e-8 relative error enters
+  every R §1.2 threshold and every ICP residual, and the native working-mesh row of §10.2 is what
+  measures it.
+
 ### 4.2 Fragment cache: `<out>/cache/<name>.sherd`
 
 A `safetensors` file. Tensors (all little-endian): `V f32[n,3]`, `F u32[m,3]`, `labels u8[m]`,
 `S f32[20000,3]`, `sp u32`, `Pf f32`, `fp u32`, `brk_P/brk_ns/brk_nf/brk_f f32[k,3]`,
-`brk_sub u32`, `margin_idx u32`, optional `features/*`. Metadata (string map): `format=sherd-cache`,
-`cache_version=1`, `algo_ref=2026-09-06/9d4b9d3`, `core_version`, `name`, `source_path`,
-`source_size`, `source_mtime_ns`, `source_sha256` (optional), `target_faces`, `thick`,
-`thick_mode`, `res`, `watertight`, `n_boundary`, `n_orig_vertices`, `n_orig_faces`,
-`md_params` (JSON), `features` (JSON), `created`, `backend`.
+`brk_sub u32`, `margin_idx u32`, optional `features/*`. Phase 1a writes `V` and `F`; each later
+stage adds its own tensors beside them, and neither the reader nor `cache_version` minds — the
+version moves when the *set* changes meaning, not when a tensor is added.
+
+Metadata: `format=sherd-cache`, `cache_version`, `algo_ref`, `core_version`, `name`,
+`source_path`, `source_size`, `source_mtime_ns`, `source_sha256` (optional), `target_faces`,
+`face_budget`, `area0`, `thick`, `thick_mode`, `res`, `watertight`, `n_boundary`,
+`n_orig_vertices`, `n_orig_faces`, `md_params` (JSON), `features` (JSON), `backend`.
+
+**Two corrections the implementation forced, and this document follows it** (phase-1a
+verification, finding F11):
+
+* **the metadata is one key, not a flat map.** `safetensors` 0.8 takes the `__metadata__` block as
+  a `HashMap<String, String>` and serialises it in iteration order, and that order is randomised
+  per map instance — the same twenty-key map serialised four times inside one process gave four
+  different headers. A cache written twice from the same input would then differ byte for byte,
+  which is the one thing it must not do. So the whole block travels as a single JSON object under
+  the key `sherd`, written by `serde_json`, which emits a struct's fields in declaration order.
+  The field names inside it are the ones listed above, unchanged, and
+  `safe_open(...).metadata()["sherd"]` is one `json.loads` away from the map this section
+  originally described.
+* **`created` is not written.** A timestamp makes two runs of the same input produce different
+  files, which defeats the same requirement. The provenance that matters is
+  `algo_ref` / `core_version` / `cache_version`, all three of which are there.
+
+`face_budget` and `area0` are additions to the original list, for the reason §4.1 gives.
 
 Validity rule = the reference's (`R§3.7`) with `cache_version` and `algo_ref` in place of
 `CACHE_VERSION`; a mismatch of `md_params` alone recomputes only the match arrays. Loading is an
@@ -487,7 +542,7 @@ by its nearest face on each mesh.
 | stage | quantity | injected tolerance | native tolerance |
 |---|---|---|---|
 | load | counts after cleaning, largest component | exact | exact |
-| thickness | `t`, `thick_mode` | same bin, or ±1 bin on a count tie | ±2 % |
+| thickness | `t`, `thick_mode` | same bin, or ±1 bin on a count tie | `max(2 %, 3 bins of the reference's own histogram)` |
 | working mesh | faces, `res`, area, `watertight` | (mesh is injected) | faces ±5 %, `res` ±10 %, area ±0.5 %, same `watertight` |
 | segmentation | area-weighted label agreement; fracture fraction | ≥ 0.995; ±0.005 | ≥ 0.97; ±0.02 |
 | breakline | count; point-set Hausdorff; `dih` per matched point | exact; 1e-4 t; 0.1° | ±10 %; 0.5 t on 99 %; distribution KS < 0.05 |
@@ -501,6 +556,27 @@ by its nearest face on each mesh.
 | outputs | `transforms.json` poses; `report.json` keys | as refine; schema | as refine; schema |
 
 The tool exits non-zero on any violation and prints a per-stage table.
+
+**The native thickness row was ±2 % until the phase-1a verification (finding F1), and it is
+widened on the evidence, not for convenience.** R §3.2's `t` is the mode of a histogram over 20 000
+sampled rays; PMC-9 lets the port draw that sample from `ChaCha8Rng` instead of numpy's PCG64, so
+in native mode the two implementations evaluate the *same estimator on different samples*. Running
+the reference's own `estimate_thickness` with seeds 0–11 and nothing else changed moves `t` by up
+to 6.8 % of the seed-0 value (`Pot_A_Piece_04_Mesh`: 3.554 at seed 0, 3.774–3.795 at seeds 1–11)
+and by 5.8 % on `frag_019` — and those are exactly the two fragments on which the port was outside
+±2 %, with the port's value nearer the estimator's centre than the reference's. A gate of ±2 % is
+therefore unreachable by anything that does not reproduce PCG64, and it was rejecting the port for
+being right. One bin is `percentile(far, 90) / 60` over R §3.2's filtered distances, computed from
+the reference's own rays in the dump, and is 1.7–5.7 % of `t` on the benchmark; the widened gate is
+5.1–17.0 % there and never narrows below the original 2 %. 17 of the 136 native thickness
+comparisons need it. The injected row is untouched and is met bit-exactly.
+
+**And the consequence has to travel.** `t` is the unit of every threshold in R §1.2, so a fragment
+whose `t` differs by 6.6 % has `coarse`, `stage1`, `tight`, `facing`, `gap`, `seam`, `near`, `pen`
+and `nms` shifted by 6.6 % for every pair it takes part in. No row of this table can absorb that:
+it lands on R §13's pair gates, which are exact-set gates. It belongs on the phase-1b/1c risk
+list, and it is the strongest argument for E6 (replicating PCG64, ≈ 2 days) if those gates ever
+fail for this reason.
 
 ### 10.3 Benchmark gates
 

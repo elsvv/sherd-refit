@@ -157,11 +157,26 @@ thick_mode = raw
 hist_mode(x): 60 equal bins on [0, percentile(x, 90)]; value = centre of the first bin with the maximal count
 ```
 
-Fallback when `t` is None or ≤ 0: `t = min(extent of the PCA oriented bounding box) / 10`.
+Fallback when `t` is None or ≤ 0: `t = min(extent of the PCA oriented bounding box) / 10`, where
+the OBB is Open3D's `get_oriented_bounding_box()` = `OrientedBoundingBox::CreateFromPoints`: the
+**convex hull** of the vertices, a PCA over the *hull's* vertices, and the extents of the points
+along those three axes. Running the PCA over every vertex instead is a different box, and not by a
+little: measured against Open3D 0.19, `min(extent)` comes out 3.0 % low on `fixtures/slab`'s
+`pieceA`, 8.1 % low on `pieceB` and 8.8 % high on a terracotta scan (finding F6). Since `t` is the
+unit of every threshold in §1.2, that error would move all of them.
 If `thick_mode` is unavailable it is set to `t`. (`thick_mode > 1.15·t` only produces a log line.)
 
 `face_geometry`: `n = (V[F1]−V[F0]) × (V[F2]−V[F0])`; `FN = n/max(|n|, 1e-12)`; `A = |n|/2`;
 `C = mean of the three vertices`.
+
+**`t` is a sampled estimate, and its own spread is larger than one might assume.** Re-running the
+reference's `estimate_thickness` with seeds 0–11 and nothing else changed moves it by up to 6.8 %
+of the seed-0 value on `Pot_A_Piece_04_Mesh` (3.554 at seed 0 against 3.774–3.795 at seeds 1–11)
+and 5.8 % on `frag_019`, because a fragment whose filtered distances form a plateau rather than a
+peak puts several near-equal bins in contention and `argmax` picks by a count that a different
+sample reorders. Any implementation that does not reproduce numpy's PCG64 stream — which PMC-9
+allows the port not to — draws a *different sample of the same estimator*, and the difference it
+must be allowed is this spread, not zero. D §10.2's native tolerance is set from it.
 
 ### 3.3 Working mesh
 
@@ -184,12 +199,26 @@ scene = raycasting scene over (V, F) in float32     # used by §3.4 and §6.4
 (boundary vertices included) to
 
 ```
-v' = v + s · ( Σ_j w_j v_j / Σ_j w_j − v ),   w_j = 1 / |v − v_j|,  j over the vertex's edge neighbours
+v' = v + s · ( Σ_j w_j v_j / Σ_j w_j − v ),   w_j = 1 / (|v − v_j| + 1e-12),  j over the vertex's edge neighbours
 ```
 
-using the positions from before the step (Jacobi, not Gauss–Seidel). Vertex normals/colours are
-smoothed the same way but are not used downstream. **PMC-3:** the port may use uniform weights
-only if re-verified; inverse-distance weights are what the reference uses.
+using the positions from before the step (Jacobi, not Gauss–Seidel). The `1e-12` is Open3D's, not
+a rounding of the formula: `FilterSmoothLaplacianHelper` computes `weight = 1. / (dist + 1e-12)`,
+so a coincident neighbour gives a weight of 1e12 rather than an infinity, and every other weight is
+a hair below `1/|v − v_j|`. It was missing from this document until the phase-1a verification
+(finding F4) and it is *not* a PMC item: the port reproduces it, and the injected Taubin check
+lands within 1.7e-12 of one edge length of Open3D's own mesh.
+
+Open3D smooths the vertex normals and vertex colours by the same recurrence. **The Rust port does
+not** (finding F8), which is consistent with this section — they are not used downstream, R §11.4
+writes the *cleaned original* mesh rather than the working mesh, and the segmentation of §3.4 uses
+face normals recomputed from the smoothed positions. The one consequence to state out loud: the
+port's cached working mesh therefore carries **unsmoothed** vertex colours where the reference's
+carries smoothed ones. Nothing in R reads them; anything later that writes the *working* mesh with
+colour would have to.
+
+**PMC-3:** the port may use uniform weights only if re-verified; inverse-distance weights are what
+the reference uses.
 
 **3.3.2 `closed_enough`.** Count the unique undirected edges of `F` and how many of them are used
 by a number of faces ≠ 2 (`n_boundary`, which also counts non-manifold edges). `watertight =
@@ -789,6 +818,7 @@ Not part of the contract. `timings` keys are listed in §11.2.
 | PMC-12 | fracture distances computed for all samples | direct | bounded closest-point query with early exit at `sc.facing` (exact for points inside the window; `≥ facing` otherwise); `contact` needs `d < 2·tight` which lies inside the window | identical scores |
 | PMC-13 | mesh orientation assumed outward | data | check signed volume and flip if negative | none on current data (all outward) |
 | PMC-14 | `tree_frac` built and never used | dead code | drop | — |
+| PMC-15 | working mesh, `res` and everything derived from them in float64 (§0) | numpy | store `V` and `res` as **float32** and derive `FN`, `A`, `C` from the *narrowed* vertices, so a cold run and a cache hit are bit-identical (D §4.1, D §7); everything up to the narrowing — Taubin, `face_geometry`, `median_edge`, `ΣA` — stays float64 | working-mesh row of D §10.2 in native mode (`res` ±10 %, area ±0.5 %); the ≈6e-8 relative error enters every §1.2 threshold and every ICP residual, so the pair gates of §13 are the real check |
 
 ---
 
@@ -809,7 +839,13 @@ Numbers the port must reproduce on the benchmark sets, with the defaults above (
 | all sets | cross-object joins 0; group purity 1.000 |
 
 Per-stage numeric tolerances for the fixture harness are defined in the port design
-(`2026-09-06-rust-core-design.md`, §10.2).
+(`2026-09-06-rust-core-design.md`, §10.2). One of them is not a rounding allowance but a property
+of the algorithm: the native tolerance on `t` is `max(2 %, 3 bins of the reference's own
+histogram)`, because §3.2's estimator moves by up to 6.8 % under a change of seed alone. The
+consequence travels — a fragment whose `t` differs by 6.6 % has every threshold of §1.2 shifted by
+6.6 % for every pair it takes part in — and the gates in the table above are exact-set gates that
+cannot be widened to absorb it. That is a risk to carry into the pair stages, not a tolerance to
+add there.
 
 Measured cost structure of the reference (M2 Pro, single thread, one mid-size `mixed_all` pair,
 42k/26k faces, scale-pairs note §3.1): stage-2 coarse ICPs 2.84 s (41 %), stage-2 fine ICPs

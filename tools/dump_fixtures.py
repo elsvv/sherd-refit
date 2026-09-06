@@ -49,6 +49,22 @@ def build_params(overrides: list[str]):
     return Params(**kw)
 
 
+def tree_is_dirty(repo: str, out_dir: str) -> bool:
+    """True when the repository has changes that are not the dump being written.
+
+    The dump's own directory is excluded.  It used to be enough that `--untracked-files=no` hid it,
+    which held while `fixtures/slab/dump` was untracked; once it was committed, re-dumping it made
+    every manifest written afterwards -- its own included -- say `dirty: true` and the fixture could
+    never be regenerated from a "clean" tree again.  A path outside the repository (a temporary
+    directory) needs no exclusion and gets none.
+    """
+    args = ["status", "--porcelain", "--untracked-files=no"]
+    rel = os.path.relpath(os.path.abspath(out_dir), repo)
+    if not rel.startswith(os.pardir) and not os.path.isabs(rel):
+        args += ["--", ".", ":(exclude)" + rel.replace(os.sep, "/")]
+    return bool(_git(*args, repo=repo))
+
+
 def dir_size(path: str) -> int:
     total = 0
     for base, _, names in os.walk(path):
@@ -85,7 +101,7 @@ def dump(input_dir: str, out_dir: str, level: str = "full", target_faces: int = 
     import scipy
     extra = dict(
         commit=_git("rev-parse", "HEAD", repo=repo),
-        dirty=bool(_git("status", "--porcelain", "--untracked-files=no", repo=repo)),
+        dirty=tree_is_dirty(repo, out_dir),
         level=level,
         python=platform.python_version(),
         numpy=numpy.__version__, scipy=scipy.__version__, open3d=open3d.__version__,

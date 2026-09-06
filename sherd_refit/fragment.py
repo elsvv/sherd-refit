@@ -497,7 +497,8 @@ def match_arrays(fr: Fragment, t: float, **kw) -> dict:
     rng = np.random.default_rng(p["seed"])
     V, F, frac, FN, A, C = fr.V, fr.F, fr.frac, fr.FN, fr.A, fr.C
     # Whole-surface samples: the penetration test and the shell margin live on these.
-    S, sp = sample_on_faces(V, F, A, np.ones(len(F), bool), p["surface_points"], rng)
+    dump_uv = fixture.want("md")
+    S, sp, *S_uv = sample_on_faces(V, F, A, np.ones(len(F), bool), p["surface_points"], rng, dump_uv)
     # so that a big sherd and a small one are described equally finely.  Since `tight` and
     # `gap` are measured against the other fragment's triangles rather than against its
     # samples, the count no longer sets a floor under them: at a fixed pose the scores are flat
@@ -509,7 +510,7 @@ def match_arrays(fr: Fragment, t: float, **kw) -> dict:
     # points and matching runs 45 % to 226 % longer per pot; at 12k it is within 30 % of what
     # the flat 30 000-sample scheme cost, with the same result.
     n_frac = int(np.clip(p["frac_per_t2"] * float(A[frac].sum()) / t ** 2, p["min_frac_points"], p["max_frac_points"]))
-    Pf, fp = sample_on_faces(V, F, A, frac, n_frac, rng)
+    Pf, fp, *Pf_uv = sample_on_faces(V, F, A, frac, n_frac, rng, dump_uv)
     # breakline points: midpoints of edges between shell and fracture faces
     fa, fb, ke = face_adjacency(F)
     cross = frac[fa] != frac[fb]
@@ -550,6 +551,12 @@ def match_arrays(fr: Fragment, t: float, **kw) -> dict:
         for k in MD_ARRAYS:
             fixture.put("md." + k, out[k], "md")
         fixture.put("md.params", p, "md")
+        # the uniforms behind each sample, before the fold: what makes `sample_on_faces` itself
+        # injectable rather than only its counts and its face indices (defect D6)
+        for key, uv in (("S", S_uv), ("Pf", Pf_uv)):
+            if len(uv) == 2:
+                fixture.put("md." + key + "_u", uv[0], "md")
+                fixture.put("md." + key + "_v", uv[1], "md")
         fixture.put("md.brk_t", np.cross(ns, f), "md")
         fixture.put("md.brk_dih", np.degrees(np.arccos(np.clip(np.einsum("ij,ij->i", ns, nf), -1, 1))), "md")
         fixture.put("md.valid", valid, "md")

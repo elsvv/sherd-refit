@@ -116,18 +116,27 @@ def drop_small_components(mask: np.ndarray, target: bool, min_area: float, fa, f
     return out
 
 
-def sample_on_faces(V, F, A, mask, n, rng):
-    """Area-weighted random surface samples on the faces selected by mask; returns points and face ids."""
+def sample_on_faces(V, F, A, mask, n, rng, return_uv: bool = False):
+    """Area-weighted random surface samples on the faces selected by mask; returns points and face ids.
+
+    With `return_uv` the two uniforms behind each sample are returned as well, *before* the
+    `u + v > 1` fold, which is what the parity fixture dumps so that a port's own version of this
+    function can be compared against these points exactly rather than only statistically (defect D6
+    of the phase-1b verification).  Nothing about the draw changes: the generator is consumed in
+    the same order either way.
+    """
     idx = np.where(mask)[0]
     if len(idx) == 0 or n == 0:
-        return np.zeros((0, 3)), np.zeros(0, int)
+        empty = (np.zeros((0, 3)), np.zeros(0, int))
+        return (*empty, np.zeros(0), np.zeros(0)) if return_uv else empty
     p = A[idx] / A[idx].sum()
     pick = idx[rng.choice(len(idx), n, p=p)]
     u, v = rng.random(n), rng.random(n)
+    raw = (u.copy(), v.copy()) if return_uv else ()
     sw = u + v > 1
     u[sw], v[sw] = 1 - u[sw], 1 - v[sw]
     P = V[F[pick, 0]] + u[:, None] * (V[F[pick, 1]] - V[F[pick, 0]]) + v[:, None] * (V[F[pick, 2]] - V[F[pick, 0]])
-    return P, pick
+    return (P, pick, *raw) if return_uv else (P, pick)
 
 
 def apply_transform(T: np.ndarray, P: np.ndarray):

@@ -193,6 +193,78 @@ def test_pieces_are_complementary_closed_meshes(pair):
     assert 20000 <= pair["pieceB"]["n_faces"] <= 80000
 
 
+@pytest.mark.parametrize("name", ("pieceA", "pieceB"))
+def test_thickness_does_not_depend_on_a_seed(pair, frags, name):
+    """R §3.2 casts a ray from every face (or from a fixed stride subset), so nothing about the
+    estimate is drawn.  Five seeds through `from_mesh_file` must give the identical float, and the
+    estimator called twice on the same mesh must give the identical float as well.
+
+    This is the whole point of the change: the estimator used to sample 20 000 faces with
+    `default_rng(0)`, and `t` moved by up to 6.8 % between seeds on the benchmark fragments while
+    `t` is the unit of every threshold in `Scales`.
+    """
+    path = pair[name]["path"]
+    base = frags[name]
+    for seed in range(5):
+        fr = Fragment.from_mesh_file(path, seed=seed)
+        assert fr.thick == base.thick, f"seed {seed} moved t to {fr.thick} from {base.thick}"
+        assert fr.thick_mode == base.thick_mode
+        assert fr.res == base.res
+        assert len(fr.F) == len(base.F)
+
+
+def test_the_thickness_ray_set_is_every_face_or_a_fixed_stride():
+    """`idx = arange(0, n_faces, max(1, ceil(n_faces / THICK_FACES)))`, which the Rust port has to
+    reproduce index for index (the parity harness feeds it this array out of the fixture)."""
+    from sherd_refit.fragment import THICK_FACES, estimate_thickness
+
+    seen = {}
+
+    class FakeScene:
+        def cast_rays(self, rays):
+            n = len(rays.numpy())
+            seen["n"] = n
+            inf = np.full(n, np.inf, dtype=np.float32)
+            miss = np.full(n, np.uint32(0xFFFFFFFF), dtype=np.uint32)
+            return {"t_hit": o3d.core.Tensor(inf), "primitive_ids": o3d.core.Tensor(miss)}
+
+    for n_faces, expected in ((5, 5), (THICK_FACES, THICK_FACES), (THICK_FACES + 1, 150001)):
+        C = np.zeros((n_faces, 3)); FN = np.tile([0.0, 0.0, 1.0], (n_faces, 1))
+        assert estimate_thickness(FakeScene(), C, FN) == (None, None)   # every ray misses
+        assert seen["n"] == expected, f"{n_faces} faces cast {seen['n']} rays, expected {expected}"
+        assert seen["n"] <= THICK_FACES
+
+
+def test_the_sample_uniforms_are_returned_unfolded_and_change_nothing(pair, frags):
+    """`sample_on_faces(..., return_uv=True)` hands back the two uniforms *before* the fold, which
+    is what the parity fixture dumps (`md.S_u`, `md.S_v`) so that a port's own barycentric
+    construction can be compared against these points exactly.  The points and the face ids must be
+    the ones the same call produces without it."""
+    from sherd_refit.geometry import sample_on_faces
+
+    fr = frags["pieceA"]
+    mask = np.ones(len(fr.F), bool)
+    P, pick = sample_on_faces(fr.V, fr.F, fr.A, mask, 500, np.random.default_rng(3))
+    P2, pick2, u, v = sample_on_faces(fr.V, fr.F, fr.A, mask, 500, np.random.default_rng(3), True)
+    assert np.array_equal(P, P2) and np.array_equal(pick, pick2)
+    assert u.shape == (500,) and v.shape == (500,)
+    assert ((0 <= u) & (u < 1)).all() and ((0 <= v) & (v < 1)).all()
+    assert (u + v > 1).any(), "some draws must need the fold, or the fold is untested"
+
+    # The points are exactly what the fold and the barycentric expression give from these uniforms.
+    uu, vv = u.copy(), v.copy()
+    sw = uu + vv > 1
+    uu[sw], vv[sw] = 1 - uu[sw], 1 - vv[sw]
+    rebuilt = (fr.V[fr.F[pick, 0]] + uu[:, None] * (fr.V[fr.F[pick, 1]] - fr.V[fr.F[pick, 0]])
+               + vv[:, None] * (fr.V[fr.F[pick, 2]] - fr.V[fr.F[pick, 0]]))
+    assert np.array_equal(rebuilt, P)
+
+    # An empty selection still answers with four arrays.
+    empty = sample_on_faces(fr.V, fr.F, fr.A, np.zeros(len(fr.F), bool), 10,
+                            np.random.default_rng(0), True)
+    assert len(empty) == 4 and all(len(a) == 0 for a in empty)
+
+
 @pytest.mark.parametrize("name", ["pieceA", "pieceB"])
 def test_segmentation_finds_the_fracture_surface(pair, frags, name):
     fr = frags[name]

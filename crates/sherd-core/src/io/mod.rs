@@ -16,6 +16,11 @@
 //! nowhere else (R §3.1), every reader's source is either a byte already or is quantised the same
 //! way by Open3D on the way out, and R §11.4's writer emits `uchar` — so the bytes this port
 //! writes are the bytes the reference writes, and a mesh costs 3 bytes a vertex instead of 24.
+//!
+//! All four readers go through [`quantize_color`] and nothing else does the arithmetic itself:
+//! PLY hands it the number the file spells, OBJ and GLB the `[0, 1]` float scaled by 255. The rule
+//! it applies was measured against Open3D 0.19 rather than assumed (finding F7 of the phase-1a
+//! verification); the GLB path used to use `gltf`'s own `into_rgba_u8()`, which truncates.
 
 pub mod glb;
 pub mod obj;
@@ -119,17 +124,30 @@ pub fn load_mesh(path: impl AsRef<Path>) -> Result<Mesh> {
 /// Open3D's own colour quantisation, applied once at read time.
 ///
 /// Open3D stores a colour as a double in `[0, 1]` and writes it as
-/// `min(255, max(0, c·255))` rounded to the nearest byte, halves up — measured against Open3D
-/// 0.19, including the `k + 0.5` boundaries and both clamps. Its readers divide whatever the file
-/// declares by 255 (a `float` colour property is *not* treated as `[0, 1]`), so `raw` here is the
-/// number as the file spells it and the round trip through Open3D is the identity on `0..=255`.
+/// `round(min(255, max(0, c·255)))` — C's `round`, i.e. halves away from zero, which on a
+/// non-negative value is halves up. Its readers divide whatever the file declares by 255 (a
+/// `float` colour property is *not* treated as `[0, 1]`), so `raw` here is the number as the file
+/// spells it and the round trip through Open3D is the identity on `0..=255`.
+///
+/// **Measured, not assumed** (finding F7 of the phase-1a verification, re-checked against Open3D
+/// 0.19 on this machine): a mesh carrying the colours `k/255` for `k = 0.5, 1.5, 2.5, 127.5,
+/// 128.5, 254.5` and the out-of-range `1.2` and `−0.1`, written with
+/// `write_triangle_mesh(..., write_ascii=False)`, comes back as the bytes 1, 2, 3, 128, 128,
+/// 254(*), 255, 0. Every half lands *up*, so the writer is not truncating and it is not rounding
+/// half to even; the two out-of-range values confirm both clamps. (*) 254.5/255 is not exactly
+/// representable and reaches the writer as 254.4999999, which rounds down — that is the
+/// arithmetic, not the rule.
+///
+/// `round` and `floor(x + 0.5)` differ on the doubles immediately below a half-integer (at
+/// `x = 0.49999999999999994`, `x + 0.5` rounds *up* to 1.0 and the floor is then 1, while `round`
+/// gives 0). `round` is what Open3D calls, so it is what this does.
 #[inline]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to 0..=255")]
 pub fn quantize_color(raw: f64) -> u8 {
     if raw.is_nan() {
         return 0;
     }
-    (raw.clamp(0.0, 255.0) + 0.5).floor() as u8
+    raw.clamp(0.0, 255.0).round() as u8
 }
 
 #[cfg(test)]
@@ -176,5 +194,17 @@ mod tests {
         assert_eq!(quantize_color(300.0), 255);
         assert_eq!(quantize_color(254.5), 255);
         assert_eq!(quantize_color(f64::NAN), 0);
+    }
+
+    /// The one input on which `round` and `floor(x + 0.5)` disagree: at the largest double below
+    /// a half, `x + 0.5` rounds *up* to the next integer and its floor is 1 too high. Open3D calls
+    /// `round`, so this must too (finding F7).
+    #[test]
+    #[allow(clippy::float_cmp, reason = "the point of the test is an exact float identity")]
+    fn a_hair_below_a_half_rounds_down() {
+        let just_under = 0.5_f64.next_down();
+        assert!(just_under + 0.5 == 1.0, "the addition is what rounds up");
+        assert_eq!(quantize_color(just_under), 0);
+        assert_eq!(quantize_color(0.5), 1);
     }
 }

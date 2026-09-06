@@ -12,8 +12,16 @@
 //!   its children reproduces it exactly.
 //!
 //! The transform arithmetic is `f32`, as it is in glTF and in Assimp (so in Open3D). `COLOR_0` is
-//! taken through `read_colors(0).into_rgba_u8()`, which E2 measured exact against Open3D for
-//! colours stored as normalised `u8` and as `f32`.
+//! taken through `read_colors(0).into_rgba_f32()` and quantised by
+//! [`quantize_color`](super::quantize_color), the one rule every reader in this module shares.
+//!
+//! **Not `into_rgba_u8()`** (finding F7 of the phase-1a verification): `gltf`'s
+//! `Normalize<u8> for f32` is `(self.max(0.0) * 255.0) as u8`, a *truncation*, where Open3D
+//! rounds. The two agree for as long as every float colour is exactly `k/255` — which is what an
+//! exporter writes when it converts from bytes, and which is why E2 measured the `u8` path exact —
+//! but a genuine float colour parts them: 0.3 truncates to 76 and rounds to 77. Going through
+//! `f32` and quantising here also rescales a `u16` `COLOR_0` by `255/65535` instead of
+//! `gltf`'s `>> 8`.
 //!
 //! Filled in by plan step S2.
 
@@ -22,6 +30,7 @@ use std::path::Path;
 use gltf::mesh::Mode;
 
 use crate::error::{Error, Result};
+use crate::io::quantize_color;
 use crate::mesh::Mesh;
 
 /// Reads a binary glTF file.
@@ -103,8 +112,12 @@ fn add_primitive(
     if let Some(colors) = reader.read_colors(0) {
         let list = out.colors.get_or_insert_with(|| vec![[255_u8; 3]; first_new]);
         list.resize(first_new, [255_u8; 3]);
-        for c in colors.into_rgba_u8() {
-            list.push([c[0], c[1], c[2]]);
+        for c in colors.into_rgba_f32() {
+            list.push([
+                quantize_color(f64::from(c[0]) * 255.0),
+                quantize_color(f64::from(c[1]) * 255.0),
+                quantize_color(f64::from(c[2]) * 255.0),
+            ]);
         }
         list.resize(out.v.len(), [255_u8; 3]);
         *colored = true;
@@ -170,6 +183,85 @@ mod tests {
     fn the_identity_leaves_a_point_alone() {
         assert_eq!(transform(IDENTITY, [1.0, 2.0, 3.0]), [1.0, 2.0, 3.0]);
         assert_eq!(mul(IDENTITY, IDENTITY), IDENTITY);
+    }
+
+    /// A GLB whose `COLOR_0` is `f32`, quantised the way Open3D writes a colour.
+    ///
+    /// Finding F7 of the phase-1a verification: `gltf`'s own `into_rgba_u8()` truncates
+    /// (`(x * 255.0) as u8`), so this file used to read as 76 / 127 / 2. The bytes asserted here
+    /// are what [`quantize_color`](super::super::quantize_color) — and therefore Open3D's writer —
+    /// produces from the same three floats.
+    #[test]
+    fn float_colours_in_color_0_round_rather_than_truncate() {
+        let dir = std::env::temp_dir().join("sherd-core-glb-float-colours");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("c.glb");
+        std::fs::write(&path, minimal_glb(&[0.3, 0.5, 2.5 / 255.0]))
+            .expect("the fixture is written");
+        let m = super::read(&path).expect("the file reads");
+        assert_eq!(m.n_vertices(), 3);
+        assert_eq!(m.f, vec![[0, 1, 2]]);
+        assert_eq!(m.colors, Some(vec![[77; 3], [128; 3], [3; 3]]));
+    }
+
+    /// One triangle, one `POSITION`, one `f32` `COLOR_0`, one `u16` index buffer — the smallest
+    /// self-contained GLB that exercises the colour path.
+    fn minimal_glb(colors: &[f32; 3]) -> Vec<u8> {
+        let positions: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let mut bin = Vec::new();
+        for p in positions {
+            for c in p {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        for c in colors {
+            for _ in 0..3 {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        let colors_offset = 36;
+        let indices_offset = bin.len();
+        for i in 0_u16..3 {
+            bin.extend_from_slice(&i.to_le_bytes());
+        }
+        while bin.len() % 4 != 0 {
+            bin.push(0);
+        }
+        let json = format!(
+            concat!(
+                r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"#,
+                r#""nodes":[{{"mesh":0}}],"#,
+                r#""meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"COLOR_0":1}},"#,
+                r#""indices":2,"mode":4}}]}}],"#,
+                r#""buffers":[{{"byteLength":{len}}}],"#,
+                r#""bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":36}},"#,
+                r#"{{"buffer":0,"byteOffset":{colors},"byteLength":36}},"#,
+                r#"{{"buffer":0,"byteOffset":{indices},"byteLength":6}}],"#,
+                r#""accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","#,
+                r#""min":[0,0,0],"max":[1,1,0]}},"#,
+                r#"{{"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"}},"#,
+                r#"{{"bufferView":2,"componentType":5123,"count":3,"type":"SCALAR"}}]}}"#,
+            ),
+            len = bin.len(),
+            colors = colors_offset,
+            indices = indices_offset,
+        );
+        let mut json = json.into_bytes();
+        while json.len() % 4 != 0 {
+            json.push(b' ');
+        }
+        let total = 12 + 8 + json.len() + 8 + bin.len();
+        let mut glb = Vec::with_capacity(total);
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2_u32.to_le_bytes());
+        glb.extend_from_slice(&(u32::try_from(total).expect("small")).to_le_bytes());
+        glb.extend_from_slice(&(u32::try_from(json.len()).expect("small")).to_le_bytes());
+        glb.extend_from_slice(b"JSON");
+        glb.extend_from_slice(&json);
+        glb.extend_from_slice(&(u32::try_from(bin.len()).expect("small")).to_le_bytes());
+        glb.extend_from_slice(b"BIN\0");
+        glb.extend_from_slice(&bin);
+        glb
     }
 
     #[test]

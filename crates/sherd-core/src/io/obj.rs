@@ -95,6 +95,41 @@ mod tests {
         assert_eq!(m.f, vec![[0, 1, 2]]);
     }
 
+    /// Float colours through Open3D 0.19, byte for byte.
+    ///
+    /// The eight values below were written into an OBJ, read with
+    /// `o3d.io.read_triangle_mesh`, written back out with
+    /// `write_triangle_mesh(..., write_ascii=False)` and the `uchar` bytes of the resulting PLY
+    /// read back — the measurement finding F7 of the phase-1a verification asked for. They pin
+    /// three separate things at once: that a colour reaches the reader at `f32` precision (Open3D
+    /// parses an OBJ through Assimp, which uses `float`), that the quantisation rounds rather than
+    /// truncates (a truncation would give 0, 1, 2, 127, 128, 254, 255, 76, 178), and that a half
+    /// which is *not* exactly a half after the `f32` narrowing rounds by its real value: 254.5/255
+    /// reaches the arithmetic as 254.49999 and becomes 254, not 255.
+    #[test]
+    #[allow(clippy::format_push_string, reason = "a test fixture, not a hot path")]
+    fn float_colours_land_on_the_bytes_open3d_writes() {
+        let dir = std::env::temp_dir().join("sherd-core-obj-float-colours");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let values: [f64; 8] =
+            [0.0, 0.5 / 255.0, 1.5 / 255.0, 2.5 / 255.0, 0.5, 254.5 / 255.0, 1.0, 0.3];
+        let mut text = String::new();
+        for (i, v) in values.iter().enumerate() {
+            for corner in 0..3 {
+                text.push_str(&format!("v {i} {corner} 0 {v:.17} {v:.17} {v:.17}\n"));
+            }
+        }
+        for i in 0..values.len() {
+            let b = i * 3 + 1;
+            text.push_str(&format!("f {} {} {}\n", b, b + 1, b + 2));
+        }
+        let p = write(&dir, "float.obj", &text);
+        let m = read(&p).expect("the file reads");
+        let colors = m.colors.expect("the file has colours");
+        let first: Vec<u8> = (0..values.len()).map(|i| colors[i * 3][0]).collect();
+        assert_eq!(first, vec![0, 1, 2, 3, 128, 254, 255, 77]);
+    }
+
     #[test]
     fn a_missing_material_library_is_not_an_error() {
         let dir = std::env::temp_dir().join("sherd-core-obj-mtl");

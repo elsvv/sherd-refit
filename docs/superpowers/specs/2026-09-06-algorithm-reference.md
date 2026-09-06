@@ -1,7 +1,10 @@
 # sherd-refit — frozen algorithm reference
 
-**Date:** 2026-09-06. **Reference implementation:** `sherd_refit/*.py` at commit `9d4b9d3`
-(branch `main`), running on Open3D 0.19.0, numpy 2.5.2, scipy ≥ 1.11, Python 3.12.
+**Date:** 2026-09-06. **Reference implementation:** `sherd_refit/*.py` at commit `fbfebca`
+(branch `rust-core`), running on Open3D 0.19.0, numpy 2.5.2, scipy ≥ 1.11, Python 3.12.
+The document was frozen at `9d4b9d3`; `fbfebca` is the one algorithm change made since, §3.2's
+deterministic ray set (task T1, dated addendum at the end of §12), and the parity fixtures are
+regenerated from it.
 **Purpose:** the algorithm exactly as the Python computes it, stage by stage, so that the Rust
 port can be implemented and verified from this document alone. Where the design spec
 (`2026-09-05-fracture-reassembly-design.md`) and the code differ, the code is authoritative and
@@ -124,8 +127,8 @@ are pipeline options, not `Params`. `keep_per_pair` = 5 (candidates returned per
 ## 3. Per-fragment preprocessing
 
 All of §3 is a pure function of (file, `target_faces`, `Params` sampling fields, `seed`) and is
-cached (§3.7). Two independent RNG streams are used: `rng_pre = rng(0)` for thickness rays
-(seed is hard-coded 0), `rng_md = rng(p.seed)` for the match arrays.
+cached (§3.7). One RNG stream is used: `rng_md = rng(p.seed)` for the match arrays of §3.5.
+§3.2's wall thickness draws nothing — its ray set is fixed by the mesh.
 
 ### 3.1 Load and clean
 
@@ -144,7 +147,8 @@ cached (§3.7). Two independent RNG streams are used: `rng_pre = rng(0)` for thi
 Inputs: `FN0, A0, C0 = face_geometry(V0, F0)`; a raycasting scene over `(V0, F0)` in float32.
 
 ```
-idx  = rng_pre.choice(len(C0), min(20000, len(C0)), replace=False)      # face indices
+stride = max(1, ceil(len(C0) / 300000))                                 # THICK_FACES = 300000
+idx  = arange(0, len(C0), stride)                                       # face indices
 dvec = −FN0[idx]
 origin = C0[idx] + dvec · 1e-3                                           # PMC-1
 (d, prim) = first hit along (origin, dvec)          # d = inf, prim = 0xFFFFFFFF on a miss
@@ -169,14 +173,25 @@ If `thick_mode` is unavailable it is set to `t`. (`thick_mode > 1.15·t` only pr
 `face_geometry`: `n = (V[F1]−V[F0]) × (V[F2]−V[F0])`; `FN = n/max(|n|, 1e-12)`; `A = |n|/2`;
 `C = mean of the three vertices`.
 
-**`t` is a sampled estimate, and its own spread is larger than one might assume.** Re-running the
-reference's `estimate_thickness` with seeds 0–11 and nothing else changed moves it by up to 6.8 %
-of the seed-0 value on `Pot_A_Piece_04_Mesh` (3.554 at seed 0 against 3.774–3.795 at seeds 1–11)
-and 5.8 % on `frag_019`, because a fragment whose filtered distances form a plateau rather than a
-peak puts several near-equal bins in contention and `argmax` picks by a count that a different
-sample reorders. Any implementation that does not reproduce numpy's PCG64 stream — which PMC-9
-allows the port not to — draws a *different sample of the same estimator*, and the difference it
-must be allowed is this spread, not zero. D §10.2's native tolerance is set from it.
+**The ray set is deterministic, and it was not always.** Until commit `fbfebca` the faces came
+from `rng_pre.choice(len(C0), min(20000, len(C0)), replace=False)` with the seed hard-coded to 0,
+and that sample was the estimate's largest error term rather than its cost saving: re-running
+`estimate_thickness` with seeds 0–11 and nothing else changed moved `t` by up to 6.8 % of the
+seed-0 value on `Pot_A_Piece_04_Mesh` (3.554 at seed 0 against 3.774–3.795 at seeds 1–11) and
+5.8 % on `frag_019`, because a fragment whose filtered distances form a plateau rather than a peak
+puts several near-equal bins in contention and `argmax` picks by a count that another sample
+reorders. Since `t` is the unit of every threshold of §1.2, that spread moved nine thresholds for
+every pair the fragment took part in.
+
+The fix was to take the randomness out of the *algorithm* rather than to reproduce numpy's PCG64
+in the port: every face casts a ray when there are at most 300 000 of them, and a fixed stride
+picks them otherwise. Nothing else about the estimator changed — the same origin offset, the same
+`> 0.7` filter, the same 60 bins over `(0, p90]`, the same unweighted per-face mode — and the
+value it now returns lands on the median of the old estimator's seed cloud rather than on any one
+draw of it (`Pot_A_Piece_04_Mesh` 3.7844 against a 12-seed median of 3.7852; `Pot_B_Piece_01_Mesh`
+5.3984 against 5.3983; `frag_019` 8.1015 against 8.1196). The cost is bounded by the stride:
+0.40 s for the 1.23 M-face terracotta scan. D §10.2's native tolerance on `t` is ±2 % again as a
+result, and there is no `rng_pre` any more.
 
 ### 3.3 Working mesh
 
@@ -719,13 +734,16 @@ Recentre (§8.2) runs **after** refinement.
 
 | stream | seed | draws, in order |
 |---|---|---|
-| `rng_pre` (§3.2) | 0 (hard-coded) | 1 `choice(n_faces0, 20000, replace=False)` |
 | `rng_md` (§3.5) | `p.seed` | `choice(len(idx), 20000, p)`, `random(20000)`, `random(20000)`; `choice(len(idx_frac), n_frac, p)`, `random(n_frac)`, `random(n_frac)`; `choice(margin, 6000, replace=False)` only if `|margin| > 6000` |
 | `rng_pair` (§5.2) | `p.seed` | 1 `choice(B.brk_sub, ≤60, replace=False)` |
 | screening `cap` (§4.3) | `p.seed` | fresh generator per call |
 | assembly `MatchData` (§8) | `p.seed` | as `rng_md` with 15000 surface points, at `t_med` |
 | refinement (§9) | 0 | `choice(idx, 150000, replace=False)` only if `|idx| > 150000` |
 | previews (§11.5) | 0 | one generator for the whole preview pass |
+
+§3.2 has no stream: since `fbfebca` its ray set is `arange(0, n_faces, stride)` and
+`Fragment.from_mesh_file`'s `seed` argument is accepted and unused. The `rng_pre` row that stood
+here — `0 (hard-coded)`, one `choice(n_faces0, 20000, replace=False)` — is gone with it.
 
 Reproducibility of the reference: two runs give byte-identical `report.json` (verified,
 performance note §3b). Results do not depend on the number of processes or threads.
@@ -826,13 +844,49 @@ Not part of the contract. `timings` keys are listed in §11.2.
 | PMC-6 | unstable `argsort` for coarse and stage-1 ranking | numpy | stable sort, index tie-break | pair gates |
 | PMC-7 | signed-distance sign by one-ray parity (Embree) | Open3D | robust inside test (several rays or winding number) | `pen` within 0.0005 |
 | PMC-8 | assembly `MatchData` at `t_med` with 15000 samples | historical | own `t`, cached 20000 samples | assembly `pen` decisions on all benchmarks |
-| PMC-9 | numpy PCG64 sampling, one `rng_md` per fragment consumed by §3.5's three samplers in order | library | portable RNG (`ChaCha8Rng`), the same draw *order inside* each sampler and **one stream per draw site** rather than one per fragment, so that a rebuild at another `t` or `surface_points` (§4.2, §8) cannot move a sampler that did not change; the uniform itself is numpy's own `(word >> 11)·2⁻⁵³` | injected-sample parity + statistical gates |
+| PMC-9 | numpy PCG64 sampling | library | portable RNG, same draw structure | injected-sample parity + statistical gates |
 | PMC-10 | eigenvector sign convention in `principal_views` | numpy | sign fixed by convention (largest component positive) | visual only |
 | PMC-11 | penetration counts `sd < −pen` via full signed distance on all 20000 samples | direct | equivalent formulation: inside ∧ unsigned distance > pen, with AABB/early-exit prefilters | `pen` identical up to PMC-7 |
 | PMC-12 | fracture distances computed for all samples | direct | bounded closest-point query with early exit at `sc.facing` (exact for points inside the window; `≥ facing` otherwise); `contact` needs `d < 2·tight` which lies inside the window | identical scores |
 | PMC-13 | mesh orientation assumed outward | data | check signed volume and flip if negative | none on current data (all outward) |
 | PMC-14 | `tree_frac` built and never used | dead code | drop | — |
 | PMC-15 | working mesh, `res` and everything derived from them in float64 (§0) | numpy | store `V` and `res` as **float32** and derive `FN`, `A`, `C` from the *narrowed* vertices, so a cold run and a cache hit are bit-identical (D §4.1, D §7); everything up to the narrowing — Taubin, `face_geometry`, `median_edge`, `ΣA` — stays float64 | working-mesh row of D §10.2 in native mode (`res` ±10 %, area ±0.5 %); the ≈6e-8 relative error enters every §1.2 threshold and every ICP residual, so the pair gates of §13 are the real check |
+| PMC-16 | `near[i]` (§3.4.1) from `scipy.spatial.cKDTree.query`, whose tie rule between two equidistant representatives is unspecified | library | any KD-tree, ties resolved by the lowest index (`kiddo`'s observed behaviour, which it does not document as a guarantee) | injected `rep face` and `near` agreement in D §10.2's segmentation row (measured exactly 0 on all 68 fixture fragments — no fixture has a tie — so the first symmetric synthetic mesh is what will exercise it) |
+| PMC-17 | first-hit ray casts (§3.2, §3.4.3) through Open3D's `RaycastingScene`, i.e. Embree in `float32` | library | any `f32` BVH ray cast (`parry3d` 0.30 `CompositeShapeRef::cast_local_ray`), which disagrees with Embree on hit/miss or on the primitive id for a ray that grazes an edge | injected `votes/face` in D §10.2's segmentation row and the injected thickness row; measured at 2 hit/miss disagreements and 5 differing primitive ids over 7.87 M cone rays (experiment E4), absorbed completely by §3.4's cleanup (`raw mask` agreement 1.0) |
+
+### 12.1 Addenda (changes made after the freeze at `9d4b9d3`)
+
+The table above is the frozen text. Every amendment to it is recorded here instead, dated and
+attributed, so that a reader diffing this document against the Python can tell which clause is the
+reference's and which is the port's.
+
+**2026-09-06, step B3 — PMC-9 is exercised more widely than its row says (defect D2).** The row
+allows "portable RNG, same draw structure". The port
+(`crates/sherd-core/src/rng.rs`) keeps the reference's draw *order inside* each sampler and its
+uniform construction — numpy's own `(word >> 11)·2⁻⁵³` — but gives **each draw site its own
+stream** (`ChaCha8Rng::seed_from_u64(seed ^ tag)`) instead of consuming one `rng_md` per fragment
+through §3.5's samplers in order. The reason is §4.2 and §8: both rebuild the match arrays at
+another `t` or another `surface_points`, and with one shared stream a change to the *first*
+sampler silently moves the other two. The reference's own behaviour is unchanged; only the port's
+is. **Not yet re-verified by the gate its own row names:** "injected-sample parity + statistical
+gates" means §13, which is the pair and assembly gate set, and phase 1b cannot run it. It is on
+the phase-1c risk list, and until §13 runs, this amendment is asserted rather than demonstrated.
+
+**2026-09-06, task T1 — §3.2's ray set is no longer sampled (an algorithm change, not a PMC).**
+Commit `fbfebca` replaced `rng_pre.choice(n_faces0, 20000, replace=False)` with
+`arange(0, n_faces0, max(1, ceil(n_faces0 / 300000)))` **in the reference itself**, and this
+document's §3, §3.2 and §10 follow it. It is recorded here rather than only in §3.2 because it is
+the one change to the frozen algorithm: the port did not gain a licence, the algorithm lost a
+random number. Consequences: `rng_pre` is gone from §10, `Fragment.from_mesh_file`'s `seed` is
+accepted and unused, `CACHE_VERSION` moved 7 → 8 on the Python side and the fixture commit in this
+document's header moved to `fbfebca`. D §10.2's native tolerance on `t` returns to ±2 %.
+
+**2026-09-06, task T1 — two library substitutions were promoted to rows (defects D4 and D5).**
+PMC-16 (the `near` tie rule) and PMC-17 (the ray-cast library) are new rows in the table above
+rather than addenda, because they describe things the port has done since step B1 and neither
+changes what the reference computes. They are listed because R §12 is the port's licence and
+anything the port does differently that is not on it is an undeclared deviation, however small its
+measured effect.
 
 ---
 
@@ -853,13 +907,14 @@ Numbers the port must reproduce on the benchmark sets, with the defaults above (
 | all sets | cross-object joins 0; group purity 1.000 |
 
 Per-stage numeric tolerances for the fixture harness are defined in the port design
-(`2026-09-06-rust-core-design.md`, §10.2). One of them is not a rounding allowance but a property
-of the algorithm: the native tolerance on `t` is `max(2 %, 3 bins of the reference's own
-histogram)`, because §3.2's estimator moves by up to 6.8 % under a change of seed alone. The
-consequence travels — a fragment whose `t` differs by 6.6 % has every threshold of §1.2 shifted by
-6.6 % for every pair it takes part in — and the gates in the table above are exact-set gates that
-cannot be widened to absorb it. That is a risk to carry into the pair stages, not a tolerance to
-add there.
+(`2026-09-06-rust-core-design.md`, §10.2). One of them used to be a property of the algorithm
+rather than a rounding allowance: the native tolerance on `t` stood at
+`max(2 %, 3 bins of the reference's own histogram)` because §3.2's estimator moved by up to 6.8 %
+under a change of seed alone, and the consequence travelled — a fragment whose `t` differs by
+6.6 % has every threshold of §1.2 shifted by 6.6 % for every pair it takes part in, which the
+exact-set gates above cannot absorb. Task T1 removed the cause instead of carrying the risk:
+§3.2's ray set is fixed by the mesh, both implementations evaluate the estimator on the same
+faces, and the native tolerance is ±2 % again.
 
 Measured cost structure of the reference (M2 Pro, single thread, one mid-size `mixed_all` pair,
 42k/26k faces, scale-pairs note §3.1): stage-2 coarse ICPs 2.84 s (41 %), stage-2 fine ICPs

@@ -317,7 +317,7 @@ pub fn fracture_scores(
     transform: &Matrix4<f64>,
     sc: &Scales,
 ) -> FractureScores {
-    let inverse = rigid_inverse(transform);
+    let inverse = pose_inverse(transform);
     let d1 = surface_distances(&b.pf, transform, a.fracture, sc.facing);
     let d2 = surface_distances(&a.pf, &inverse, b.fracture, sc.facing);
     let (tight_a, gap_a, contact_a) = one_side(&d2, a.frac_area, sc);
@@ -384,11 +384,11 @@ pub fn seam_score(
     let voxel = sc.t / SEAM_VOXEL;
     let mut cells: Vec<[i64; 3]> = Vec::new();
     for (point, normal) in a.brk_p.iter().zip(&a.brk_ns) {
-        // The bound is R §6.2's own `dA < sc.seam`: the reference's query is unbounded and then
-        // thresholded, and the nearest point inside the radius is the nearest point whenever
-        // there is one, so the two agree — this one just does not walk the whole tree to find out.
-        let Some((j, distance)) = tree.nearest_within(point, sc.seam) else { continue };
-        if distance < sc.seam && dot(*normal, normals[j as usize]) > NORMAL_AGREE {
+        // R §6.2 is `dA, jA = cKDTree(...).query(A.brk_P)` — unbounded — and then `dA < sc.seam`.
+        // `nearest_below` is that pair of steps, computed through a bounded traversal that is
+        // provably the same answer, ties and radius boundary included (see its documentation).
+        let Some((j, _)) = tree.nearest_below(point, sc.seam) else { continue };
+        if dot(*normal, normals[j as usize]) > NORMAL_AGREE {
             cells.push(cell(*point, voxel));
         }
     }
@@ -421,10 +421,8 @@ pub fn continuity_scores(
     let mut agreements = Vec::new();
     for (point, normal) in b.margin_p.iter().zip(&b.margin_n) {
         let moved = apply(transform, *point);
-        let Some((j, distance)) = tree.nearest_within(&moved, sc.near) else { continue };
-        if distance >= sc.near {
-            continue;
-        }
+        // R §6.3's `dm, jm = A.tree_margin.query(PBm)` — unbounded — and then `dm < sc.near`.
+        let Some((j, _)) = tree.nearest_below(&moved, sc.near) else { continue };
         let (near_point, near_normal) = (a.margin_p[j as usize], a.margin_n[j as usize]);
         let delta = [moved[0] - near_point[0], moved[1] - near_point[1], moved[2] - near_point[2]];
         steps.push(dot(delta, near_normal).abs());
@@ -453,7 +451,7 @@ pub fn penetration_scores(
     if !(a.watertight && b.watertight) {
         return (0.0, 0.0, true);
     }
-    let inverse = rigid_inverse(transform);
+    let inverse = pose_inverse(transform);
     let (pen_b, min_b) = one_penetration(&b.s, transform, mesh_a, sc.pen);
     let (pen_a, min_a) = one_penetration(&a.s, &inverse, mesh_b, sc.pen);
     (pen_a.max(pen_b), (-min_a).max(-min_b) / sc.t, false)
@@ -600,24 +598,84 @@ fn rotate(t: &Matrix4<f64>, n: [f64; 3]) -> [f64; 3] {
     ]
 }
 
-/// The inverse of a rigid transform, as `[Rᵀ | −Rᵀτ]`.
+/// `np.linalg.inv(T)`: the inverse of the full 4×4 by LU with partial pivoting.
 ///
-/// The reference writes `np.linalg.inv(T)`, an LU factorisation of the full 4×4. The two agree to
-/// the extent that `R` is orthonormal, and a pose that has been through thirty ICP iterations is
-/// orthonormal to about 1e-16 — so the two inverses differ by that much, which moves a point a
-/// hundred units from the origin by 1e-14 and no score by anything measurable. The transpose is
-/// taken because it is the inverse of the *rotation*, exactly, whatever the last bits of `R` say,
-/// and because it needs no factorisation to be reproducible on another machine.
-fn rigid_inverse(t: &Matrix4<f64>) -> Matrix4<f64> {
-    let mut out = Matrix4::identity();
-    for i in 0..3 {
-        for j in 0..3 {
-            out[(i, j)] = t[(j, i)];
+/// R §6.1 and R §6.4 both move A's points *backwards* through the pose, and the reference writes
+/// that as `np.linalg.inv(T)` — LAPACK's `dgetrf` + `dgetri`, a factorisation of the whole matrix.
+/// The port used to substitute `[Rᵀ | −Rᵀτ]`, which is the inverse of the *rotation* rather than of
+/// the matrix, and the substitution is not free: a pose that has climbed two ICP ladders is
+/// orthonormal only to about 2.6e-14, so `Rᵀ` is not `R⁻¹` at that level, and the error is then
+/// multiplied by the point's distance from the origin — up to 885 units on these scans.
+///
+/// Measured over the 2 239 stage-2 poses of the eight fixture dumps and the clouds they are applied
+/// to (`notes/2026-09-07-x-phase1c-findings.md` §3): the transpose puts a point **4.6e-13 t** from
+/// where `np.linalg.inv` puts it at the median, 2.6e-12 t at p99 and 6.2e-11 t at the worst, while
+/// this factorisation is at **2.7e-14 t / 1.5e-13 t / 1.2e-11 t** — seventeen times closer at the
+/// median and at p99, on the same poses.
+///
+/// What is left is LAPACK's kernel against this loop, not an algorithm difference: both tails
+/// belong to candidates whose ICP diverged and whose `‖τ‖` runs to 1.8e5 units, where the 4×4's
+/// condition number reaches 3.3e10 and any two implementations of the same factorisation part
+/// company. The loop is written out rather than delegated so that it is the same arithmetic on
+/// every machine (D §7) — nalgebra's `Matrix4::try_inverse` is a cofactor expansion, which is a
+/// different algorithm from the reference's.
+fn pose_inverse(t: &Matrix4<f64>) -> Matrix4<f64> {
+    let mut m = [[0.0_f64; 4]; 4];
+    for (i, row) in m.iter_mut().enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
+            *cell = t[(i, j)];
         }
     }
-    for i in 0..3 {
-        out[(i, 3)] =
-            -(out[(i, 0)] * t[(0, 3)] + out[(i, 1)] * t[(1, 3)] + out[(i, 2)] * t[(2, 3)]);
+    // `dgetf2`: partial pivoting on the largest remaining `|column|`, first index on a tie, then
+    // the rank-1 update of the trailing block. `piv[k]` is the original row now sitting at `k`.
+    let mut piv = [0_usize, 1, 2, 3];
+    for k in 0..4 {
+        let mut best = k;
+        for i in k + 1..4 {
+            if m[i][k].abs() > m[best][k].abs() {
+                best = i;
+            }
+        }
+        if best != k {
+            m.swap(k, best);
+            piv.swap(k, best);
+        }
+        let pivot = m[k][k];
+        if pivot == 0.0 {
+            continue;
+        }
+        let (top, rest) = m.split_at_mut(k + 1);
+        let row_k = &top[k];
+        for row in rest {
+            row[k] /= pivot;
+            let factor = row[k];
+            for c in k + 1..4 {
+                row[c] -= factor * row_k[c];
+            }
+        }
+    }
+    // `dgetri`: one forward and one back substitution per column of `P·I`.
+    let mut out = Matrix4::zeros();
+    for col in 0..4 {
+        let mut y = [0.0_f64; 4];
+        for i in 0..4 {
+            let mut acc = 0.0;
+            for j in 0..i {
+                acc += m[i][j] * y[j];
+            }
+            y[i] = f64::from(piv[i] == col) - acc;
+        }
+        let mut x = [0.0_f64; 4];
+        for i in (0..4).rev() {
+            let mut acc = 0.0;
+            for j in i + 1..4 {
+                acc += m[i][j] * x[j];
+            }
+            x[i] = (y[i] - acc) / m[i][i];
+        }
+        for (r, value) in x.into_iter().enumerate() {
+            out[(r, col)] = value;
+        }
     }
     out
 }
@@ -647,7 +705,7 @@ fn cell(p: [f64; 3], voxel: f64) -> [i64; 3] {
 mod tests {
     use super::{
         FractureScores, Scores, Surfaces, accept, continuity_scores, fracture_scores, median,
-        penetration_scores, rigid_inverse, seam_score, verify,
+        penetration_scores, pose_inverse, seam_score, verify,
     };
     use crate::matching::scales::Scales;
     use crate::params::Params;
@@ -1052,7 +1110,70 @@ mod tests {
         assert!(!s.partial && s.pen_unavailable);
     }
 
-    /// The rigid inverse is the inverse, and the median is numpy's.
+    /// [`pose_inverse`] is `np.linalg.inv` on a real stage-2 pose, to the last few bits.
+    ///
+    /// The matrix is the first stage-2 candidate of the terracotta pair `021__104`
+    /// (`s2.T_frac2.npy`) and the expected inverse is what `np.linalg.inv` returns for it on the
+    /// reference's own numpy — a pose with `‖τ‖ = 321` and a condition number of 1.0e5, which is
+    /// an ordinary one for this stage rather than a constructed corner. The gate is 4 ULP of each
+    /// entry's own magnitude: LAPACK's blocked kernels and the loop in [`pose_inverse`] are two
+    /// implementations of one factorisation and they do not agree bit for bit.
+    ///
+    /// The transpose this function replaced misses the translation column of this very pose by
+    /// 5.7e-13 units, where the factorisation is inside an ULP of numpy's own answer.
+    #[test]
+    fn the_inverse_is_numpys_on_a_real_stage_two_pose() {
+        let t = Matrix4::<f64>::from_row_slice(&[
+            -0.322_610_103_922_126_47,
+            0.936_147_816_701_064,
+            -0.139_821_264_953_462_98,
+            -34.038_201_472_338_27,
+            -0.888_398_054_254_096_7,
+            -0.350_445_684_862_542_96,
+            -0.296_541_260_465_994_7,
+            -297.533_026_859_910_65,
+            -0.326_606_212_501_986_46,
+            0.028_549_732_871_869_956,
+            0.944_729_217_664_011_6,
+            114.448_926_720_524_33,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        ]);
+        let want = Matrix4::<f64>::from_row_slice(&[
+            -0.322_610_103_922_126_2,
+            -0.888_398_054_254_094_1,
+            -0.326_606_212_501_984_8,
+            -237.929_099_371_881_42,
+            0.936_147_816_701_063_6,
+            -0.350_445_684_862_542_24,
+            0.028_549_732_871_869_994,
+            -75.671_863_659_729_35,
+            -0.139_821_264_953_462_95,
+            -0.296_541_260_465_994_44,
+            0.944_729_217_664_008_5,
+            -201.113_328_205_070_05,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        ]);
+        let got = pose_inverse(&t);
+        for i in 0..4 {
+            for j in 0..4 {
+                let bound = 4.0 * f64::EPSILON * want[(i, j)].abs().max(1.0);
+                assert!(
+                    (got[(i, j)] - want[(i, j)]).abs() <= bound,
+                    "({i},{j}): {} against numpy's {}",
+                    got[(i, j)],
+                    want[(i, j)]
+                );
+            }
+        }
+    }
+
+    /// The pose inverse is the inverse, and the median is numpy's.
     #[test]
     fn the_two_small_helpers_are_what_they_claim() {
         let angle: f64 = 0.7;
@@ -1064,7 +1185,7 @@ mod tests {
         t[(0, 3)] = 3.0;
         t[(1, 3)] = -4.0;
         t[(2, 3)] = 5.0;
-        let product = t * rigid_inverse(&t);
+        let product = t * pose_inverse(&t);
         for i in 0..4 {
             for j in 0..4 {
                 let want = f64::from(u8::from(i == j));

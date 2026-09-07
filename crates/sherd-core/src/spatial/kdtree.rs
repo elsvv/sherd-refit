@@ -74,14 +74,48 @@ impl PointTree {
     /// probe queries: **1.08 µs per query unbounded against 0.11 µs bounded**, the whole stage
     /// 1 800 core-seconds against 178, with bit-identical scores.
     ///
-    /// The radius test here is inclusive (`d ≤ r`), like [`PointTree::within`]; scipy's is
-    /// exclusive, and R §5.2's caller applies that itself so that the rule is stated where it is
-    /// used rather than hidden in a tree.
+    /// The radius test is `d² ≤ radius·radius`, evaluated in squared units — which is *not* the
+    /// same as `d ≤ radius`. `radius · radius` rounds, so a point whose distance is exactly
+    /// `radius` can have a squared distance a bit above the rounded square and come back as a
+    /// miss. Callers that need the reference's own `d < r` want [`PointTree::nearest_below`],
+    /// which widens the square by the rounding before it applies the test.
     pub fn nearest_within(&self, query: &[f64; 3], radius: f64) -> Option<(u32, f64)> {
         if radius < 0.0 {
             return None;
         }
         self.nearest_within_squared(query, radius * radius).map(|(i, d2)| (i, d2.sqrt()))
+    }
+
+    /// `cKDTree.query(x)` followed by the reference's own `d < bound`: the nearest point when it is
+    /// strictly nearer than `bound`, and `None` otherwise.
+    ///
+    /// **This is the unbounded query's answer, and the bound is only a traversal hint.** R §5.2,
+    /// R §6.2 and R §6.3 all read `d, j = tree.query(...)` — an unbounded search — and then test
+    /// `d < r`; a port that searches within `r` instead has to show that the two cannot differ, and
+    /// the showing has two halves. Pruning cannot change the winner: a node is pruned only when its
+    /// box is further than the search radius, and no such node can hold a point at the minimum
+    /// distance when that minimum is itself under the radius, so every candidate at the minimum —
+    /// ties included — is visited either way. Rounding cannot change it either, but only because
+    /// the square is widened here: `sqrt(x) < bound` implies `x < bound²` exactly, and
+    /// `(bound·bound)·(1 + 4ε)` is above `bound²` for every finite `bound`, so a point the strict
+    /// test would accept is never outside the searched ball. Points the widening lets in beyond
+    /// `bound` are then dropped by that same strict test.
+    ///
+    /// The bound is what makes R §5.2 affordable. An unbounded nearest-neighbour search has to find
+    /// the true nearest however far away it is, and most of the millions of probe points a pair's
+    /// hypotheses throw at a breakline are far away; with the radius the traversal prunes at the
+    /// first node whose box is further than it and a miss costs a handful of comparisons. Measured
+    /// on the coarse stage over synthetic_20's 190 pairs and their 1.67 G probe queries:
+    /// **1.08 µs per query unbounded against 0.11 µs bounded**, the whole stage 1 800
+    /// core-seconds against 178, with bit-identical scores.
+    pub fn nearest_below(&self, query: &[f64; 3], bound: f64) -> Option<(u32, f64)> {
+        if bound <= 0.0 || bound.is_nan() {
+            return None;
+        }
+        let widened = (bound * bound) * (1.0 + 4.0 * f64::EPSILON);
+        self.nearest_within_squared(query, widened)
+            .map(|(i, d2)| (i, d2.sqrt()))
+            .filter(|&(_, d)| d < bound)
     }
 
     /// [`PointTree::nearest_within`] with the radius given **squared**, and the squared distance
@@ -148,6 +182,11 @@ impl PointTree {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::float_cmp,
+        reason = "a tie is an exact equality of distances; that is what these tests count"
+    )]
+
     use super::PointTree;
 
     fn grid() -> Vec<[f64; 3]> {
@@ -205,6 +244,86 @@ mod tests {
             let bounded = tree.nearest_within(&q, 0.6);
             assert_eq!(bounded, if d <= 0.6 { Some((i, d)) } else { None }, "{q:?}");
         }
+    }
+
+    /// The bounded search returns the **unbounded** answer whenever there is one inside the radius
+    /// — the same index, the same distance, ties included.
+    ///
+    /// This is what licenses R §6.2's and R §6.3's call sites, whose reference is an unbounded
+    /// `cKDTree.query` followed by a threshold. The argument is that `nearest_n(1).within(r²)`
+    /// prunes only nodes whose box is further than `r`, and no such node can hold a point at the
+    /// minimum distance when that minimum is itself under `r`, so the candidate at the minimum is
+    /// visited either way and the same one wins. The test is the argument checked rather than
+    /// asserted, on a cloud built to have **exact ties** — every point is mirrored through the
+    /// origin, so a query on the plane `x = 0` is equidistant from two of them — and at radii that
+    /// straddle each query's own answer.
+    #[test]
+    fn the_bounded_search_is_the_unbounded_one_filtered_by_its_radius() {
+        let mut points = Vec::new();
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            #[allow(clippy::cast_precision_loss, reason = "a 53-bit mantissa from a 64-bit word")]
+            let unit = (state >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0);
+            unit * 8.0 - 4.0
+        };
+        for _ in 0..300 {
+            let p = [next(), next(), next()];
+            points.push(p);
+            // The mirror image, so that the plane x = 0 is a tie for every pair.
+            points.push([-p[0], p[1], p[2]]);
+        }
+        let tree = PointTree::build(&points).expect("600 points");
+
+        let mut ties = 0_usize;
+        let mut answered = 0_usize;
+        for k in 0..400 {
+            let q = [0.0, next(), next()];
+            let (i, d) = tree.nearest_distance(&q);
+            let equal = points.iter().filter(|p| dist(p, &q) == d).count();
+            ties += usize::from(equal > 1);
+            // `d` itself is the interesting bound: the reference's test is strict, so the answer
+            // there is a miss, and the two neighbouring doubles are the boundary either side.
+            for bound in [d * 0.5, d, f64::from_bits(d.to_bits() + 1), d + 1.0, 100.0] {
+                let want = if d < bound { Some((i, d)) } else { None };
+                assert_eq!(tree.nearest_below(&q, bound), want, "query {k} at bound {bound}");
+                answered += usize::from(want.is_some());
+            }
+        }
+        assert!(ties > 100, "the mirrored cloud should tie on most queries, not {ties}");
+        assert!(answered > 1000, "and the bounds should mostly answer, not {answered}");
+        assert_eq!(tree.nearest_below(&[0.0, 0.0, 0.0], 0.0), None, "a non-positive bound answers");
+        assert_eq!(tree.nearest_below(&[0.0, 0.0, 0.0], -1.0), None);
+    }
+
+    /// [`PointTree::nearest_within`] tests the *square*, and the boundary is where that shows.
+    ///
+    /// `radius · radius` rounds, so a point at exactly `radius` can have a squared distance above
+    /// the rounded square and come back as a miss. Nothing in R sits on a radius, and the two
+    /// verification queries and the coarse probe all want the reference's strict `d < r` anyway —
+    /// but the difference is written down here rather than left as a surprise in a caller.
+    #[test]
+    fn the_squared_radius_is_not_the_distance_radius_at_the_boundary() {
+        let origin = [0.0, 0.0, 0.0];
+        let tree = PointTree::build(&[[7.0, 11.0, 13.0]]).expect("one point");
+        let (_, d) = tree.nearest_distance(&origin);
+        // 7² + 11² + 13² = 339 exactly, and `√339` squared rounds back *below* 339 — so a query
+        // whose radius is the distance itself has `d² > radius · radius` and reports a miss.
+        assert!(d * d < 339.0, "{}", d * d);
+        assert_eq!(tree.nearest_within(&origin, d), None, "the square rounds down");
+        // One double up on the radius and the square clears 339, so the same query answers.
+        let above = f64::from_bits(d.to_bits() + 1);
+        assert_eq!(tree.nearest_within(&origin, above), Some((0, d)));
+        // The reference asks `d < bound`: false at the distance itself, true one double above it,
+        // and `nearest_below` gives both answers without the square's rounding in the way.
+        assert_eq!(tree.nearest_below(&origin, d), None);
+        assert_eq!(tree.nearest_below(&origin, above), Some((0, d)));
+    }
+
+    fn dist(a: &[f64; 3], b: &[f64; 3]) -> f64 {
+        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
     }
 
     #[test]

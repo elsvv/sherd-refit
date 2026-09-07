@@ -173,17 +173,15 @@ fn agreeing(
             rot[(1, 0)] * point[0] + rot[(1, 1)] * point[1] + rot[(1, 2)] * point[2] + tau[1],
             rot[(2, 0)] * point[0] + rot[(2, 1)] * point[1] + rot[(2, 2)] * point[2] + tau[2],
         ];
-        // The radius is scipy's `distance_upper_bound`, and it is what makes this stage
-        // affordable: most probe points of most poses land nowhere near A's breakline, and a
-        // bounded search abandons those in a few comparisons.
-        let Some((near, distance)) = target.tree.nearest_within(&moved, delta) else {
+        // scipy's `distance_upper_bound` is *exclusive* — a neighbour exactly at `delta` comes
+        // back as `inf`, which is what `np.isfinite(d)` then reads — and the bound is also what
+        // makes this stage affordable: most probe points of most poses land nowhere near A's
+        // breakline, and a bounded search abandons those in a few comparisons. `nearest_below` is
+        // both halves, and its radius is widened by the rounding of `delta · delta` so that the
+        // traversal can never drop a neighbour the strict test would have kept.
+        let Some((near, _)) = target.tree.nearest_below(&moved, delta) else {
             continue;
         };
-        // scipy's bound is *exclusive* — a neighbour exactly at `delta` comes back as a miss
-        // (`inf`), which is what `np.isfinite(d)` then reads.
-        if distance >= delta {
-            continue;
-        }
         let turned = [
             rot[(0, 0)] * normal[0] + rot[(0, 1)] * normal[1] + rot[(0, 2)] * normal[2],
             rot[(1, 0)] * normal[0] + rot[(1, 1)] * normal[1] + rot[(1, 2)] * normal[2],

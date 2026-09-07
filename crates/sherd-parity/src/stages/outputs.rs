@@ -52,7 +52,8 @@ use sherd_core::mesh::geometry::{FaceGeometry, face_geometry, pairwise_sum};
 use sherd_core::render::{
     self, PALETTE, Paint, Rgb, Splat, View, placed_splat, principal_axes, render_views,
 };
-use sherd_core::report::{self, ReportJson};
+use sherd_core::matching::pair::Candidate;
+use sherd_core::report::{self, Outcome, ReportJson};
 use sherd_core::types::FragId;
 
 use super::Collection;
@@ -280,8 +281,136 @@ fn report_rows(collection: &Collection, report: &mut StageReport) -> Result<()> 
         differing,
         ours.len().max(theirs_candidates.len()),
     ));
+    markdown_row(collection, report, &typed)
+}
+
+/// R §11.3's `report.md`, rendered by the port from the reference's own `report.json` and diffed
+/// against the reference's own file **line for line**.
+///
+/// The dump's `outputs/report.md` is that file: `tools/dump_outputs.py` renders it with the
+/// reference's own `report.write_report` over the same `report.json` this row reads, so what is
+/// compared here is two renderings of one set of numbers — every heading, every column, every
+/// rounding, R §11.3's legend line with its Python floats, the "not assembled" line, the rejection
+/// sentences and the order of the last table's pairs.
+///
+/// The `## Timing` block is where the comparison stops, on both sides. It is wall-clock seconds,
+/// two runs of one input disagree on them, and the dump carries them as `null`
+/// (`pipeline._dump_outputs`), so there is nothing there to compare. The *order* of that block is
+/// R §11.2's and is checked in `sherd-core`'s own tests instead (V4-D4).
+fn markdown_row(
+    collection: &Collection,
+    report: &mut StageReport,
+    theirs: &ReportJson,
+) -> Result<()> {
+    let path = collection.dir.outputs_dir().join("report.md");
+    if !path.is_file() {
+        report.skip(
+            SCOPE,
+            "no outputs/report.md in the dump: run tools/dump_outputs.py DUMP INPUT to render the \
+             reference's own R §11.3 report",
+        );
+        return Ok(());
+    }
+    let names: Vec<String> = collection.fragments.iter().map(|f| f.name.clone()).collect();
+    let id = |name: &str| names.iter().position(|n| n == name);
+
+    let mut candidates = Vec::with_capacity(theirs.candidates.len());
+    for c in &theirs.candidates {
+        let (Some(a), Some(b)) = (id(&c.a), id(&c.b)) else {
+            report.skip(SCOPE, "report.json names a fragment the manifest does not");
+            return Ok(());
+        };
+        candidates.push(Candidate {
+            a: u32::try_from(a).expect("fewer than 2^32 fragments"),
+            b: u32::try_from(b).expect("fewer than 2^32 fragments"),
+            transform: assembly::matrix(&c.transform),
+            scores: c.scores,
+            accepted: c.accepted,
+        });
+    }
+    // The reference's `used` and `rejected` hold the very objects its `cands` holds, so each one
+    // is looked up in the candidate list by the two names and the pose rather than converted
+    // again: R §11.3 prints the candidate, and this keeps the three lists one list.
+    let index_of = |want: &report::CandidateJson| {
+        candidates.iter().position(|c| {
+            names[c.a as usize] == want.a
+                && names[c.b as usize] == want.b
+                && report::rows(&c.transform) == want.transform
+        })
+    };
+    let mut used = Vec::with_capacity(theirs.joins_used.len());
+    for c in &theirs.joins_used {
+        let Some(i) = index_of(c) else {
+            report.skip(SCOPE, "a used join of report.json is not one of its candidates");
+            return Ok(());
+        };
+        used.push(i);
+    }
+    let mut rejected = Vec::with_capacity(theirs.joins_rejected.len());
+    for c in &theirs.joins_rejected {
+        let Some(i) = index_of(c) else {
+            report.skip(SCOPE, "a rejected join of report.json is not one of its candidates");
+            return Ok(());
+        };
+        rejected.push((i, c.reason.clone().unwrap_or_default()));
+    }
+    let mut groups = Vec::with_capacity(theirs.groups.len());
+    for group in &theirs.groups {
+        let mut members = Vec::with_capacity(group.len());
+        for name in group {
+            let Some(i) = id(name) else {
+                report.skip(SCOPE, "a group of report.json names a fragment the manifest does not");
+                return Ok(());
+            };
+            members.push(u32::try_from(i).expect("fewer than 2^32 fragments"));
+        }
+        groups.push(members);
+    }
+
+    let outcome = Outcome {
+        names: &names,
+        candidates: &candidates,
+        used: &used,
+        rejected: &rejected,
+        groups: &groups,
+    };
+    let ours = report::report_markdown(
+        &theirs.fragments,
+        theirs.thickness,
+        &outcome,
+        &BTreeMap::new(),
+        &theirs.params,
+    );
+    let file = std::fs::read_to_string(&path).map_err(|e| Error::read(&path, e))?;
+    let head = |text: &str| -> Vec<String> {
+        text.lines().take_while(|l| *l != TIMING_HEADING).map(str::to_owned).collect()
+    };
+    if !file.lines().any(|l| l == TIMING_HEADING) {
+        return Err(Error::fixture(&path, "report.md has no ## Timing heading"));
+    }
+    let (ours, theirs) = (head(&ours), head(&file));
+    let lines = ours.len().max(theirs.len());
+    let mut differing = 0;
+    for i in 0..lines {
+        if ours.get(i) != theirs.get(i) {
+            if differing < 5 {
+                tracing::warn!(
+                    line = i + 1,
+                    ours = ours.get(i).map_or("(none)", String::as_str),
+                    theirs = theirs.get(i).map_or("(none)", String::as_str),
+                    "report.md differs"
+                );
+            }
+            differing += 1;
+        }
+    }
+    report.push(Check::entries(SCOPE, "report md", differing, lines));
     Ok(())
 }
+
+/// Where R §11.3's report stops being reproducible: everything below it is a wall clock.
+const TIMING_HEADING: &str = "## Timing";
+
 
 /// Every leaf path where two JSON trees disagree, ignoring `timings` (wall clock) and the keys the
 /// port adds on top of the reference's schema.

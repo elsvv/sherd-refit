@@ -30,6 +30,28 @@ inside the reference's own spread on every set that was swept (§3).
 | recorded | R §11.2 lists an `"output"` timing the reference never writes | **Y5** — R §11.2 amended (and it now states both files' key order) |
 | recorded | R §13's terracotta seams, written "≈ 20.3 / 10.7" | **Y6** — the port's measured **20.667 / 12.333 t** recorded beside them |
 
+### 1.1 Two of them are worth keeping in prose
+
+**V4-D2's cause, as V4 reduced it.** The loop was `for k in 0..=255_u8 { …; if k < 255 {
+assert_eq!(quantize_color(f64::from(k) + 0.5), k + 1); } }`. A standalone 17-line program with
+nothing but `quantize_color` and that loop, built with rustc 1.97.0 for aarch64-apple-darwin,
+panics at `-C opt-level=2` and `3` and passes at `0` and `1`: the optimiser folds the `k < 255`
+guard into `RangeInclusive`'s own exhaustion test, whose increment carries the `add nuw i8` of
+`Step::forward_unchecked`, so the last iteration runs the guarded body with a poisoned `k + 1` that
+materialises as `0`. `quantize_color` itself was never wrong — `254.5 → 255`, `255.5 → 255`,
+`-1 → 0`, `NaN → 0` all verified directly, and they are asserted after the loop now. The reason two
+steps could ship with the release suite red is that `.github/workflows/rust.yml` only ran the debug
+profile, which is the profile the pattern survives; a `test-release` job now runs it on the two
+runners D §10.5 gives the `parity` job.
+
+**What the fixes changed in the port's own output files.** `transforms.json` now keys `fragments`
+in R §8's placement order and `report.json` / `report.md` list `timings` in stage order, so those
+three files differ from the ones the port wrote before this task — deliberately, and towards the
+reference's own byte order (measured against `output/fixtures/terracotta/_run/*` in §2.2). The
+pose numbers moved too, by the 8.8e-15–7.0e-13 t that V4-D10's summation order was worth, and that
+movement is *towards* the reference as well: `recentre` is now exact. No decision, group, join or
+rejection changed anywhere — the gate table is V4's, row for row.
+
 Commits: `156db42` (Y1, the manifest and `report.md`), `1d73e08` (Y2, the harness's `report md`
 row), `3ca4e50` (Y3, the release suite and its CI job), `8c4b5ae` (Y4, the six code deviations),
 `21992b4` (Y5, D §10.2 and R §11.2), `b75c737` (Y6, R §13, R §12.1 and D §10.3), and this note.

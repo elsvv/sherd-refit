@@ -7,9 +7,10 @@
 //! B3 the sampled match arrays and the `samples` row, step C1 the first three pair rows —
 //! `hypotheses`, `coarse` and `nms` — step C2 the two refinement rows and step C3 the last two,
 //! `verify` and `candidates`, which is the whole of `match_pair`. Step D1 opened phase 1d with the
-//! `assembly` row — R §8's groups, its used joins, its rejections and R §8.2's recentring. `run`
-//! and `bench` arrive with the pipeline they drive (later in phase 1d) and report that plainly
-//! until then.
+//! `assembly` row — R §8's groups, its used joins, its rejections and R §8.2's recentring — and
+//! step D2 the last two, `refine` and `outputs`. Step D3 turned `run` and `bench` on: `run` is the
+//! reference's own subcommand, flag for flag (R §1.4), and `bench` is a run with the previews off,
+//! timed against D §10.3.
 
 use std::path::PathBuf;
 
@@ -61,23 +62,143 @@ enum Command {
     Info,
 }
 
-/// Arguments of `run`; the full flag set of R §1.4 lands in phase 1d.
+/// Arguments of `run`: every flag of `sherd_refit/cli.py`, with its name and its default (R §1.4),
+/// plus the four the port adds (D §9).
 #[derive(Debug, Args)]
+#[allow(clippy::struct_excessive_bools, reason = "the reference's own switches, one field each")]
 struct RunArgs {
     /// Directory of fragment files (`.ply`, `.obj`, `.stl`, `.off`).
     input: PathBuf,
     /// Output directory.
     #[arg(long)]
     out: PathBuf,
-    /// Working-mesh face budget per fragment (R §3.3 caps its adaptive budget with this).
+    /// Working-mesh face budget per fragment.
     #[arg(long, default_value_t = 200_000)]
     target_faces: u32,
-    /// Worker threads; 0 means one per core.
-    #[arg(long, default_value_t = 0)]
-    threads: usize,
+    /// Parallel workers; the reference's process count, and here the size of the one rayon pool
+    /// (default: one per core).
+    #[arg(long)]
+    workers: Option<usize>,
+    /// Threads per matching worker. One process here, so this sizes the same pool `--workers`
+    /// does and wins when both are given (default: one per core).
+    #[arg(long)]
+    threads: Option<usize>,
+    /// Candidates refined with full ICP per pair.
+    #[arg(long, default_value_t = Params::default().stage2)]
+    candidates: u32,
+    /// Hypotheses refined with breakline ICP per pair.
+    #[arg(long, default_value_t = Params::default().stage1)]
+    stage1: u32,
+    /// t, voxel the breakline is thinned to before frames are paired.
+    #[arg(long, default_value_t = Params::default().brk_voxel)]
+    brk_voxel: f64,
+    /// Degrees, tolerance on |dih_A + dih_B - 180| for a hypothesis.
+    #[arg(long, default_value_t = Params::default().dihedral_tol)]
+    dihedral_tol: f64,
+    /// Min tight-contact fraction to accept a join.
+    #[arg(long, default_value_t = Params::default().min_tight)]
+    min_tight: f64,
+    /// k for the max median fracture gap; the pair's limit is max(k t, m res).
+    #[arg(long, default_value_t = Params::default().max_gap)]
+    max_gap: f64,
+    /// Max penetrating surface fraction.
+    #[arg(long, default_value_t = Params::default().max_pen)]
+    max_pen: f64,
+    /// Min seam length (in t).
+    #[arg(long, default_value_t = Params::default().min_seam)]
+    min_seam: f64,
+    /// Skip a pair whose wall thicknesses differ by more than this factor.
+    #[arg(long, default_value_t = Params::default().thick_ratio)]
+    thick_ratio: f64,
+    /// Partners kept per fragment by the partner search (0 disables it).
+    #[arg(long, default_value_t = Params::default().screen_top_k)]
+    screen_top_k: u32,
+    /// Breakline points per fragment used by the partner search.
+    #[arg(long, default_value_t = Params::default().screen_points)]
+    screen_points: u32,
+    /// The partner search is skipped below this many pairs.
+    #[arg(long, default_value_t = Params::default().screen_min_pairs)]
+    screen_min_pairs: u32,
+    /// Partners of each unplaced fragment to match again with a larger budget (0 disables it).
+    #[arg(long, default_value_t = Params::default().second_pass_top)]
+    second_pass_top: u32,
+    /// Hypotheses refined in the second pass.
+    #[arg(long, default_value_t = Params::default().second_pass_stage1)]
+    second_pass_stage1: u32,
+    /// Candidates fully verified in the second pass.
+    #[arg(long, default_value_t = Params::default().second_pass_stage2)]
+    second_pass_candidates: u32,
+    /// Skip stage 2 when the pair's best stage-1 breakline score is below this.
+    #[arg(long, default_value_t = Params::default().stage1_floor)]
+    stage1_floor: f64,
+    /// Skip the fracture-only ICPs and the costly verification below this tight-contact fraction.
+    #[arg(long, default_value_t = Params::default().early_reject_tight)]
+    early_reject_tight: f64,
+    /// Points in the cloud the two coarse stage-2 ICPs run on (0: all).
+    #[arg(long, default_value_t = Params::default().reg_points)]
+    reg_points: u32,
+    /// Shell-margin points kept per fragment for ICP and the continuity test.
+    #[arg(long, default_value_t = Params::default().margin_points)]
+    margin_points: u32,
+    /// Whole-surface samples per fragment (penetration test and shell margin).
+    #[arg(long, default_value_t = Params::default().surface_points)]
+    surface_points: u32,
+    /// Fracture samples per t^2 of fracture area.
+    #[arg(long, default_value_t = Params::default().frac_per_t2)]
+    frac_density: f64,
+    /// Do not write R §11.5's previews.
+    #[arg(long)]
+    no_preview: bool,
+    /// Skip full-resolution refinement.
+    #[arg(long)]
+    no_refine: bool,
+    /// Do not write placed/merged meshes.
+    #[arg(long)]
+    no_meshes: bool,
     /// Executor: `auto`, `cpu` or `gpu` (D §6.8).
     #[arg(long, default_value_t = Backend::Auto)]
     backend: Backend,
+    /// Neither read nor write the fragment cache (R §3.7).
+    #[arg(long)]
+    no_cache: bool,
+    /// Recompute every fragment and overwrite its cache, even when the cache is valid.
+    #[arg(long)]
+    force: bool,
+    /// Write the Rust-side fixture dump of D §10.1 (not built yet).
+    #[arg(long, value_name = "DIR")]
+    dump_fixtures: Option<PathBuf>,
+}
+
+impl RunArgs {
+    /// R §1.4's CLI-to-`Params` mapping: `--candidates → stage2`, `--frac-density → frac_per_t2`,
+    /// `--second-pass-candidates → second_pass_stage2`, and every other flag to the field of the
+    /// same name. Everything R §1.1 has no flag for keeps its default.
+    fn params(&self) -> Params {
+        Params {
+            stage1: self.stage1,
+            stage2: self.candidates,
+            brk_voxel: self.brk_voxel,
+            dihedral_tol: self.dihedral_tol,
+            min_tight: self.min_tight,
+            max_gap: self.max_gap,
+            max_pen: self.max_pen,
+            min_seam: self.min_seam,
+            thick_ratio: self.thick_ratio,
+            early_reject_tight: self.early_reject_tight,
+            stage1_floor: self.stage1_floor,
+            second_pass_top: self.second_pass_top,
+            second_pass_stage1: self.second_pass_stage1,
+            second_pass_stage2: self.second_pass_candidates,
+            screen_top_k: self.screen_top_k,
+            screen_points: self.screen_points,
+            screen_min_pairs: self.screen_min_pairs,
+            margin_points: self.margin_points,
+            reg_points: self.reg_points,
+            surface_points: self.surface_points,
+            frac_per_t2: self.frac_density,
+            ..Params::default()
+        }
+    }
 }
 
 /// Arguments of `segment`.
@@ -171,21 +292,40 @@ impl ParityArgs {
     }
 }
 
-/// Arguments of `bench`.
+/// Arguments of `bench`: a run with the previews and the meshes off, timed against D §10.3.
 #[derive(Debug, Args)]
 struct BenchArgs {
     /// Directory of fragment files to time the pipeline on.
     input: PathBuf,
+    /// Where the run's outputs go; `report.json` carries the same timings.
+    #[arg(long)]
+    out: PathBuf,
+    /// Working-mesh face budget per fragment.
+    #[arg(long, default_value_t = 200_000)]
+    target_faces: u32,
+    /// Worker threads; unset means one per core.
+    #[arg(long)]
+    threads: Option<usize>,
+    /// D §10.3's wall-clock gate for this set, in seconds; without it the timings are only
+    /// reported.
+    #[arg(long)]
+    gate: Option<f64>,
+    /// Also write R §11.4's meshes, which D §10.3's gates do not include.
+    #[arg(long)]
+    meshes: bool,
+    /// Neither read nor write the fragment cache; D §10.3's gates are stated for a warm one.
+    #[arg(long)]
+    no_cache: bool,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.verbose);
     match cli.command {
-        Command::Run(_) => bail!("`run` lands in phase 1d, when every stage it drives exists"),
+        Command::Run(args) => run(&args),
         Command::Segment(args) => segment(&args),
         Command::Parity(args) => parity(&args),
-        Command::Bench(_) => bail!("`bench` lands in phase 1d, together with `run`"),
+        Command::Bench(args) => bench(&args),
         Command::Info => {
             info();
             Ok(())
@@ -311,6 +451,142 @@ fn segment(args: &SegmentArgs) -> Result<()> {
     Ok(())
 }
 
+/// R §2–§11 for a whole collection: the reference's `sherd-refit run`, flag for flag.
+#[allow(clippy::cast_precision_loss, reason = "counts and seconds printed in a table")]
+fn run(args: &RunArgs) -> Result<()> {
+    if let Some(dir) = &args.dump_fixtures {
+        bail!(
+            "--dump-fixtures {} is D §10.1's Rust-side writer and is not built yet; the Python \
+             side is `python tools/dump_fixtures.py INPUT OUT`",
+            dir.display()
+        );
+    }
+    let backend = resolve_backend(args.backend)?;
+    let threads = args.threads.or(args.workers).unwrap_or(0);
+    if let Err(e) = pipeline::set_threads(threads) {
+        bail!("--threads {threads}: {e}");
+    }
+    let options = pipeline::RunOptions {
+        target_faces: args.target_faces as usize,
+        params: args.params(),
+        keep_per_pair: pipeline::KEEP_PER_PAIR,
+        preview: !args.no_preview,
+        refine: !args.no_refine,
+        write_meshes: !args.no_meshes,
+        cache: !args.no_cache,
+        workers: args.workers.unwrap_or(0),
+        backend,
+    };
+    if args.force && !args.no_cache {
+        clear_caches(&args.input, &args.out)?;
+    }
+    let started = std::time::Instant::now();
+    let summary = pipeline::run(&args.input, &args.out, &options)
+        .with_context(|| format!("assembling {}", args.input.display()))?;
+    let wall = started.elapsed().as_secs_f64();
+
+    println!(
+        "{} fragments, {} pairs ({} skipped by --thick-ratio{}), {} candidates, {} accepted",
+        summary.names.len(),
+        summary.pairs,
+        summary.skipped_pairs,
+        match summary.screened {
+            Some((seen, kept)) => format!(", {seen} screened to {kept}"),
+            None => String::new(),
+        },
+        summary.candidates.len(),
+        summary.accepted()
+    );
+    for (k, group) in summary.groups.iter().enumerate() {
+        if group.len() > 1 {
+            let members: Vec<&str> =
+                group.iter().map(|&n| summary.names[n as usize].as_str()).collect();
+            println!("  group {k}: {}", members.join(", "));
+        }
+    }
+    let alone: Vec<&str> = summary
+        .groups
+        .iter()
+        .filter(|g| g.len() == 1)
+        .map(|g| summary.names[g[0] as usize].as_str())
+        .collect();
+    if !alone.is_empty() {
+        println!("  not assembled: {}", alone.join(", "));
+    }
+    print_timings(&summary.timings, wall);
+    println!("{} files in {}", summary.written.len(), args.out.display());
+    Ok(())
+}
+
+/// D §10.3's timing gate: a run with the previews and the meshes off, timed stage by stage.
+fn bench(args: &BenchArgs) -> Result<()> {
+    if let Err(e) = pipeline::set_threads(args.threads.unwrap_or(0)) {
+        bail!("--threads: {e}");
+    }
+    let options = pipeline::RunOptions {
+        target_faces: args.target_faces as usize,
+        preview: false,
+        write_meshes: args.meshes,
+        cache: !args.no_cache,
+        workers: 0,
+        backend: Backend::Cpu,
+        ..pipeline::RunOptions::default()
+    };
+    let started = std::time::Instant::now();
+    let summary = pipeline::run(&args.input, &args.out, &options)
+        .with_context(|| format!("timing {}", args.input.display()))?;
+    let wall = started.elapsed().as_secs_f64();
+    println!(
+        "{}: {} fragments, {} pairs, {} accepted, {} assembled group(s)",
+        args.input.display(),
+        summary.names.len(),
+        summary.pairs,
+        summary.accepted(),
+        summary.assembled().count()
+    );
+    print_timings(&summary.timings, wall);
+    match args.gate {
+        Some(gate) if wall > gate => {
+            bail!("{wall:.1} s wall is over the gate of {gate:.1} s")
+        }
+        Some(gate) => println!("within the gate of {gate:.1} s"),
+        None => {}
+    }
+    Ok(())
+}
+
+/// The per-stage table both `run` and `bench` print; the same numbers `report.json` carries.
+fn print_timings(timings: &std::collections::BTreeMap<String, f64>, wall: f64) {
+    for (stage, seconds) in timings {
+        println!("  {stage:<12} {seconds:>8.2} s");
+    }
+    println!("  {:<12} {wall:>8.2} s", "wall");
+}
+
+/// `--backend` resolved for a build with no GPU executor (D §6.8): `auto` falls back to the CPU
+/// and `gpu` is an error rather than a silent fallback, which is what a benchmark asking for it
+/// needs.
+fn resolve_backend(backend: Backend) -> Result<Backend> {
+    match backend {
+        Backend::Gpu => bail!("--backend gpu: the GPU executor arrives in phase 2 (D §6)"),
+        Backend::Auto | Backend::Cpu => Ok(Backend::Cpu),
+    }
+}
+
+/// `--force`: removes the cache files of the collection about to be run, so every fragment is
+/// recomputed and rewritten.
+fn clear_caches(input: &std::path::Path, out: &std::path::Path) -> Result<()> {
+    let entries =
+        collection::discover(input).with_context(|| format!("scanning {}", input.display()))?;
+    for entry in &entries {
+        let path = cache::cache_path(out, &entry.name);
+        if path.exists() {
+            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Reads a fixture dump, runs the requested stages against it and prints D §10.2's table.
 fn parity(args: &ParityArgs) -> Result<()> {
     let dir = FixtureDir::new(&args.fixtures);
@@ -428,7 +704,7 @@ fn requested_stages(requested: &[String]) -> Result<Vec<Stage>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, requested_stages};
+    use super::{Backend, Cli, Params, requested_stages};
     use clap::{CommandFactory, Parser};
     use sherd_parity::stages::Stage;
 
@@ -501,6 +777,74 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// Every flag of `sherd_refit/cli.py` is here, spelled the same, and every default is the
+    /// reference's — which for the twenty-one that map to [`Params`] means `Params::default()`
+    /// exactly (R §1.1, R §1.4).
+    #[test]
+    #[allow(clippy::float_cmp, reason = "the defaults are literals on both sides")]
+    fn run_takes_every_python_flag_at_the_python_default() {
+        let cli = Cli::try_parse_from(["sherd-refit-rs", "run", "in", "--out", "out"]).unwrap();
+        match cli.command {
+            super::Command::Run(args) => {
+                assert_eq!(args.target_faces, 200_000, "the Python's --target-faces default");
+                assert!(args.workers.is_none() && args.threads.is_none(), "both default to None");
+                assert!(!args.no_preview && !args.no_refine && !args.no_meshes);
+                assert!(!args.no_cache && !args.force && args.dump_fixtures.is_none());
+                assert_eq!(args.backend, Backend::Auto);
+                assert_eq!(
+                    args.params(),
+                    Params::default(),
+                    "no flag given must leave every threshold of R §1.1 at its default"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// R §1.4's three renamed flags, and one that is not renamed, through the mapping.
+    #[test]
+    #[allow(clippy::float_cmp, reason = "the values are the literals just passed in")]
+    fn run_renames_the_three_flags_r_1_4_names() {
+        let cli = Cli::try_parse_from([
+            "sherd-refit-rs",
+            "run",
+            "in",
+            "--out",
+            "out",
+            "--candidates",
+            "3",
+            "--frac-density",
+            "7.5",
+            "--second-pass-candidates",
+            "11",
+            "--stage1",
+            "4",
+            "--no-preview",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Command::Run(args) => {
+                let p = args.params();
+                assert_eq!(p.stage2, 3, "--candidates -> stage2");
+                assert_eq!(p.frac_per_t2, 7.5, "--frac-density -> frac_per_t2");
+                assert_eq!(p.second_pass_stage2, 11, "--second-pass-candidates");
+                assert_eq!(p.stage1, 4, "and --stage1 keeps its name");
+                assert!(args.no_preview);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `--backend gpu` fails rather than falling back silently; `auto` resolves to the CPU while
+    /// there is no other executor (D §6.8).
+    #[test]
+    fn the_backend_resolves_to_the_cpu_and_refuses_the_gpu() {
+        assert_eq!(super::resolve_backend(Backend::Auto).unwrap(), Backend::Cpu);
+        assert_eq!(super::resolve_backend(Backend::Cpu).unwrap(), Backend::Cpu);
+        let err = super::resolve_backend(Backend::Gpu).unwrap_err().to_string();
+        assert!(err.contains("phase 2"), "{err}");
     }
 
     #[test]

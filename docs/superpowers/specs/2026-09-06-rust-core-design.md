@@ -1024,6 +1024,14 @@ Quality: exactly R§13 on every listed set, run natively (no injection), CPU and
 | synthetic 170 (≈ 12 800 pairs) | ≤ 2 h | ≤ 30 min |
 | `mixed_all` (12 589 pairs) | ≤ 2 h | ≤ 30 min |
 
+**Measured, step D3** (`notes/2026-09-07-d3-run.md` §4), CPU, warm cache and with the previews and
+meshes written — i.e. more work than the gate asks for: terracotta **3.8 s**, pot A 12.4 s (cold),
+pot H **10.5 s**, synthetic 20 **45.2 s**. Against the reference on the same machine, cold on both
+sides: 52.7 → 5.9 s on the terracotta, 130.9 → 10.9 s on pot H, 426.7 → 49.9 s on synthetic 20.
+The two large sets have not been run. Quality: R §13's terracotta gate exactly; four of the six
+`evaluate.py` rows match the Python table, one is better and one worse, and the note attributes both
+to PMC-6/PMC-9 with the `assembly` parity row as the control.
+
 ### 10.4 Test layers
 
 1. **Unit** (per crate, `cargo nextest`): geometry helpers (the Python `tests/test_geometry.py`

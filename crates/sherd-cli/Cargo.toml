@@ -21,5 +21,10 @@ clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[dev-dependencies]
+# The determinism gate of `tests/run_cli.rs` compares `report.json` with its wall-clock timings
+# taken out, which needs the file parsed rather than hashed.
+serde_json.workspace = true
+
 [lints]
 workspace = true

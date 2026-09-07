@@ -29,7 +29,7 @@
 //! | [`assembly`] | §8 | D1 |
 //! | [`refine`] | §9 | D2 |
 //! | [`report`], [`render`] | §11 | D2 |
-//! | [`pipeline`] | §2, D §5 | S4 (preprocessing), phase 1d (the run) |
+//! | [`pipeline`] | §2, D §5 | S4 (preprocessing), D3 (the run) |
 //!
 //! # State
 //!
@@ -71,9 +71,11 @@
 //! ([`refine`]), `transforms.json`, `report.json`, `report.md` and R §11.4's placed and merged
 //! meshes ([`report`]), and R §11.5's software point renderer with its z-buffer, its views and its
 //! caption ([`render`]) — with the `refine` and `outputs` rows of the parity table, the last two of
-//! D §10.2. What is left of phase 1d is the run itself: [`pipeline`] still holds only
-//! preprocessing, and the `run` subcommand that drives all of the above end to end is the step
-//! after this one.
+//! D §10.2. Step D3 closed phase 1d by joining all of it into the run ([`pipeline::run`],
+//! `sherd-refit-rs run`): collection discovery, preprocessing through the cache, R §4.1's
+//! wall-ratio filter, D §5's block schedule over the pairs, R §4.3's optional partner search,
+//! R §8's assembly, R §8.1's optional second pass, R §9, R §8.2's recentring and R §11's five
+//! writers, with the reference's flag set and its per-stage timings.
 
 pub mod assembly;
 pub mod collection;

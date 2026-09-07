@@ -40,6 +40,7 @@
 use std::path::Path;
 
 use nalgebra::Matrix4;
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::error::{Error, Result};
 
@@ -257,7 +258,12 @@ pub fn principal_axes(points: &[[f64; 3]]) -> [[f64; 3]; 3] {
 /// what makes the views comparable with each other.
 pub fn render_views(meshes: &[Splat], views: &[View], width: usize, height: usize) -> Rgb {
     let frame = Frame::of(meshes, width, height);
-    let images: Vec<Rgb> = views.iter().map(|v| splat(meshes, *v, &frame)).collect();
+    // One view is one image over its own z-buffer, and the strip is assembled by index, so the
+    // views are `rayon`'s to spread and no pixel depends on which thread drew it (D §7). It is
+    // worth spreading because R §11.5 is the largest wall-clock item outside the matcher once
+    // R §11.4's meshes are written in parallel: 3.37 s of synthetic 20's 19.50 at 45c93da, on
+    // 2.25 core-seconds of work (`notes/2026-09-07-e2-tuning.md` §8).
+    let images: Vec<Rgb> = views.par_iter().map(|v| splat(meshes, *v, &frame)).collect();
     Rgb::strip(&images)
 }
 

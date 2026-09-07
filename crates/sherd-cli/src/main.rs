@@ -6,8 +6,10 @@
 //! labels to `segment` and its own `parity` row, step B2 R §3.5's breaklines and theirs, step
 //! B3 the sampled match arrays and the `samples` row, step C1 the first three pair rows —
 //! `hypotheses`, `coarse` and `nms` — step C2 the two refinement rows and step C3 the last two,
-//! `verify` and `candidates`, which is the whole of `match_pair`. `run` and `bench` arrive with
-//! the pipeline they drive (phase 1d) and report that plainly until then.
+//! `verify` and `candidates`, which is the whole of `match_pair`. Step D1 opened phase 1d with the
+//! `assembly` row — R §8's groups, its used joins, its rejections and R §8.2's recentring. `run`
+//! and `bench` arrive with the pipeline they drive (later in phase 1d) and report that plainly
+//! until then.
 
 use std::path::PathBuf;
 
@@ -111,8 +113,8 @@ struct ParityArgs {
     #[arg(long)]
     input: Option<PathBuf>,
     /// Stage to compare: `load`, `thickness`, `working-mesh`, `segmentation`, `breakline`,
-    /// `samples`, `hypotheses`, `coarse`, `nms`, `stage1`, `stage2`, `verify`, `candidates`, or
-    /// `all`. Repeatable.
+    /// `samples`, `hypotheses`, `coarse`, `nms`, `stage1`, `stage2`, `verify`, `candidates`,
+    /// `assembly`, or `all`. Repeatable.
     #[arg(long, default_value = "all")]
     stage: Vec<String>,
     /// Feed each stage the Python stage's own inputs instead of the port's upstream results
@@ -474,8 +476,14 @@ mod tests {
             vec![Stage::Verify, Stage::Candidates],
             "and so do the two verification stages"
         );
-        let err = requested_stages(&["assembly".to_owned()]).unwrap_err().to_string();
-        assert!(err.contains("candidates"), "{err}");
+        assert_eq!(
+            requested_stages(&["assembly".to_owned(), "candidates".to_owned()]).unwrap(),
+            vec![Stage::Candidates, Stage::Assembly],
+            "R §8's row comes after the pair it is built from"
+        );
+        // A stage this build does not compare yet names the ones it does.
+        let err = requested_stages(&["refine".to_owned()]).unwrap_err().to_string();
+        assert!(err.contains("assembly"), "{err}");
     }
 
     #[test]

@@ -12,9 +12,11 @@
 //! `nms` — which read `DIR/pairs/<a>__<b>/` through [`pairs`] instead of a fragment directory,
 //! step C2 the two refinement rows, [`stage1`] and [`stage2`], and step C3 the last two:
 //! [`verify`], which is R §6 at the reference's own stage-2 poses, and [`candidates`], which is
-//! R §5.7's ranking injected and the whole of `match_pair` natively. R §8's assembly follows in
-//! phase 1d.
+//! R §5.7's ranking injected and the whole of `match_pair` natively. Step D1 opened phase 1d with
+//! the last row that judges a decision rather than a number: [`assembly`], R §8's greedy growth
+//! over the accepted joins, which reads `DIR/assembly/` and `DIR/outputs/transforms.json`.
 
+pub mod assembly;
 pub mod breakline;
 pub mod candidates;
 pub mod coarse;
@@ -73,11 +75,13 @@ pub enum Stage {
     Verify,
     /// R §5.7 — what `match_pair` returns: the ranking, the cut and the accepted set.
     Candidates,
+    /// R §8 — the groups, the joins used, the rejections and R §8.2's recentring.
+    Assembly,
 }
 
 impl Stage {
     /// Every stage this build can run, in pipeline order.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Load,
         Self::Thickness,
         Self::WorkingMesh,
@@ -91,6 +95,7 @@ impl Stage {
         Self::Stage2,
         Self::Verify,
         Self::Candidates,
+        Self::Assembly,
     ];
 
     /// The name the command line and the table use.
@@ -109,6 +114,7 @@ impl Stage {
             Self::Stage2 => "stage2",
             Self::Verify => "verify",
             Self::Candidates => "candidates",
+            Self::Assembly => "assembly",
         }
     }
 
@@ -359,6 +365,7 @@ impl Collection {
             Stage::Stage2 => stage2::run(self, mode),
             Stage::Verify => verify::run(self, mode),
             Stage::Candidates => candidates::run(self, mode),
+            Stage::Assembly => assembly::run(self, mode),
         }
     }
 

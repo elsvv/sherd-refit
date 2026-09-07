@@ -1017,6 +1017,54 @@ tie; the port runs Eigen's loop now. What was right about the claim is kept and 
 left-looking factorisation decrements `mat(k, k)` only at step `k`, after `k` has been chosen, so
 the values compared are the original diagonal's.
 
+**2026-09-07, step D1 — §8 is implemented, PMC-8 is re-verified, and four tie rules §8 states
+loosely are written out.** `crates/sherd-core/src/assembly/` implements §8's greedy pass, its two
+tests and §8.2's recentring, and D §10.2's `assembly` row runs it on the reference's own candidate
+lists: over the eight fixture dumps the groups, the joins used, the rejections — **with the
+reference's own English reason, digit for digit** — come back identical, and the poses land
+**7.0e-13 t** from the reference's at the worst (`notes/2026-09-07-d1-assembly.md`).
+
+**PMC-8 is now measured rather than allowed.** Its row lets the port skip the reference's rebuild
+at `t_med` with 15 000 surface points and use the fragment's own cached 20 000-point sample at its
+own `t`, and its re-verify column asks for "assembly `pen` decisions on all benchmarks". Fed the
+reference's own candidates with the port's own samples, the groups, the used joins and the poses
+are **identical on all eight sets**, and so is every rejection's kind and subject. What moves is
+the *number* printed inside a `penetrates` sentence, because that number is R §6.4's fraction
+measured on whichever sample set was drawn: on pot_A it reads 0.129 against the reference's 0.127
+and 0.180 against 0.188, and on pot_H four sentences move likewise; the worst movement anywhere is
+**0.0078**, against a `max_pen` of 0.005 that these rejections clear by twenty to thirty times. No decision changes on
+any set. The row's re-verification is therefore met, and D §10.2 states it as two rows: the
+decision compared exactly, the fraction reported beside it.
+
+**Four things §8's pseudocode above leaves to the reader, which a port has to get right.** None is
+a change to what the reference computes; each is a tie or an iteration order that the text does not
+pin down and the Python does.
+
+* `best_per_pair` keeps a candidate only on `c.score > best.score`, strictly, so the **first**
+  candidate at a pair's top score represents it — and `accepted`'s stable sort is over
+  `dict.values()`, whose order is *insertion* order, so two pairs of equal score come back in the
+  order the matcher produced them (R §4.1's `itertools.combinations` order).
+* `for c in remaining (in order)` is `for c in list(remaining)` in the Python: the pass iterates a
+  **snapshot**, so a join removed during the pass does not shorten that pass. Walking the live list
+  instead skips the candidate after every removal, and that alone changes the answer on **four of
+  the eight fixture sets** — measured, by running the port both ways on the reference's own
+  candidates: pot_A, pot_B, pot_H and synthetic_20 come out with different groups, different used
+  joins or different rejections; the slab, the terracotta, pot_C and pot_G are unaffected.
+* The consistency loop walks **all** of `accepted`, not the joins still remaining, and `c2 ≠ c` is
+  an *identity* test on the candidate object rather than a comparison of its fields.
+* §8.2's `c` is the mean over the **concatenation** of every member's `S[::10]`, not the mean of
+  the members' means. The two coincide here because every fragment carries the same
+  `surface_points`, and they would not if that ever stopped being true.
+
+**The `would merge two groups (not supported)` branch is unreachable under §8's own loop, and no
+fixture exercises it.** A second group is seeded only after a whole pass has made no progress, and
+such a pass has scanned and removed every join with exactly one placed endpoint; what is left all
+has both endpoints unplaced, so it touches no existing group. The first group is therefore frozen
+at the moment the second is seeded, by induction no join ever has its two endpoints in different
+groups, and the branch cannot fire. That matches the dumps: **none of the eight** has a rejection
+of that kind. The port keeps the branch — it is R §8's text and R §8.1's second pass reruns the
+loop on another candidate list — and its own test exercises the sentence rather than the path.
+
 ## 13. Reference results and parity gates
 
 Numbers the port must reproduce on the benchmark sets, with the defaults above (from the notes

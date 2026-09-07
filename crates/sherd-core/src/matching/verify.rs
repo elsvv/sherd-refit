@@ -457,6 +457,52 @@ pub fn penetration_scores(
     (pen_a.max(pen_b), (-min_a).max(-min_b) / sc.t, false)
 }
 
+/// How deep one already-moved point sits inside a mesh, or `None` when it is outside it.
+///
+/// `−sd` of Open3D's signed distance for a point the parity test calls inside, with the AABB
+/// reject in front of it: a point outside the box is outside the mesh, and no ray is cast for it.
+#[inline]
+fn depth_inside(point: [f32; 3], scene: &RayScene, lo: [f32; 3], hi: [f32; 3]) -> Option<f64> {
+    let outside_box = (0..3).any(|k| point[k] < lo[k] || point[k] > hi[k]);
+    if outside_box || !scene.inside(point) {
+        return None;
+    }
+    Some(f64::from(scene.distance(point)))
+}
+
+/// R §6.4's count in one direction alone: the share of `points`, moved by `transform`, that sit
+/// more than `pen` deep inside `scene`.
+///
+/// R §8's assembly asks this question and *only* this question — `(sd < −pen).mean()` with no
+/// `pen_depth` beside it — so it does not pay for [`one_penetration`]'s second pass, which exists
+/// to find `min(sd)` when nothing is inside. The predicate is the same one, point for point.
+///
+/// The points are spread over `rayon`: the answer is a count, so it does not depend on how they
+/// are divided (D §7).
+pub fn penetration_share(
+    points: &[[f64; 3]],
+    transform: &Matrix4<f64>,
+    scene: &RayScene,
+    pen: f64,
+) -> f64 {
+    use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+
+    if points.is_empty() {
+        return 0.0;
+    }
+    let (lo, hi) = scene.aabb();
+    let deeper = points
+        .par_iter()
+        .filter(|p| {
+            depth_inside(narrow(apply(transform, **p)), scene, lo, hi)
+                .is_some_and(|depth| depth > pen)
+        })
+        .count();
+    #[allow(clippy::cast_precision_loss, reason = "sample counts are far below 2^53")]
+    let share = deeper as f64 / points.len() as f64;
+    share
+}
+
 /// One direction of R §6.4: the moved points against one mesh, as `(fraction deeper than `pen`,
 /// smallest signed distance)`.
 ///
@@ -483,11 +529,7 @@ fn one_penetration(
     let mut deepest = f64::NEG_INFINITY;
     let mut deeper_than_pen = 0_usize;
     for point in &moved {
-        let outside_box = (0..3).any(|k| point[k] < lo[k] || point[k] > hi[k]);
-        if outside_box || !scene.inside(*point) {
-            continue;
-        }
-        let distance = f64::from(scene.distance(*point));
+        let Some(distance) = depth_inside(*point, scene, lo, hi) else { continue };
         deepest = deepest.max(distance);
         if distance > pen {
             deeper_than_pen += 1;
@@ -581,11 +623,7 @@ fn median(values: &mut [f64]) -> f64 {
 /// `R·p + τ` — the reference's `apply_transform` for one point.
 #[inline]
 fn apply(t: &Matrix4<f64>, p: [f64; 3]) -> [f64; 3] {
-    [
-        t[(0, 0)] * p[0] + t[(0, 1)] * p[1] + t[(0, 2)] * p[2] + t[(0, 3)],
-        t[(1, 0)] * p[0] + t[(1, 1)] * p[1] + t[(1, 2)] * p[2] + t[(1, 3)],
-        t[(2, 0)] * p[0] + t[(2, 1)] * p[1] + t[(2, 2)] * p[2] + t[(2, 3)],
-    ]
+    crate::types::apply_transform(t, p)
 }
 
 /// `R·n` — the reference's `n @ T[:3, :3].T`, which is not renormalised.
@@ -619,7 +657,7 @@ fn rotate(t: &Matrix4<f64>, n: [f64; 3]) -> [f64; 3] {
 /// company. The loop is written out rather than delegated so that it is the same arithmetic on
 /// every machine (D §7) — nalgebra's `Matrix4::try_inverse` is a cofactor expansion, which is a
 /// different algorithm from the reference's.
-fn pose_inverse(t: &Matrix4<f64>) -> Matrix4<f64> {
+pub fn pose_inverse(t: &Matrix4<f64>) -> Matrix4<f64> {
     let mut m = [[0.0_f64; 4]; 4];
     for (i, row) in m.iter_mut().enumerate() {
         for (j, cell) in row.iter_mut().enumerate() {

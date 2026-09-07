@@ -642,7 +642,7 @@ Two more places where the table is narrower than it sounds:
 | stage 1, stage 2 — distribution (a measurement beside the worst case) | `p50`, `p90`, `p99` and `max` of the same pose deviations over every candidate of the dump | the row's own tolerance | — |
 | stage 1, stage 2 — `chaotic` (an alarm, not a parity requirement) | share of candidates whose own ladder moves further than the row's tolerance when the initial pose moves by one ULP; and, exactly, how many of those the reference itself kept | ≤ 0.002 / ≤ 0.06 per dump and ≤ 0.06 / ≤ 0.4 per pair; zero kept | — |
 | pair result | (the `candidates` row above) | — | **a regression alarm, not a parity claim** (see below): share of pairs returning a different candidate count ≤ 0.4; share accepted by one side only ≤ 0.25 each; share of both-accepted pairs placed more than a wall apart ≤ 0.25; on the rest, median rotation ≤ 1° and median displacement of the moving fragment ≤ 0.3 t |
-| assembly | groups, joins used, rejections | identical | identical |
+| assembly (R §8) | groups; joins used; rejections **with the reference's own reason string**; poses, before and after R §8.2; R §8.2's recentring against `transforms.json` | identical; identical; identical; 1e-9 t; 1e-9 t | **PMC-8 alone** — the reference's candidates on the port's own samples: identical, identical, identical, 1e-9 t. Then, from the port's own candidates, **a regression alarm**: share of the used-join union belonging to one side ≤ 0.5 each; largest group within 4 fragments; every used join inside a group |
 | refine | relative poses within a group | 0.2° / 0.02 t | 0.2° / 0.02 t |
 | outputs | `transforms.json` poses; `report.json` keys | as refine; schema | as refine; schema |
 

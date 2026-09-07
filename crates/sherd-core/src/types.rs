@@ -156,6 +156,22 @@ impl Cloud {
     }
 }
 
+/// `R·p + τ` for one point — the reference's `apply_transform(T, P)` (`sherd_refit.geometry`),
+/// which every stage that moves a point through a 4×4 goes through.
+///
+/// The reference writes it as `P @ T[:3, :3].T + T[:3, 3]`, so the translation is added after the
+/// three-term dot product; `a + b + c + d` associates to the left in Rust exactly as numpy's
+/// matmul-then-add does, and R §6's scores came out bit-identical to the reference's through this
+/// expression on all 2 249 candidates of the eight fixture dumps (step C3).
+#[inline]
+pub fn apply_transform(t: &nalgebra::Matrix4<f64>, p: [f64; 3]) -> [f64; 3] {
+    [
+        t[(0, 0)] * p[0] + t[(0, 1)] * p[1] + t[(0, 2)] * p[2] + t[(0, 3)],
+        t[(1, 0)] * p[0] + t[(1, 1)] * p[1] + t[(1, 2)] * p[2] + t[(1, 3)],
+        t[(2, 0)] * p[0] + t[(2, 1)] * p[1] + t[(2, 2)] * p[2] + t[(2, 3)],
+    ]
+}
+
 /// A rigid transform: candidate poses, placements, refinements.
 ///
 /// The convention is the reference's (R §0): a candidate `T` maps fragment **B** into **A**'s

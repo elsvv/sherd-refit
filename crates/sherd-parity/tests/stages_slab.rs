@@ -37,8 +37,11 @@ fn scratch(tag: &str) -> PathBuf {
 fn copy_dump(to: &Path) {
     std::fs::create_dir_all(to).unwrap();
     std::fs::copy(slab_dump().join("manifest.json"), to.join("manifest.json")).unwrap();
-    for group in ["fragments", "pairs"] {
-        copy_tree(&slab_dump().join(group), &to.join(group));
+    for group in ["fragments", "pairs", "assembly", "outputs", "refine"] {
+        let from = slab_dump().join(group);
+        if from.is_dir() {
+            copy_tree(&from, &to.join(group));
+        }
     }
 }
 
@@ -207,6 +210,59 @@ fn a_perturbed_load_count_fails_the_load_stage() {
     let failed: Vec<&str> = report.failures().map(|c| c.quantity).collect();
     assert_eq!(failed, ["n_orig_faces"], "seven triangles is a failure, and only that one");
     std::fs::remove_dir_all(&dump).ok();
+}
+
+/// R §8's row, made to fail by exactly the thing it measures — the standard every other stage of
+/// this file is held to.
+///
+/// Three perturbations of the *dump's own answer*, one per column: a group that is not the group
+/// the port grows, a used join the reference did not use, and a rejection where there was none.
+#[test]
+fn a_perturbed_assembly_fails_the_stage_that_measures_it() {
+    let dump = scratch("assembly");
+    copy_dump(&dump);
+    let assembly = dump.join("assembly");
+
+    // The slab is one join and one group of two. Split the group.
+    std::fs::write(assembly.join("groups.json"), r#"[["pieceA"], ["pieceB"]]"#).unwrap();
+    let collection = Collection::open(FixtureDir::new(&dump), Some(&slab_input())).unwrap();
+    let report = collection.run(Stage::Assembly, Mode::Injected).unwrap();
+    let failed: Vec<&'static str> = report.failures().map(|c| c.quantity).collect();
+    assert_eq!(
+        failed,
+        ["groups", "recentre"],
+        "a different grouping fails the groups row, and R §8.2's row with it — `recentre` \
+         translates the dump's own groups, so a wrong grouping moves the wrong fragments"
+    );
+
+    // Put the group back and take the join away.
+    std::fs::write(assembly.join("groups.json"), r#"[["pieceA", "pieceB"]]"#).unwrap();
+    std::fs::write(assembly.join("used.json"), "[]").unwrap();
+    let report = collection.run(Stage::Assembly, Mode::Injected).unwrap();
+    let failed: Vec<&'static str> = report.failures().map(|c| c.quantity).collect();
+    assert_eq!(failed, ["used"]);
+
+    // Put the join back and invent a rejection.
+    let used = std::fs::read_to_string(slab_dump().join("assembly/used.json")).unwrap();
+    std::fs::write(assembly.join("used.json"), &used).unwrap();
+    let invented = used.replacen('{', r#"{"reason": "penetrates pieceA (0.500)","#, 1);
+    std::fs::write(assembly.join("rejected.json"), invented).unwrap();
+    let report = collection.run(Stage::Assembly, Mode::Injected).unwrap();
+    let failed: Vec<&'static str> = report.failures().map(|c| c.quantity).collect();
+    assert_eq!(failed, ["rejected"]);
+}
+
+/// A dump whose assembly boundary is not there is skipped, not compared against nothing.
+#[test]
+fn an_assembly_without_its_own_samples_skips() {
+    let dump = scratch("assembly-min");
+    copy_dump(&dump);
+    std::fs::remove_file(dump.join("assembly/md_t_median.json")).unwrap();
+    let collection = Collection::open(FixtureDir::new(&dump), Some(&slab_input())).unwrap();
+    let report = collection.run(Stage::Assembly, Mode::Injected).unwrap();
+    assert_eq!(report.status(), "SKIP");
+    assert!(report.checks.is_empty());
+    assert!(report.skips[0].reason.contains("md_t_median"), "{}", report.skips[0].reason);
 }
 
 #[test]

@@ -26,7 +26,7 @@
 //! | [`fragment`] | §3.2, §3.4–3.7 | S3 (mesh), S4 (cache), B1 (segmentation), B2 (breaklines), B3 (samples) |
 //! | [`spatial`] | §3.2, §3.4.1–3.4.3, §6.1, §6.4 | B1 (rays, KD-tree), C3 (bounded distance, inside test) |
 //! | [`matching`] | §1.2, §4–§7 | C1 (scales, hypotheses, coarse, NMS), C2 (ICP and the two ladders), C3 (verification, `match_pair`, screening) |
-//! | [`assembly`] | §8 | phase 1d |
+//! | [`assembly`] | §8 | D1 |
 //! | [`refine`], [`report`], [`render`], [`pipeline`] | §9, §11, §2 | phase 1d |
 //!
 //! # State
@@ -60,9 +60,13 @@
 //! ([`matching::verify`]), the bounded closest point and the ray-parity inside test they measure
 //! through ([`spatial::bvh`]), R §5.7's ranking and the whole of
 //! [`match_pair`](matching::pair::match_pair), and the optional partner screening of R §4.3
-//! ([`matching::screen`]) — with the `verify` and `candidates` rows of the parity table. What is
-//! left is R §8's assembly and R §9–§11's outputs; they are documented but empty, and are filled
-//! in step by step, each step gated on the fixtures under `fixtures/` and on
+//! ([`matching::screen`]) — with the `verify` and `candidates` rows of the parity table. Step D1
+//! opened phase 1d with R §8's global assembly ([`assembly`]): the greedy growth over the accepted
+//! joins ([`assembly::greedy`]), its two tests ([`assembly::consistency`]), the groups and R §8.2's
+//! recentring ([`assembly::groups`]), and roadmap item 3's constraint format
+//! ([`assembly::constraints`], typed and not yet read) — with the `assembly` row of the parity
+//! table. What is left is R §9's refinement and R §10–§11's outputs; they are documented but empty,
+//! and are filled in step by step, each step gated on the fixtures under `fixtures/` and on
 //! `tools/compare_fixtures.py`.
 
 pub mod assembly;

@@ -1126,28 +1126,71 @@ accepted** (450 000 of 450 000 on terracotta's three capped fragments), and the 
 draws sits within 0.0013 of `150000/|candidates|`, the ratio two independent draws share in
 expectation.
 
+**2026-09-07, task Y — PMC-6 and PMC-9 are re-verified at the collection level, and §13 is
+restated on what the measurement found.** Both rows' re-verify columns point at §13 ("pair gates",
+"injected-sample parity + **statistical gates**"), and until now that meant comparing the port's
+per-set figures against a table holding **one draw** of the reference's own randomised search. The
+sweep behind §13's new ranges (five seeds and ±5 % of the working-mesh budget, three sets, 21 runs
+of the reference; `notes/2026-09-07-y-phase1d-findings.md` §3) shows the table itself moving:
+`pot_B` 88.9–100 %, `synthetic_20` 85–95 %, and `pot_G` — whose row was written as the prohibition
+"no join must be accepted" — accepting **0, 1, 2, 1 and 1** joins as the seed changes. The port's
+figures lie inside that spread on every swept set.
+
+`pot_G` was taken further, because a prohibition is the one kind of row a spread cannot absorb.
+The port's two joins there are 04–07 and 02–05; both are **ground-truth-adjacent pairs at a wrong
+pose** (0.7° / 1.05 t and 2.5° / 1.20 t), which is the same failure the reference itself produces
+at four of the five seeds (02–05 at 1.5° / 1.11 t, and 01–03 at 2.4° / 1.12 t at seed 2). Run the
+**reference's own** §6 verification on the port's two poses and it accepts both, at scores 21.15
+and 18.31 against 2.07 and 0.41 for the best candidate its own seed-0 search found for those pairs;
+run the **port's** verification on the reference's own ten candidates for each of those pairs and
+the verdicts agree 10 of 10 with every score inside D §10.2's tolerances. So §6 is not where the
+two differ: the difference is which poses reach it, which is exactly what PMC-6 and PMC-9 are
+licensed to change, and the reference's own search changes it under nothing but a seed.
+
+**§8.2's mean has a summation order, and it is not the pairwise one.** The port summed the
+concatenated `(N, 3)` cloud with numpy's pairwise blocking, on the assumption that `mean(0)` is
+`np.sum` along an axis. Measured against numpy 2.5.2 on the fixtures' own arrays (4 500 × 3,
+15 000 × 3 and 61 130 × 3): `a.mean(0)` of a C-contiguous array is **bit-identical to a
+left-to-right accumulation per column** — numpy blocks along the axis it walks contiguously, and an
+axis-0 reduction walks the rows — and the pairwise form is up to 8 ULP away. With that corrected
+and the points moved by `apply_transform_fused`, the `assembly` row's `recentre` check, which
+compares the port's §8.2 against the reference's own `transforms.json`, is **exactly 0** on all
+eight dumps where it stood at 7.0e-13 t.
+
 ## 13. Reference results and parity gates
 
 Numbers the port must reproduce on the benchmark sets, with the defaults above (from the notes
 `2026-09-06-scale-pairs.md` §3 and `2026-09-05-test-set-result.md`):
 
-| set | gate |
-|---|---|
-| `input/test_fragments_1` | joins used exactly {021–094, 094–104}; 007 unplaced; both `pen` = 0; 021–094 seam ≈ 20.3 t, 094–104 seam ≈ 10.7 t; tight of both ≥ 0.27 |
-| `input/sfspp/pot_A` | fragment accuracy 87.5 %, precision 1.000 |
-| `pot_B` | 100 %, 1.000 |
-| `pot_C` | 75 %, 0.667 |
-| `pot_G` | 0 % (ground truth interpenetrates; no join must be accepted) |
-| `pot_H` | 36.4 %, 0.429 |
-| `input/synthetic_pingsdorf_20` | 95 %, 1.000 |
-| all sets | cross-object joins 0; group purity 1.000 |
+**The per-set rows are the *spread* the reference itself produces, not a single number.** R §10's
+streams are seeded from `Params.seed`, and no CLI exposes it, so the table used to print whatever
+one draw gave. Running the reference with `Params(seed = 0…4)` and with the working-mesh budget at
+±5 % (190 000 and 210 000 faces, seed 0) moves three of the seven rows — including the one written
+as a prohibition (task Y, `notes/2026-09-07-y-phase1d-findings.md` §3). The seven runs per set are
+what the ranges below are made of; a row with a single figure is the seed-0 draw of a set that has
+not been swept.
 
-**The two seam figures are measurements, and they have moved twice.** They were 21.3 t and 11.3 t
-in `2026-09-05-test-set-result.md`; the budget commits `991ff87` and `ca59c6a` took the second to
-10.7 t (p0 note §5); and §3.2's deterministic ray set (task T1) took the first from 21.33 t to
-20.33 t with the score 11.70 → 10.79 and the tight contact 0.548 → 0.531. The *decisions* did not
-move: the same two joins, the same group, 007 unplaced, both penetrations 0, tight far above 0.27
-on both. `pot_C`'s precision is the one number of this table that is not stable under §3.2's own
+| set | gate | the reference's own seven runs |
+|---|---|---|
+| `input/test_fragments_1` | joins used exactly {021–094, 094–104}; 007 unplaced; both `pen` = 0; tight of both ≥ 0.27; the two seams within 20 % of 20.3 t and 10.7 t | not swept (the row is a set of decisions, and they are stable — see below) |
+| `input/sfspp/pot_A` | fragment accuracy ≥ 87.5 %, precision 1.000 | not swept; 87.5 % at seed 0 |
+| `pot_B` | fragment accuracy 88.9–100 %, precision 1.000 | 100, 88.9, 88.9, 100, 100 % by seed; 100, 100 % at ±5 % faces; precision 1.000 in all seven |
+| `pot_C` | 75 %, precision 0.500–0.667 | not swept; see the note below, which already measured this row's precision at five seeds |
+| `pot_G` | fragment accuracy 0 %; **at most two joins used, and every join used must be a wrong-pose join on a ground-truth-adjacent pair** (the ground truth interpenetrates) | 0, 1, 2, 1, 1 joins by seed; 0, 0 at ±5 % faces; 0 % accuracy in all seven, and every join used was a wrong-pose join on an adjacent pair (1.5–2.5°, 1.11–1.20 t) |
+| `pot_H` | 36.4 %, 0.429 | not swept |
+| `input/synthetic_pingsdorf_20` | fragment accuracy 85–95 %, precision 1.000 | 95, 95, 95, 85, 95 % by seed; 95, 95 % at ±5 % faces; precision 1.000 in all seven |
+| all sets | cross-object joins 0; group purity 1.000 | held in all 21 runs |
+
+**The two seam figures are measurements, and they have moved three times.** They were 21.3 t and
+11.3 t in `2026-09-05-test-set-result.md`; the budget commits `991ff87` and `ca59c6a` took the
+second to 10.7 t (p0 note §5); §3.2's deterministic ray set (task T1) took the first from 21.33 t to
+20.33 t with the score 11.70 → 10.79 and the tight contact 0.548 → 0.531; and the **port**, whose
+working mesh is PMC-2's own decimation rather than Open3D's, measures **20.667 t and 12.333 t**
+(scores 11.50 and 6.60, tight 0.557/0.671 and 0.535/0.557) against the reference's own
+20.333 t and 10.667 t (10.79 and 6.06, 0.531/0.687 and 0.593/0.568) on the same collection — +1.6 %
+and +15.6 %, which is why the row above states a band rather than an "≈". The *decisions* have not
+moved once: the same two joins, the same group, 007 unplaced, both penetrations 0, tight far above
+0.27 on both. `pot_C`'s precision is the one number of this table that is not stable under §3.2's own
 estimator — see the note below.
 
 **`pot_C`'s precision of 0.667 is one draw of a coin, and this table should not have printed it

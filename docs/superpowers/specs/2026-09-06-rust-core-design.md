@@ -1043,8 +1043,13 @@ is a choice about memory and Python's GIL rather than a within-pair scaling limi
 
 ### 10.3 Benchmark gates
 
-Quality: exactly R§13 on every listed set, run natively (no injection), CPU and GPU. Runtime
-(M2 Pro 10-core / 16-core GPU, warm cache, `--no-preview`):
+Quality: **within the reference's own spread as R §13 states it** on every listed set, with
+cross-object joins 0 and group purity 1.000 everywhere and R §13's terracotta row met exactly; run
+natively (no injection), CPU and GPU. The gate used to read "exactly R §13", and R §13 used to
+print one draw of a randomised search: task Y measured the reference at five seeds and at ±5 % of
+the working-mesh budget and found three of its seven rows moving, pot_G's prohibition included
+(`notes/2026-09-07-y-phase1d-findings.md` §3). Runtime (M2 Pro 10-core / 16-core GPU, warm cache,
+`--no-preview`):
 
 | set | CPU gate | GPU gate |
 |---|---|---|
@@ -1055,13 +1060,20 @@ Quality: exactly R§13 on every listed set, run natively (no injection), CPU and
 | synthetic 170 (≈ 12 800 pairs) | ≤ 2 h | ≤ 30 min |
 | `mixed_all` (12 589 pairs) | ≤ 2 h | ≤ 30 min |
 
-**Measured, step D3** (`notes/2026-09-07-d3-run.md` §4), CPU, warm cache and with the previews and
-meshes written — i.e. more work than the gate asks for: terracotta **3.8 s**, pot A 12.4 s (cold),
-pot H **10.5 s**, synthetic 20 **45.2 s**. Against the reference on the same machine, cold on both
-sides: 52.7 → 5.9 s on the terracotta, 130.9 → 10.9 s on pot H, 426.7 → 49.9 s on synthetic 20.
-The two large sets have not been run. Quality: R §13's terracotta gate exactly; four of the six
-`evaluate.py` rows match the Python table, one is better and one worse, and the note attributes both
-to PMC-6/PMC-9 with the `assembly` parity row as the control.
+**Measured, task Y** (`notes/2026-09-07-y-phase1d-findings.md` §2), CPU, warm cache and with the
+previews written — i.e. more work than the gate asks for: terracotta **2.6 s** (gate 25),
+pot A **8.9 s** (35), pot H **10.8 s** (40), synthetic 20 **40.7 s** (120); peak RSS 1.73 GiB on
+the largest set, against D §8's 6 GB. Against the reference on the same machine, cold on both
+sides, step D3's figures stand: 52.7 → 5.9 s on the terracotta, 130.9 → 10.9 s on pot H,
+426.7 → 49.9 s on synthetic 20. The two large sets have not been run.
+
+Quality, task Y, all seven collections run natively: R §13's terracotta row **exactly** (the two
+joins, 007 unplaced, both `pen` 0, tight 0.56/0.67 and 0.54/0.56, seams 20.667 t and 12.333 t);
+pot_A **100 %** / 1.000 (the reference's own seed-0 draw is 87.5 %), pot_B **88.9 %** / 1.000
+(reference 88.9–100 %), pot_C 75 % / 0.667 (=), pot_G 0 % with **two** joins, both wrong-pose on
+ground-truth-adjacent pairs (reference: 0–2 such joins, seed depending), pot_H 36.4 % / 0.429 (=),
+synthetic 20 **90 %** / 1.000 (reference 85–95 %); cross-object joins **0** and group purity
+**1.000** on every set. Every row is inside R §13's restated gate.
 
 ### 10.4 Test layers
 

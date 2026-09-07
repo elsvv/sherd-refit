@@ -87,6 +87,17 @@ pub fn read_points(path: impl AsRef<Path>) -> Result<Vec<[f64; 3]>> {
     triples(path, &a)
 }
 
+/// `(n, 4, 4)` `float64` — the fixtures' pose stacks (`s1.T`, `s2.T_reg1`, …), row-major as
+/// numpy wrote them.
+pub fn read_transforms(path: impl AsRef<Path>) -> Result<Vec<nalgebra::Matrix4<f64>>> {
+    let path = path.as_ref();
+    let a = read::<f64>(path)?;
+    if a.shape.len() != 3 || a.shape[1] != 4 || a.shape[2] != 4 {
+        return Err(Error::fixture(path, format!("shape {:?} is not (n, 4, 4)", a.shape)));
+    }
+    Ok(a.data.chunks_exact(16).map(nalgebra::Matrix4::from_row_slice).collect())
+}
+
 /// `(n, 3)` `int64` — the fixtures' triangle arrays, narrowed to the `u32` the working mesh uses.
 pub fn read_triangles(path: impl AsRef<Path>) -> Result<Vec<[u32; 3]>> {
     let path = path.as_ref();

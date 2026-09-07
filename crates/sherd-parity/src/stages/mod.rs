@@ -9,8 +9,9 @@
 //! Plan step S4 filled in the first three rows of D §10.2's table — `load`, `thickness` and
 //! `working mesh` — step B1 the fourth, `segmentation`, step B2 the fifth, `breakline`, and step
 //! B3 the sixth, `samples`. Step C1 added the first three *pair* rows — `hypotheses`, `coarse` and
-//! `nms` — which read `DIR/pairs/<a>__<b>/` through [`pairs`] instead of a fragment directory.
-//! `stage 1` and the rest follow their stages in phases 1c–1d, as new modules beside these.
+//! `nms` — which read `DIR/pairs/<a>__<b>/` through [`pairs`] instead of a fragment directory, and
+//! step C2 the two refinement rows, [`stage1`] and [`stage2`]. The verification half of D §10.2's
+//! `stage 2` row and the `pair result` row follow their stages in phases 1c–1d.
 
 pub mod breakline;
 pub mod coarse;
@@ -20,18 +21,24 @@ pub mod nms;
 pub mod pairs;
 pub mod samples;
 pub mod segmentation;
+pub mod stage1;
+pub mod stage2;
 pub mod thickness;
 pub mod working_mesh;
 
 use std::path::{Path, PathBuf};
 
+use nalgebra::Matrix4;
+use sherd_core::Params;
 use sherd_core::error::{Error, Result};
+use sherd_core::matching::icp::Numerics;
+use sherd_core::matching::ladder::{Rung, climb};
 use sherd_core::mesh::Mesh;
 
 use crate::layout::FixtureDir;
 use crate::manifest::Manifest;
 use crate::npy;
-use crate::report::{Mode, StageReport};
+use crate::report::{Check, Mode, StageReport};
 
 /// A stage of D §10.2's table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,11 +61,15 @@ pub enum Stage {
     Coarse,
     /// R §5.3 — the poses the non-maximum suppression keeps.
     Nms,
+    /// R §5.4–5.5 — the breakline ICP ladder, its re-score and the second suppression.
+    Stage1,
+    /// R §5.6 — the four registration and fracture rungs.
+    Stage2,
 }
 
 impl Stage {
     /// Every stage this build can run, in pipeline order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::Load,
         Self::Thickness,
         Self::WorkingMesh,
@@ -68,6 +79,8 @@ impl Stage {
         Self::Hypotheses,
         Self::Coarse,
         Self::Nms,
+        Self::Stage1,
+        Self::Stage2,
     ];
 
     /// The name the command line and the table use.
@@ -82,6 +95,8 @@ impl Stage {
             Self::Hypotheses => "hypotheses",
             Self::Coarse => "coarse",
             Self::Nms => "nms",
+            Self::Stage1 => "stage1",
+            Self::Stage2 => "stage2",
         }
     }
 
@@ -94,6 +109,68 @@ impl Stage {
 impl std::fmt::Display for Stage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// The scope a check that is about the whole dump rather than about one pair is filed under.
+pub const ALL_PAIRS: &str = "(all pairs)";
+
+/// Every deviation of one quantity, so that a stage can report its distribution and not only its
+/// worst value (task C2).
+///
+/// D §10.2's rows are worst-case, which is the right thing to *gate* on and the wrong thing to
+/// read alone: it cannot tell "one candidate in a thousand is 3e-3 t out" from "every candidate
+/// is". The two refinement stages therefore keep every per-candidate deviation and add four rows
+/// under the [`ALL_PAIRS`] scope — `p50`, `p90`, `p99` and `max` — against the same tolerance the
+/// per-pair rows carry. The percentile is the nearest-rank one (the `ceil(q·n)`-th of the sorted
+/// samples), which needs no interpolation rule and cannot invent a value between two measurements.
+#[derive(Debug, Default)]
+pub struct Spread {
+    samples: Vec<f64>,
+}
+
+impl Spread {
+    /// Records one candidate's deviation.
+    pub fn push(&mut self, deviation: f64) {
+        self.samples.push(deviation);
+    }
+
+    /// How many deviations were recorded.
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// True when nothing was recorded.
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    /// The nearest-rank `q`-quantile of what was recorded, or zero when nothing was.
+    pub fn percentile(&mut self, q: f64) -> f64 {
+        if self.samples.is_empty() {
+            return 0.0;
+        }
+        self.samples.sort_by(f64::total_cmp);
+        #[allow(clippy::cast_precision_loss, reason = "sample counts are far below 2^53")]
+        let n = self.samples.len() as f64;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a rank in 1..=n"
+        )]
+        let rank = ((q * n).ceil() as usize).clamp(1, self.samples.len());
+        self.samples[rank - 1]
+    }
+
+    /// Adds the four distribution rows for one quantity, in the order `p50`, `p90`, `p99`, `max`.
+    pub fn report(&mut self, report: &mut StageReport, rows: [&'static str; 4], tolerance: f64) {
+        if self.samples.is_empty() {
+            return;
+        }
+        for (row, q) in rows.iter().zip([0.5, 0.9, 0.99, 1.0]) {
+            let value = self.percentile(q);
+            report.push(Check::absolute(ALL_PAIRS, row, value, 0.0, tolerance));
+        }
     }
 }
 
@@ -207,6 +284,12 @@ pub struct Collection {
     pub target_faces: usize,
     /// The fragments, in collection order (R §2).
     pub fragments: Vec<FragmentFixture>,
+    /// The numerics every ICP of the pair stages runs under (D §7).
+    ///
+    /// [`Numerics::REFERENCE`] is what D §10.2's rows are stated for; the other three combinations
+    /// are experiment E5's instrument and reach here through `sherd-refit-rs parity
+    /// --icp-precision/--icp-assembly`.
+    pub icp: Numerics,
 }
 
 impl Collection {
@@ -238,7 +321,14 @@ impl Collection {
             })
             .collect();
         let target_faces = manifest.collection.face_cap();
-        Ok(Self { dir, manifest, input: input.map(Path::to_path_buf), target_faces, fragments })
+        Ok(Self {
+            dir,
+            manifest,
+            input: input.map(Path::to_path_buf),
+            target_faces,
+            fragments,
+            icp: Numerics::REFERENCE,
+        })
     }
 
     /// Runs one stage in one mode.
@@ -253,13 +343,131 @@ impl Collection {
             Stage::Hypotheses => hypotheses::run(self, mode),
             Stage::Coarse => coarse::run(self, mode),
             Stage::Nms => nms::run(self, mode),
+            Stage::Stage1 => stage1::run(self, mode),
+            Stage::Stage2 => stage2::run(self, mode),
         }
+    }
+
+    /// The same collection with other ICP numerics (experiment E5).
+    #[must_use]
+    pub fn with_icp(self, icp: Numerics) -> Self {
+        Self { icp, ..self }
     }
 
     /// Runs several stages in one mode, in pipeline order.
     pub fn run_all(&self, stages: &[Stage], mode: Mode) -> Result<Vec<StageReport>> {
         stages.iter().map(|&stage| self.run(stage, mode)).collect()
     }
+}
+
+/// The rotation (in degrees) and the translation (in wall thicknesses) between two poses.
+///
+/// The pair of numbers every pose row of D §10.2 is stated in, and the one step C1's `hypotheses`
+/// row already uses: the angle of `Rᵀ R'`, whose trace is `1 + 2cos θ`, and `|τ − τ'| / t`. The
+/// translation is the displacement of the *origin*, so a pure rotation difference shows up in both
+/// rows — which is the conservative way round.
+pub fn pose_gap(ours: &Matrix4<f64>, theirs: &Matrix4<f64>, t: f64) -> (f64, f64) {
+    let mut trace = 0.0;
+    for i in 0..3 {
+        for j in 0..3 {
+            trace += ours[(i, j)] * theirs[(i, j)];
+        }
+    }
+    let angle = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos().to_degrees();
+    let mut distance = 0.0;
+    for i in 0..3 {
+        distance += (ours[(i, 3)] - theirs[(i, 3)]).powi(2);
+    }
+    (angle, distance.sqrt() / t)
+}
+
+/// Whether a candidate's ICP ladder is a function of its input at double precision — task C2's
+/// chaos probe.
+///
+/// A ladder is re-run from the twelve initial poses one ULP from `init` (each entry of the 3×4
+/// block moved to its next representable neighbour, one at a time), and the candidate is
+/// *determined* when every one of those answers lands within the row's own tolerance of this one.
+///
+/// It exists because some candidates are not. Stage 1 registers a breakline subset against a
+/// breakline at a radius that, on a pose the coarse score kept but that is nowhere near a seam,
+/// leaves **thirteen** correspondences on the first rung and **six** on the second (measured on
+/// terracotta `FY234021__FY234104`, candidate 165 of 250): a Umeyama fit on six point pairs of a
+/// curve has almost no redundancy to average the last bits away, and the trajectory is chaotic. **The reference is the side that cannot reproduce itself there**,
+/// and that was measured on Open3D rather than argued (`notes/2026-09-07-c2-icp.md` §5). On
+/// `Pot_B_Piece_01__06`, whose ten stage-2 candidates start from the dump's own `s1.T` and so are
+/// bit-exact inputs, Open3D at `OMP_NUM_THREADS=1` reproduces its own dumped pose exactly for all
+/// ten; nudging one entry of `T0` by one ULP then moves *its* answer by 24.8°, 65.5° and 101.7°
+/// (39–145 t) for candidates 1, 2 and 3 — on 11 to 12 of the 12 perturbations — and by nothing at
+/// all, on none of the 12, for the other seven. Those three are exactly the three this probe
+/// refuses. Re-running the same Open3D on ten OpenMP threads moves the same three by 10.4°, 22.1°
+/// and 11.4° and the other seven by ≤ 8.5e-10 t. No implementation can reproduce another's answer
+/// there, and a comparison of the two measures the last bit of a reduction.
+///
+/// The probe is run **only for a candidate that already failed its row**, so a stable candidate
+/// costs nothing, and the share of candidates it excuses is itself a gated row.
+pub fn determined(
+    rungs: &[Rung<'_>],
+    init: &Matrix4<f64>,
+    scales: &sherd_core::matching::scales::Scales,
+    numerics: Numerics,
+    rotation: f64,
+    translation: f64,
+) -> bool {
+    let Some(base) = climb(rungs, init, scales, numerics).last().copied() else { return true };
+    for i in 0..3 {
+        for j in 0..4 {
+            let mut near = *init;
+            near[(i, j)] = near[(i, j)].next_up();
+            let Some(other) = climb(rungs, &near, scales, numerics).last().copied() else {
+                continue;
+            };
+            let (angle, distance) = pose_gap(&other.transform, &base.transform, scales.t);
+            if angle > rotation || distance > translation {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Both fragments' R §3.6 clouds at the pair's own `t`, or `None` with the skip already recorded.
+///
+/// The two ICP stages need the same six arrays per side and the same reasons to skip, so they ask
+/// for them here rather than each rebuilding the reader.
+#[allow(clippy::too_many_arguments, reason = "every argument is a piece of the dump")]
+pub fn clouds(
+    collection: &Collection,
+    pair: &pairs::PairFixture,
+    fa: &sherd_core::matching::hypotheses::Frames,
+    fb: &sherd_core::matching::hypotheses::Frames,
+    used: &pairs::MdUsed,
+    params: &Params,
+    normals: &mut pairs::NormalCache,
+    report: &mut StageReport,
+) -> Result<Option<(pairs::RefClouds, pairs::RefClouds)>> {
+    let scope = pair.scope();
+    let (Some(a), Some(b)) = (collection.fragment(&pair.a), collection.fragment(&pair.b)) else {
+        report.skip(&scope, "a fragment of the pair is not in the collection");
+        return Ok(None);
+    };
+    let reg_points = params.reg_points as usize;
+    let mut side = |fragment: &FragmentFixture,
+                    frames: &sherd_core::matching::hypotheses::Frames| {
+        let Some(face_normals) = normals.get(fragment)? else { return Ok(None) };
+        pairs::reference_clouds(
+            fragment,
+            frames,
+            face_normals,
+            used.t,
+            used.surface_points,
+            reg_points,
+        )
+    };
+    let (Some(clouds_a), Some(clouds_b)) = (side(a, fa)?, side(b, fb)?) else {
+        report.skip(&scope, "the dump has no working mesh or no sample arrays at the pair's own t");
+        return Ok(None);
+    };
+    Ok(Some((clouds_a, clouds_b)))
 }
 
 #[cfg(test)]
@@ -321,7 +529,7 @@ mod tests {
             assert_eq!(Stage::parse(stage.as_str()), Some(stage));
             assert_eq!(stage.to_string(), stage.as_str());
         }
-        assert_eq!(Stage::parse("stage1"), None, "R §5.4, not this build");
+        assert_eq!(Stage::parse("verify"), None, "R §6, not this build");
     }
 
     /// Finding F2: `target_faces = 0` and a manifest with no `target_faces` key are the same

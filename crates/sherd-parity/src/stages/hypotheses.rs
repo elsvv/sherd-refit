@@ -146,7 +146,7 @@ fn native(collection: &Collection, report: &mut StageReport) -> Result<()> {
 
 /// The reference's frames for both sides of a pair at the pair's own `t`, or `None` with the skip
 /// already recorded.
-pub(crate) fn sides(
+pub fn sides(
     collection: &Collection,
     pair: &PairFixture,
     report: &mut StageReport,

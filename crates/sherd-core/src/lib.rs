@@ -25,7 +25,7 @@
 //! | [`mesh`] | §3.1 (clean, components) S2; §3.3 (the rest) S3; §3.4.6 islands B1 | S2, S3, B1 |
 //! | [`fragment`] | §3.2, §3.4–3.7 | S3 (mesh), S4 (cache), B1 (segmentation), B2 (breaklines), B3 (samples) |
 //! | [`spatial`] | §3.2, §3.4.1–3.4.3, §6.1, §6.4 | B1 (rays, KD-tree), phase 1c (inside test) |
-//! | [`matching`] | §1.2, §4–§7 | C1 (scales, hypotheses, coarse, NMS), phase 1c (the rest) |
+//! | [`matching`] | §1.2, §4–§7 | C1 (scales, hypotheses, coarse, NMS), C2 (ICP and the two ladders), phase 1c (the rest) |
 //! | [`assembly`] | §8 | phase 1d |
 //! | [`refine`], [`report`], [`render`], [`pipeline`] | §9, §11, §2 | phase 1d |
 //!
@@ -52,7 +52,11 @@
 //! hypotheses of R §5.1 ([`matching::hypotheses`]), the coarse breakline score of R §5.2
 //! ([`matching::coarse`]), the non-maximum suppression of R §5.3 ([`matching::nms`]) and the
 //! [`Pair`](matching::pair::Pair) of R §4.2 that drives them — with the `hypotheses`, `coarse` and
-//! `nms` rows of the parity table. The remaining algorithm modules are documented but empty; they
+//! `nms` rows of the parity table. Step C2 added the refinement: Open3D's `registration_icp` as
+//! R §7 freezes it ([`matching::icp`]) and the two ladders it drives ([`matching::ladder`]) — the
+//! breakline rungs of R §5.4 with their re-score, the suppression of R §5.5, and the four
+//! registration and fracture rungs of R §5.6 — with the `stage1` and `stage2` rows of the parity
+//! table. The remaining algorithm modules are documented but empty; they
 //! are filled in step by step, each step gated on the fixtures under `fixtures/` and on
 //! `tools/compare_fixtures.py`.
 

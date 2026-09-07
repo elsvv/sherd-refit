@@ -103,10 +103,12 @@ fn every_stage_passes_on_the_slab_in_both_modes() {
         let reports = collection.run_all(&Stage::ALL, mode).expect("the stages run");
         assert_eq!(reports.len(), Stage::ALL.len());
         for report in &reports {
-            // D §10.2 gives `coarse` and `nms` no native column: both are functions of a draw the
-            // port makes with its own generator (PMC-9), so natively there is nothing to compare
-            // and the stage says so instead of inventing a tolerance.
-            let no_native_column = mode == Mode::Native && matches!(report.stage, "coarse" | "nms");
+            // D §10.2 gives `coarse`, `nms` and the two refinement stages no native column: all
+            // four are functions of a draw the port makes with its own generator (PMC-9), so
+            // natively there is nothing to compare and the stage says so instead of inventing a
+            // tolerance.
+            let no_native_column = mode == Mode::Native
+                && matches!(report.stage, "coarse" | "nms" | "stage1" | "stage2");
             assert_eq!(
                 report.status(),
                 if no_native_column { "SKIP" } else { "PASS" },

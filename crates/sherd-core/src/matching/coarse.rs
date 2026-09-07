@@ -26,6 +26,7 @@
 //! reproduces the reference's scores, which is what the injected parity row measures. Natively the
 //! two implementations evaluate the same estimator on a different sixty points.
 
+use nalgebra::{Matrix3, Matrix4, Vector3};
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 
 use crate::matching::hypotheses::{Frames, Hypotheses};
@@ -121,35 +122,80 @@ pub fn scores(target: &Target<'_>, probe: &Probe, hyp: &Hypotheses, delta: f64) 
     (0..hyp.len())
         .into_par_iter()
         .map(|h| {
-            let rot = &hyp.r[h];
-            let mut agree = 0_u32;
-            for (point, normal) in probe.q.iter().zip(&probe.qn) {
-                let moved = hyp.apply(h, point);
-                // The radius is scipy's `distance_upper_bound`, and it is what makes this stage
-                // affordable: most probe points of most poses land nowhere near A's breakline,
-                // and a bounded search abandons those in a few comparisons.
-                let Some((near, distance)) = target.tree.nearest_within(&moved, delta) else {
-                    continue;
-                };
-                // scipy's bound is *exclusive* — a neighbour exactly at `delta` comes back as a
-                // miss (`inf`), which is what `np.isfinite(d)` then reads.
-                if distance >= delta {
-                    continue;
-                }
-                let turned = [
-                    rot[(0, 0)] * normal[0] + rot[(0, 1)] * normal[1] + rot[(0, 2)] * normal[2],
-                    rot[(1, 0)] * normal[0] + rot[(1, 1)] * normal[1] + rot[(1, 2)] * normal[2],
-                    rot[(2, 0)] * normal[0] + rot[(2, 1)] * normal[1] + rot[(2, 2)] * normal[2],
-                ];
-                let theirs = target.normals[near as usize];
-                let dot = theirs[0] * turned[0] + theirs[1] * turned[1] + theirs[2] * turned[2];
-                if dot > NORMAL_AGREE {
-                    agree += 1;
-                }
-            }
-            f64::from(agree) / points
+            f64::from(agreeing(target, &probe.q, &probe.qn, &hyp.r[h], &hyp.tau[h], delta)) / points
         })
         .collect()
+}
+
+/// R §5.4's `brk_score`: the same estimator as [`scores`], on one pose and a point set of the
+/// caller's choosing.
+///
+/// Stage 1 re-scores each refined pose against A's breakline at `sc.stage1` (0.06 t) rather than
+/// `sc.coarse` (0.15 t), and over the whole of B's `brk_sub` rather than sixty of it — a different
+/// radius and a different point set, the same kernel (D §6.5). `points` and `normals` are B's
+/// breakline points and shell normals at `brk_sub`, in that order.
+pub fn score_pose(
+    target: &Target<'_>,
+    points: &[[f64; 3]],
+    normals: &[[f64; 3]],
+    transform: &Matrix4<f64>,
+    delta: f64,
+) -> f64 {
+    if points.is_empty() {
+        return 0.0;
+    }
+    let mut rot = Matrix3::zeros();
+    for i in 0..3 {
+        for j in 0..3 {
+            rot[(i, j)] = transform[(i, j)];
+        }
+    }
+    let tau = Vector3::new(transform[(0, 3)], transform[(1, 3)], transform[(2, 3)]);
+    #[allow(clippy::cast_precision_loss, reason = "a breakline subset is a few thousand points")]
+    let n = points.len() as f64;
+    f64::from(agreeing(target, points, normals, &rot, &tau, delta)) / n
+}
+
+/// How many of `points` land on the target's breakline under the pose `(rot, tau)` with agreeing
+/// shell normals — the inner loop of R §5.2 and R §5.4, written once.
+fn agreeing(
+    target: &Target<'_>,
+    points: &[[f64; 3]],
+    normals: &[[f64; 3]],
+    rot: &Matrix3<f64>,
+    tau: &Vector3<f64>,
+    delta: f64,
+) -> u32 {
+    let mut agree = 0_u32;
+    for (point, normal) in points.iter().zip(normals) {
+        let moved = [
+            rot[(0, 0)] * point[0] + rot[(0, 1)] * point[1] + rot[(0, 2)] * point[2] + tau[0],
+            rot[(1, 0)] * point[0] + rot[(1, 1)] * point[1] + rot[(1, 2)] * point[2] + tau[1],
+            rot[(2, 0)] * point[0] + rot[(2, 1)] * point[1] + rot[(2, 2)] * point[2] + tau[2],
+        ];
+        // The radius is scipy's `distance_upper_bound`, and it is what makes this stage
+        // affordable: most probe points of most poses land nowhere near A's breakline, and a
+        // bounded search abandons those in a few comparisons.
+        let Some((near, distance)) = target.tree.nearest_within(&moved, delta) else {
+            continue;
+        };
+        // scipy's bound is *exclusive* — a neighbour exactly at `delta` comes back as a miss
+        // (`inf`), which is what `np.isfinite(d)` then reads.
+        if distance >= delta {
+            continue;
+        }
+        let turned = [
+            rot[(0, 0)] * normal[0] + rot[(0, 1)] * normal[1] + rot[(0, 2)] * normal[2],
+            rot[(1, 0)] * normal[0] + rot[(1, 1)] * normal[1] + rot[(1, 2)] * normal[2],
+            rot[(2, 0)] * normal[0] + rot[(2, 1)] * normal[1] + rot[(2, 2)] * normal[2],
+        ];
+        let theirs = target.normals[near as usize];
+        let dot = theirs[0] * turned[0] + theirs[1] * turned[1] + theirs[2] * turned[2];
+        if dot > NORMAL_AGREE {
+            agree += 1;
+        }
+    }
+    agree
 }
 
 #[cfg(test)]

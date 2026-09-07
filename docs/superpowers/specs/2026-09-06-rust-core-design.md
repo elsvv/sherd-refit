@@ -120,7 +120,14 @@ Experiments (each is a small Rust or Python script, run before the phase that de
 - **E4 BVH parity.** Closest-point distances and signed distances of the terracotta samples
   against Open3D's `RaycastingScene`: |Δd| ≤ 1e-4·t; sign flips only at |d| < 1e-4·t.
 - **E5 f32 ICP.** Run the injected-fixture ICPs of the terracotta pairs in f32 and f64; the f32
-  result must stay within §10.2 tolerances (expected: 1e-5 t).
+  result must stay within §10.2 tolerances (expected: 1e-5 t). **Done in task C2, and the answer is
+  no** (`notes/2026-09-07-c2-icp.md` §6): with the point loops in `f32` and the pose and 6×6 solve
+  still `f64`, terracotta's stage-2 pose is 1.9e-6 t out at the median but 0.257 t at p99, and on
+  the thin-walled pots — where the same absolute `f32` step is many more wall thicknesses — the
+  *median* is 0.115 t (pot B), 2.33 t (pot C) and 9.80 t (pot G). It is outside §10.2 on all seven
+  sets. The stage-1 point-to-point rungs survive in the bulk (p99 inside 0.01 t on five of seven);
+  stage 2 does not, and stage 2 is where the time goes. The ladders stay in `f64`; a GPU executor that wants
+  `f32` has to shrink the coordinates first (§7).
 - **E6 numpy RNG replication** (optional, only if bit-parity in native mode is demanded): port
   SeedSequence + PCG64 + `Generator.choice`/`random`; ≈ 2 days; recommendation: do not.
 - **E7 naga fast-math.** Inspect generated MSL/SPIR-V/HLSL and the compile options wgpu-hal
@@ -488,7 +495,7 @@ type) as a diagnostic, not a production mode.
 | thread count | results must be identical for `--threads 1` and `--threads N` (CI test) |
 | CPU vs GPU | within §10.2; not bit-identical (different ULP behaviour); the report records the backend |
 | platforms | same backend, same binary → identical; across OS/compilers → f32 ULP-level differences are possible in `libm` calls (`acos`, `sin`); tolerance-based |
-| ill-conditioning | point-to-plane systems are assembled in coordinates centred on the target centroid and the update re-expressed about the origin (an exact re-parameterisation of the same Gauss–Newton step; differences O(|ω|²·|c|) ≈ 1e-6 t); f32-safe |
+| ill-conditioning | **measured in task C2 and not adopted.** Assembling the point-to-plane system about the target centroid and re-expressing the update about the origin is an exact re-parameterisation of the *linear* Gauss–Newton step but not of the finite update, which differs by `(R − I − ω̂)c = O(|ω|²·|c|)` per iteration. That was estimated at 1e-6 t; on terracotta it is 0.044 t at the median of stage 2 and 0.61 t at p90 (`|c| ≈ 100–150` units, `|ω| ≈ 0.1` rad, thirty unconverged iterations), so the poses of §10.2 are computed in world coordinates as R §7 writes them. Shrinking coordinates for an `f32` path means translating **both clouds** by `−c` — a rigid change of frame R §7 is equivariant under — not re-parameterising the Jacobian alone. `icp::Assembly` keeps both forms because it is what measured this |
 
 ## 8. Memory budget (170 scans)
 
@@ -620,8 +627,10 @@ Two more places where the table is narrower than it sounds:
 | coarse | `cs` per hypothesis, on the reference's own `coarse.idx` | ≤ 1/60 + 1e-6, **and bit-exact** (`cs exact`); probe count and pool exact | — |
 | nms | kept hypotheses, on the reference's own walk order `nms1.order` | identical, in order | — |
 | nms, PMC-6 tie effect (a measurement, not a parity requirement) | with the port's **own** tie-break: kept count; share of the reference's kept set missed; score at equal rank; share of its kept poses not covered by a kept pose of the port's | ±5 %; ≤ 0.5; ≤ 3/60; ≤ 0.5 | — |
-| stage 1 | pose per kept hypothesis (by id); `s1` | 0.05° / 0.01 t; ±0.02 | — |
-| stage 2 | pose per candidate (by stage-1 id); `tight`; `gap`; `seam`; `cont`; `cont_n`; `pen`; `accepted` | 0.05° / 0.01 t; ±0.01; ±0.002 t; ±0.34 t; ±0.005 t; ±0.01; ±0.0005; identical | — |
+| stage 1 | pose per kept hypothesis (by id); `s1`; the ICP's own fitness and rmse at both poses; `kept2` on the reference's own walk order `nms2.order` | 0.05° / 0.01 t; ±0.02; 1e-4 and 1e-4 t; identical, in order | — |
+| stage 2 | pose per candidate (by stage-1 id) **on each of the four rungs**; fitness and rmse at both poses; `tight`; `gap`; `seam`; `cont`; `cont_n`; `pen`; `accepted` | 0.05° / 0.01 t; 1e-4 and 1e-4 t; ±0.01; ±0.002 t; ±0.34 t; ±0.005 t; ±0.01; ±0.0005; identical | — |
+| stage 1, stage 2 — distribution (a measurement beside the worst case) | `p50`, `p90`, `p99` and `max` of the same pose deviations over every candidate of the dump | the row's own tolerance | — |
+| stage 1, stage 2 — `chaotic` (an alarm, not a parity requirement) | share of candidates whose own ladder moves further than the row's tolerance when the initial pose moves by one ULP; and, exactly, how many of those the reference itself kept | ≤ 0.002 / ≤ 0.06 per dump and ≤ 0.06 / ≤ 0.4 per pair; zero kept | — |
 | pair result | accepted set; best candidate of pairs with an accepted join | identical; 1° / 0.05 t | identical; 1° / 0.05 t (perf-note criterion); no requirement on the best candidate of pairs without a join |
 | assembly | groups, joins used, rejections | identical | identical |
 | refine | relative poses within a group | 0.2° / 0.02 t | 0.2° / 0.02 t |
@@ -789,6 +798,34 @@ pool the port's two stages are 0.03 s and 0.12 s of wall clock. The port's first
 `distance_upper_bound`, and passing it into the query (`PointTree::nearest_within`) took the
 coarse stage over synthetic_20 from 1 800 core-seconds to 178 with bit-identical scores.
 
+**The two refinement rows of step C2 are met on all eight sets** (`notes/2026-09-07-c2-icp.md`).
+Injected: **3 654 comparisons of stage 1 and 3 400 of stage 2, none failed**, over 71 841 stage-1
+and 2 249 stage-2 candidates. The distribution matters more than the worst case here and the rows
+report both: the pose deviation is 0.000° and 1e-14 to 1e-11 t at the median, at worst 3e-10 t
+(stage 1) and 7e-5 t (stage 2) at p99, and 5.4e-3 t at the maximum — 54 % of the row's 0.01 t, on a
+candidate whose registration clouds never touch and whose `fitness` is zero on both sides. R §5.4's
+re-score `s1` is identical on every candidate of every set, and R §5.5's suppression keeps the
+reference's list exactly when it is walked in the reference's own `nms2.order`.
+
+**The `chaotic` rows are the reason those two rows can be stated at all, and they are an alarm
+rather than a claim.** 48 candidates of the 74 090 have ladders that are not functions of their
+input at double precision, and step C2 measured that on *Open3D* rather than asserting it: on the
+ten stage-2 candidates of `Pot_B_Piece_01__06`, fed the dump's own `s1.T`, Open3D reproduces its own
+dumped pose exactly for all ten, and then moving one entry of `T0` by one ULP moves its answer for
+candidates 1, 2 and 3 by 24.8°, 65.5° and 101.7° (39–145 t) while leaving the other seven at zero —
+and running the same Open3D on ten OpenMP threads instead of one moves the same three by 10–22° and
+the other seven by ≤ 8.5e-10 t. The harness excludes exactly those from the pose rows, gates their
+share, and requires **exactly zero** of them to have been kept by the reference's own R §5.5 or
+accepted by its own verification; on all eight sets that count is zero.
+
+**Cost of the two ladders, single-threaded, against the reference on the same pairs and clouds:**
+a terracotta pair's 250 breakline ladders and 10 surface ladders take the reference 0.810 s and
+6.220 s and the port 0.078 s and 0.617 s (10.4× and 10.1×); a pot B pair's take 2.158 s and 1.710 s
+against 0.344 s and 0.387 s (6.3× and 4.4×). One thread of the port also beats ten OpenMP threads of
+the reference by 2.4–6.6×; part of that is structural, since Open3D rebuilds a `KDTreeFlann` inside
+every `registration_icp` call and the port builds one tree per cloud and reuses it across the rungs
+and the candidates.
+
 **The whole table, as it stands after T1.** Six stages, eight fixture sets, both modes:
 **3 847 injected comparisons with no failure, and 1 524 native comparisons with five** — the
 `p99 distance` and `dihedral KS` rows of the paragraphs above, on three fragments of synthetic_20.
@@ -863,6 +900,7 @@ shorten phase 1+2 to ≈ 14 weeks because GPU work can start once the CPU ICP is
 | 1b, step B3 | done: the sampled match arrays (R §3.5.1–3.5.2, §3.5.6), `MatchData` (R §3.6), the five sampled tensors, the `samples` parity row | | injected 660 of 660 on all 66 fragments (`n_frac`, the margin and the face indices exact); native 390 of 396, six failures on four fragments the segmentation and thickness rows already name (§10.2) | none new; the native `Pf spacing` column is found to inherit the `segmentation` row above it |
 | 1c | hypotheses, coarse, NMS, ICP (E5), verification, `match_pair`, screening flags | 2.5 | stage-2 injected tolerances on every fixture pair | ICP corner cases (empty correspondences), tie handling |
 | 1c, step C1 | done: pair scales (R §1.2, §4.2), hypotheses (R §5.1), the coarse score (R §5.2) and the NMS (R §5.3), with the `hypotheses`, `coarse` and `nms` parity rows | | injected 6 086 of 6 086 on 358 pairs of eight sets — the `(pa, pb)` set and order exact, `Scales` bit-identical, `cs` bit-identical on 38.1 M hypotheses, the kept list identical on the reference's own walk order; native 1 074 of 1 074 (§10.2) | PMC-6's tie effect is now measured rather than assumed: membership differs by up to 43.6 %, quality by at most two probe points |
+| 1c, step C2 | done: Open3D's ICP (R §7), the two refinement ladders (R §5.4–5.6), R §5.5's suppression and the `stage1`/`stage2` parity rows, with experiment E5 | | injected 3 654 (stage 1) and 3 400 (stage 2) with no failure on 358 pairs of eight sets — median pose deviation 0.000° / 1e-13 t, worst 5.4e-3 t of 0.01 t; no native column (§10.2) | 48 candidates of 74 090 have ladders neither implementation can reproduce, measured on Open3D itself; E5 answered: `f32` point loops and the centred assembly are both outside §10.2 (§3, §7) |
 | 1d | assembly, refinement, recentre, report/transforms/meshes, renderer, CLI, determinism tests | 2 | R§13 gates natively; CI green on 4 OSs | none major |
 | 1e | profiling and CPU tuning to §10.3 CPU gates | 1.5 | CPU gates | 2 h collection gate has 1.6× margin only |
 | **phase 1 total** | | **11** | | |

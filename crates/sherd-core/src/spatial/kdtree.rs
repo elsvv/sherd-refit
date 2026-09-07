@@ -81,13 +81,34 @@ impl PointTree {
         if radius < 0.0 {
             return None;
         }
+        self.nearest_within_squared(query, radius * radius).map(|(i, d2)| (i, d2.sqrt()))
+    }
+
+    /// [`PointTree::nearest_within`] with the radius given **squared**, and the squared distance
+    /// returned — the form R §7's correspondence search needs.
+    ///
+    /// Open3D's `KDTreeFlann::SearchHybrid` hands FLANN `max_correspondence_distance²` and gets
+    /// squared distances back, and both the radius test and the `error²` it accumulates are then
+    /// in squared units. Going through [`PointTree::nearest_within`] would take a square root here
+    /// and square it again in the caller, which is two roundings the reference does not have.
+    ///
+    /// The bound is inclusive (`d² ≤ r²`); R §7's caller wants Open3D's strict `<` and applies it
+    /// to the returned distance itself, so that the rule is stated where it is used.
+    pub fn nearest_within_squared(
+        &self,
+        query: &[f64; 3],
+        radius_squared: f64,
+    ) -> Option<(u32, f64)> {
+        if radius_squared < 0.0 {
+            return None;
+        }
         let hit = self
             .tree
             .query(query)
             .nearest_n::<SquaredEuclidean<f64>>(NonZeroUsize::new(1).expect("1 is not zero"))
-            .within::<SquaredEuclidean<f64>>(radius * radius)
+            .within::<SquaredEuclidean<f64>>(radius_squared)
             .execute();
-        hit.first().map(|hit| (hit.item, hit.distance.sqrt()))
+        hit.first().map(|hit| (hit.item, hit.distance))
     }
 
     /// Every point within `radius` of `query` (inclusive), ascending by index.
@@ -170,6 +191,12 @@ mod tests {
         assert_eq!(tree.nearest(&[100.0, 100.0, 0.0]), 24);
         assert_eq!(tree.nearest_within(&[100.0, 100.0, 0.0], 1.0), None);
         assert_eq!(tree.nearest_within(&[0.0, 0.0, 0.0], -1.0), None);
+        assert_eq!(tree.nearest_within_squared(&[0.0, 0.0, 0.0], -1.0), None);
+
+        // The squared form is the same search without the two roundings: `d²`, not `sqrt(d²)²`.
+        let (i, d2) = tree.nearest_within_squared(&[0.1, 0.2, 0.0], 1.0).expect("inside");
+        assert_eq!(i, 0);
+        assert!((d2 - 0.05).abs() < 1e-16, "{d2}");
 
         // Inside the radius it is the unbounded answer, on every point of a fine sweep.
         for k in 0..200 {

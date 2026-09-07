@@ -597,7 +597,7 @@ point-to-plane), initial `T0`, correspondence distance `d`, `max_iter`; converge
 
 ```
 T ← T0;   P ← apply(T0, S)
-corr(P): for each i: j = nearest target point (KD-tree) with |P_i − Q_j| ≤ d, else none
+corr(P): for each i: j = nearest target point (KD-tree) with |P_i − Q_j| < d, else none   # strict, see below
          C = {(i, j)};  fitness = |C| / n;  rmse = sqrt( Σ_{C} |P_i − Q_j|² / |C| )   (rmse = 0 if C empty)
 (fit, rmse, C) ← corr(P)
 for it in 1..max_iter:
@@ -629,6 +629,14 @@ is; the port implements the Euler form.)
 μp = mean P_i, μq = mean Q_j over C;  Σ = Σ (Q_j − μq)(P_i − μp)ᵀ / |C|
 SVD Σ = U S Vᵀ;  D = diag(1, 1, sign(det U · det V));  R = U D Vᵀ;  τ = μq − R μp;  U = [R | τ]
 ```
+
+**The radius is strict.** Open3D hands FLANN `d²` and FLANN's `KNNRadiusResultSet` drops a
+candidate at `dist >= radius`, so a source point exactly `d` from its nearest target is *not* a
+correspondence. Measured against Open3D 0.19 with one source point and `max_correspondence_distance
+= d`: one ulp inside gives `fitness = 1`, exactly `d` and one ulp outside give `fitness = 0`
+(task C2, `notes/2026-09-07-c2-icp.md` §2). This is the same shape as §5.2's radius, which is
+scipy's exclusive `distance_upper_bound`; the two libraries agree by coincidence and both bounds
+are exclusive.
 
 Correspondence ties (two targets at exactly the same distance) are resolved by the KD-tree
 implementation; the port resolves them by lowest index.
@@ -913,6 +921,16 @@ anything the port does differently that is not on it is an undeclared deviation,
 measured effect.
 
 ---
+
+**2026-09-07, step C2 — §7's correspondence radius is strict (a correction, not a change).** The
+frozen text wrote the correspondence test as `|P_i − Q_j| ≤ d`. Open3D's is `<`: FLANN rejects a
+candidate at `dist >= radius`, measured against Open3D 0.19 as described in §7. Nothing the
+reference computes changes — the case is measure-zero on real data — but a port that implements
+`≤` disagrees with Open3D on a point that lands exactly on the radius, and the document now says
+which one it is. The two ladders of §5.4 and §5.6, R §7's two estimators and R §5.5's suppression
+are implemented in `crates/sherd-core/src/matching/{icp,ladder}.rs` and verified against the dump
+on all eight fixture sets (`notes/2026-09-07-c2-icp.md`); the only other amendment C2 makes is to
+D §7's ill-conditioning row, which is the port's own numerics and not the reference's.
 
 ## 13. Reference results and parity gates
 

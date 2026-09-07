@@ -16,9 +16,11 @@
 //! that `tests/test_synthetic.py` demands of the *refined* candidate.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use sherd_core::Params;
 use sherd_core::fragment::Fragment;
+use sherd_core::matching::icp::Numerics;
 use sherd_core::matching::pair::Pair;
 
 fn slab_input() -> PathBuf {
@@ -90,16 +92,32 @@ fn pose_error(
     (angle, worst)
 }
 
+/// The two fragments, preprocessed once: R §3 is the expensive half of this file and both tests
+/// need the same two answers from it.
+fn slab_fragments() -> &'static (Fragment, Fragment) {
+    static FRAGMENTS: OnceLock<(Fragment, Fragment)> = OnceLock::new();
+    FRAGMENTS.get_or_init(|| {
+        (
+            Fragment::from_mesh_file(slab_input().join("pieceA.ply"), 200_000).expect("pieceA"),
+            Fragment::from_mesh_file(slab_input().join("pieceB.ply"), 200_000).expect("pieceB"),
+        )
+    })
+}
+
+/// Every twentieth vertex of B, which is what `tests/test_synthetic.py` measures a pose over.
+fn probe_points(b: &Fragment) -> Vec<[f64; 3]> {
+    b.mesh.v.iter().step_by(20).map(|v| v.to_f64()).collect()
+}
+
 /// R §5.1–5.3 on the slab: the true pose is among the 250 the NMS keeps, and it is not there by
 /// accident — it is one of the highest-scoring poses of the whole set.
 #[test]
 fn the_slab_pairs_true_pose_survives_the_coarse_stage() {
     let params = Params::default();
-    let a = Fragment::from_mesh_file(slab_input().join("pieceA.ply"), 200_000).expect("pieceA");
-    let b = Fragment::from_mesh_file(slab_input().join("pieceB.ply"), 200_000).expect("pieceB");
-    assert!(!Pair::skipped(&a, &b, &params), "two halves of one slab have the same wall");
+    let (a, b) = slab_fragments();
+    assert!(!Pair::skipped(a, b, &params), "two halves of one slab have the same wall");
 
-    let pair = Pair::build(&a, &b, &params);
+    let pair = Pair::build(a, b, &params);
     assert!(pair.matchable());
     let hyp = pair.hypotheses(&params);
     assert!(hyp.len() > 1000, "{} hypotheses", hyp.len());
@@ -107,8 +125,7 @@ fn the_slab_pairs_true_pose_survives_the_coarse_stage() {
     let kept = pair.suppress(&hyp, &cs, &params);
     assert_eq!(kept.len(), params.stage1 as usize, "the walk fills its budget on a true pair");
 
-    // Every twentieth vertex of B, which is what the Python test measures the displacement over.
-    let points: Vec<[f64; 3]> = b.mesh.v.iter().step_by(20).map(|v| v.to_f64()).collect();
+    let points = probe_points(b);
     let want = relative_truth();
 
     let mut best = (f64::INFINITY, f64::INFINITY, usize::MAX);
@@ -142,4 +159,76 @@ fn the_slab_pairs_true_pose_survives_the_coarse_stage() {
         found >= top - 2.0 / f64::from(params.coarse_points),
         "the true pose scores {found:.4} against a best of {top:.4}"
     );
+}
+
+/// R §5.4–5.6 on the slab: the two ladders turn one of those coarse poses into the true one.
+///
+/// The coarse stage above leaves the truth 3.20° and 0.305 t away — the accuracy of a pose built
+/// from one pair of breakline frames. This is the claim the refinement exists to make: after the
+/// two point-to-point breakline rungs and the four point-to-plane surface rungs, one of the ten
+/// candidates R §5.5 keeps is the pose that reassembles the slab, to the 2° / 0.1 t that
+/// `tests/test_synthetic.py` demands of a *refined* candidate. Measured here: **0.019° and
+/// 0.0026 t**, a hundred times inside it on the rotation and forty on the displacement.
+///
+/// It is the ground-truth counterpart of the parity rows. Parity says the port's ladder computes
+/// what Open3D's computes; this says the ladder converges on the seam — a port could reproduce
+/// the reference bit for bit with both implementations refining towards the wrong surface, and
+/// only a known answer would notice.
+#[test]
+fn the_slab_pairs_two_ladders_reach_the_ground_truth() {
+    let params = Params::default();
+    let (a, b) = slab_fragments();
+    let pair = Pair::build(a, b, &params);
+    let hyp = pair.hypotheses(&params);
+    let cs = pair.coarse(&hyp, &pair.probe(&params));
+    let kept = pair.suppress(&hyp, &cs, &params);
+
+    let points = probe_points(b);
+    let want = relative_truth();
+    let error = |t: &nalgebra::Matrix4<f64>| {
+        let r = t.fixed_view::<3, 3>(0, 0).into_owned();
+        let tau = t.fixed_view::<3, 1>(0, 3).into_owned();
+        pose_error(&r, &tau, &want, &points)
+    };
+
+    // R §5.4: the breakline ladder, from every pose the coarse suppression kept.
+    let stage1 = pair.stage1(&hyp, &kept, Numerics::REFERENCE);
+    assert_eq!(stage1.len(), kept.len());
+    let best1 = stage1
+        .iter()
+        .map(|c| error(&c.transform))
+        .fold((f64::INFINITY, f64::INFINITY), |acc, e| if e.1 < acc.1 { e } else { acc });
+    assert!(
+        best1.0 <= 2.0 && best1.1 <= 0.2 * a.thick,
+        "the best breakline pose is {:.3}° and {:.3} t from the truth",
+        best1.0,
+        best1.1 / a.thick
+    );
+    // And the ladder is a refinement, not a random walk: it *improves* on the hypothesis it
+    // started from — 9.21 units (0.305 t) to 1.75 (0.058 t) on this pair, a factor of five.
+    let best0 = kept
+        .iter()
+        .map(|&h| pose_error(&hyp.r[h as usize], &hyp.tau[h as usize], &want, &points))
+        .fold((f64::INFINITY, f64::INFINITY), |acc, e| if e.1 < acc.1 { e } else { acc });
+    assert!(best1.1 < best0.1 / 4.0, "{best0:?} -> {best1:?}");
+
+    // R §5.5–5.6: the ten candidates, each through the four surface rungs.
+    let kept2 = pair.suppress_stage1(&stage1, &params);
+    assert!(!kept2.is_empty() && kept2.len() <= params.stage2 as usize);
+    let mut best2 = (f64::INFINITY, f64::INFINITY);
+    for &k in &kept2 {
+        let out = pair.stage2(&stage1[k as usize].transform, Numerics::REFERENCE);
+        assert_eq!(out.len(), 4, "R §5.6 is four rungs");
+        let e = error(&out[3].transform);
+        if e.1 < best2.1 {
+            best2 = e;
+        }
+    }
+    assert!(
+        best2.0 <= 2.0 && best2.1 <= 0.1 * a.thick,
+        "the best refined candidate is {:.3}° and {:.4} t from the truth",
+        best2.0,
+        best2.1 / a.thick
+    );
+    assert!(best2.1 < best1.1, "the surface rungs improve on the breakline ones");
 }

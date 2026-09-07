@@ -11,11 +11,15 @@
 //! *injected*: the port's stage runs on the Python stage's inputs, so a difference is the stage's
 //! and not an inheritance from the stage above it (D §10.2).
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use sherd_core::error::{Error, Result};
+use sherd_core::fragment::samples::registration_split;
 use sherd_core::matching::hypotheses::Frames;
+use sherd_core::matching::icp::IcpTarget;
 use sherd_core::matching::scales::Scales;
+use sherd_core::mesh::geometry::face_geometry;
 
 use super::{Collection, FragmentFixture};
 use crate::npy;
@@ -183,6 +187,136 @@ pub fn reference_frames(
         ));
     }
     Ok(Some(frames))
+}
+
+/// One of R §3.6's point clouds, as the reference built it.
+#[derive(Clone, Debug, Default)]
+pub struct RefCloud {
+    /// The points.
+    pub p: Vec<[f64; 3]>,
+    /// One unit normal per point.
+    pub n: Vec<[f64; 3]>,
+}
+
+impl RefCloud {
+    /// The cloud as an ICP target, with its tree.
+    pub fn target(&self) -> IcpTarget {
+        IcpTarget::new(self.p.clone(), self.n.clone())
+    }
+
+    /// Number of points.
+    pub fn len(&self) -> usize {
+        self.p.len()
+    }
+
+    /// True when the cloud holds no point.
+    pub fn is_empty(&self) -> bool {
+        self.p.is_empty()
+    }
+}
+
+/// The four clouds R §5.4–5.6 register, rebuilt from one fragment's dumped arrays (R §3.6).
+///
+/// Everything here is the reference's own: `brk_P` and `brk_ns` come from the dump, `Pf` and `S`
+/// come from the dump, the normals are `FN[fp]` and `FN[sp[margin_idx]]` over the dump's own
+/// working mesh, and the `pc_reg` prefixes follow R §3.6's split. The only arithmetic the port
+/// contributes is the face normals, which step S3 measured bit-identical to numpy's on this input.
+#[derive(Clone, Debug, Default)]
+pub struct RefClouds {
+    /// `pc_brk_full`: the whole breakline with its shell normals (stage 1's target).
+    pub brk_full: RefCloud,
+    /// `pc_brk`: the breakline subset (stage 1's source).
+    pub brk_sub: RefCloud,
+    /// `pc_reg`: fracture prefix plus shell-margin prefix (stage 2's first two rungs).
+    pub reg: RefCloud,
+    /// `pc_frac`: the fracture samples (stage 2's last two rungs).
+    pub frac: RefCloud,
+}
+
+/// The reference's own face normals `FN`, computed from the dump's own working mesh.
+///
+/// Returns `None` when the dump carries no working mesh for that fragment (level `min`).
+pub fn face_normals(fragment: &FragmentFixture) -> Result<Option<Vec<[f64; 3]>>> {
+    let Some(mesh) = fragment.working()? else { return Ok(None) };
+    Ok(Some(face_geometry(&mesh.v, &mesh.f).normals))
+}
+
+/// R §3.6's clouds for one fragment at the pair's `t`, from the dump's own arrays.
+///
+/// `frames` is what [`reference_frames`] returned for the same fragment and `t`; `normals` is
+/// [`face_normals`] for it, cached by the caller because it costs a pass over the working mesh and
+/// every pair the fragment takes part in needs it.
+pub fn reference_clouds(
+    fragment: &FragmentFixture,
+    frames: &Frames,
+    normals: &[[f64; 3]],
+    t: f64,
+    surface_points: u64,
+    reg_points: usize,
+) -> Result<Option<RefClouds>> {
+    let Some(dir) = arrays_at(fragment, t, surface_points)? else { return Ok(None) };
+    let file = |name: &str| dir.join(name);
+    for name in ["md.Pf.npy", "md.fp.npy", "md.S.npy", "md.sp.npy", "md.margin_idx.npy"] {
+        if !file(name).is_file() {
+            return Ok(None);
+        }
+    }
+    let pf = npy::read_points(file("md.Pf.npy"))?;
+    let fp = npy::read_indices(file("md.fp.npy"))?;
+    let s = npy::read_points(file("md.S.npy"))?;
+    let sp = npy::read_indices(file("md.sp.npy"))?;
+    let margin_idx = npy::read_indices(file("md.margin_idx.npy"))?;
+    let faces = normals.len();
+    if pf.len() != fp.len() || s.len() != sp.len() {
+        return Err(Error::fixture(file("md.Pf.npy"), "a sample array and its face ids differ"));
+    }
+    if fp.iter().chain(&sp).any(|&f| (f as usize) >= faces)
+        || margin_idx.iter().any(|&i| (i as usize) >= s.len())
+        || frames.sub.iter().any(|&i| (i as usize) >= frames.len())
+    {
+        return Err(Error::fixture(
+            file("md.fp.npy"),
+            "the dump's sample indices do not address its own mesh",
+        ));
+    }
+
+    let nf: Vec<[f64; 3]> = fp.iter().map(|&f| normals[f as usize]).collect();
+    let pm: Vec<[f64; 3]> = margin_idx.iter().map(|&i| s[i as usize]).collect();
+    let nm: Vec<[f64; 3]> = margin_idx.iter().map(|&i| normals[sp[i as usize] as usize]).collect();
+    let (take_f, take_m) = registration_split(pf.len(), pm.len(), reg_points);
+    let mut reg = RefCloud { p: pf[..take_f].to_vec(), n: nf[..take_f].to_vec() };
+    reg.p.extend_from_slice(&pm[..take_m]);
+    reg.n.extend_from_slice(&nm[..take_m]);
+
+    let at = |source: &[[f64; 3]]| -> Vec<[f64; 3]> {
+        frames.sub.iter().map(|&i| source[i as usize]).collect()
+    };
+    Ok(Some(RefClouds {
+        brk_full: RefCloud { p: frames.p.clone(), n: frames.ns.clone() },
+        brk_sub: RefCloud { p: at(&frames.p), n: at(&frames.ns) },
+        reg,
+        frac: RefCloud { p: pf, n: nf },
+    }))
+}
+
+/// The face normals of every fragment of a dump, computed once and kept.
+///
+/// A collection of ten fragments takes part in forty-five pairs, and recomputing `FN` from a
+/// 150 000-face working mesh for each of them would dominate the stage.
+#[derive(Debug, Default)]
+pub struct NormalCache {
+    cached: BTreeMap<String, Option<Vec<[f64; 3]>>>,
+}
+
+impl NormalCache {
+    /// `FN` for a fragment, computed on first use.
+    pub fn get(&mut self, fragment: &FragmentFixture) -> Result<Option<&Vec<[f64; 3]>>> {
+        if !self.cached.contains_key(&fragment.name) {
+            let normals = face_normals(fragment)?;
+            self.cached.insert(fragment.name.clone(), normals);
+        }
+        Ok(self.cached.get(&fragment.name).and_then(Option::as_ref))
+    }
 }
 
 /// Which directory of the dump holds this fragment's arrays at `(t, surface_points)`: its own,

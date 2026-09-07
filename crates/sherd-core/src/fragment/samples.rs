@@ -554,24 +554,34 @@ fn arrays_at(fragment: &Fragment, t: f64) -> (Cow<'_, Breaklines>, Cow<'_, Sampl
 /// the split keeps their proportion. The rounding is numpy's round-half-to-even, and the fracture
 /// side keeps at least one point so that a pose is still constrained across the break.
 fn registration_cloud(pf: &[Vec3f], nf: &[Vec3f], margin: &Cloud, reg_points: usize) -> Cloud {
-    let (mut take_f, mut take_m) = (pf.len(), margin.len());
-    if reg_points > 0 && take_f + take_m > reg_points {
-        #[allow(clippy::cast_precision_loss, reason = "sample counts are far below 2^53")]
-        let share = (take_f as f64) * (reg_points as f64) / ((take_f + take_m) as f64);
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "a rounded count below reg_points"
-        )]
-        let rounded = round_half_even(share) as usize;
-        take_f = rounded.max(1).min(pf.len());
-        take_m = reg_points.saturating_sub(take_f).min(margin.len());
-    }
+    let (take_f, take_m) = registration_split(pf.len(), margin.len(), reg_points);
     let mut p = pf[..take_f].to_vec();
     p.extend_from_slice(&margin.p[..take_m]);
     let mut n = nf[..take_f].to_vec();
     n.extend_from_slice(&margin.n[..take_m]);
     Cloud { p, n }
+}
+
+/// R §3.6's split of `reg_points` between the fracture samples and the shell margin: how many of
+/// each the registration cloud takes, as prefixes.
+///
+/// Public because the parity harness builds the reference's own `pc_reg` from the reference's own
+/// `Pf` and `margin_idx` (D §10.2's injected column) and has to split them the same way — the rule
+/// belongs beside the cloud it shapes rather than being written twice.
+pub fn registration_split(n_frac: usize, n_margin: usize, reg_points: usize) -> (usize, usize) {
+    if reg_points == 0 || n_frac + n_margin <= reg_points {
+        return (n_frac, n_margin);
+    }
+    #[allow(clippy::cast_precision_loss, reason = "sample counts are far below 2^53")]
+    let share = (n_frac as f64) * (reg_points as f64) / ((n_frac + n_margin) as f64);
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a rounded count below reg_points"
+    )]
+    let rounded = round_half_even(share) as usize;
+    let take_f = rounded.max(1).min(n_frac);
+    (take_f, reg_points.saturating_sub(take_f).min(n_margin))
 }
 
 /// numpy's `round`: half-way cases go to the even neighbour, which is what `f64::round_ties_even`

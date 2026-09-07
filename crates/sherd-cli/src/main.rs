@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use sherd_core::fragment::cache;
+use sherd_core::matching::icp::{Assembly, Numerics, Precision};
 use sherd_core::{ALGO_REF, Backend, CACHE_VERSION, CORE_VERSION, Params, collection, pipeline};
 use sherd_parity::FixtureDir;
 use sherd_parity::report::{Mode, StageReport};
@@ -109,7 +110,7 @@ struct ParityArgs {
     #[arg(long)]
     input: Option<PathBuf>,
     /// Stage to compare: `load`, `thickness`, `working-mesh`, `segmentation`, `breakline`,
-    /// `samples`, `hypotheses`, `coarse`, `nms`, or `all`. Repeatable.
+    /// `samples`, `hypotheses`, `coarse`, `nms`, `stage1`, `stage2`, or `all`. Repeatable.
     #[arg(long, default_value = "all")]
     stage: Vec<String>,
     /// Feed each stage the Python stage's own inputs instead of the port's upstream results
@@ -122,6 +123,48 @@ struct ParityArgs {
     /// Re-hash every file of the dump and compare against the manifest.
     #[arg(long)]
     verify_checksums: bool,
+    /// Scalar the ICP point loops of `stage1` and `stage2` run in (D §7, experiment E5).
+    /// `f64` is the reference's and the one D §10.2's rows are stated for.
+    #[arg(long, value_enum, default_value_t = IcpPrecision::F64)]
+    icp_precision: IcpPrecision,
+    /// Frame the point-to-plane normal equations are assembled in (D §7, experiment E5).
+    /// `world` is R §7 verbatim; `centred` is the re-parameterisation the GPU path will use.
+    #[arg(long, value_enum, default_value_t = IcpAssembly::World)]
+    icp_assembly: IcpAssembly,
+}
+
+/// `--icp-precision`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum IcpPrecision {
+    /// The reference's: every point loop in `f64`.
+    F64,
+    /// The GPU executor's: the point loops in `f32`, the pose and the solve still `f64`.
+    F32,
+}
+
+/// `--icp-assembly`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum IcpAssembly {
+    /// R §7 verbatim: the normal equations in the meshes' own coordinates.
+    World,
+    /// D §7: about the target centroid, with the update re-expressed about the origin.
+    Centred,
+}
+
+impl ParityArgs {
+    /// D §7's two knobs as `sherd-core` states them.
+    fn numerics(&self) -> Numerics {
+        Numerics {
+            precision: match self.icp_precision {
+                IcpPrecision::F64 => Precision::F64,
+                IcpPrecision::F32 => Precision::F32,
+            },
+            assembly: match self.icp_assembly {
+                IcpAssembly::World => Assembly::World,
+                IcpAssembly::Centred => Assembly::Centred,
+            },
+        }
+    }
 }
 
 /// Arguments of `bench`.
@@ -268,7 +311,8 @@ fn segment(args: &SegmentArgs) -> Result<()> {
 fn parity(args: &ParityArgs) -> Result<()> {
     let dir = FixtureDir::new(&args.fixtures);
     let collection = Collection::open(dir, args.input.as_deref())
-        .with_context(|| format!("reading the fixture in {}", args.fixtures.display()))?;
+        .with_context(|| format!("reading the fixture in {}", args.fixtures.display()))?
+        .with_icp(args.numerics());
     let manifest = &collection.manifest;
 
     println!("fixture:    {}", args.fixtures.display());
@@ -290,6 +334,12 @@ fn parity(args: &ParityArgs) -> Result<()> {
         Some(input) => println!("  input:    {}", input.display()),
         None => println!("  input:    none given (native mode will skip)"),
     }
+    println!(
+        "  icp:      {:?} point loops, {:?} assembly{}",
+        collection.icp.precision,
+        collection.icp.assembly,
+        if collection.icp == Numerics::REFERENCE { "" } else { "  (not the reference's)" }
+    );
 
     if args.verify_checksums {
         let bad = collection.dir.verify_checksums().context("verifying the fixture's checksums")?;
@@ -412,8 +462,13 @@ mod tests {
             vec![Stage::Hypotheses, Stage::Coarse, Stage::Nms],
             "the pair stages come back in pipeline order too"
         );
-        let err = requested_stages(&["stage1".to_owned()]).unwrap_err().to_string();
-        assert!(err.contains("nms"), "{err}");
+        assert_eq!(
+            requested_stages(&["stage2".to_owned(), "stage1".to_owned()]).unwrap(),
+            vec![Stage::Stage1, Stage::Stage2],
+            "and so do the two refinement stages"
+        );
+        let err = requested_stages(&["verify".to_owned()]).unwrap_err().to_string();
+        assert!(err.contains("stage2"), "{err}");
     }
 
     #[test]

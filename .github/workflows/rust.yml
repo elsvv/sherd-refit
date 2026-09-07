@@ -72,6 +72,32 @@ jobs:
       - run: cargo nextest run --workspace --all-targets --locked
       - run: cargo test --workspace --doc --locked
 
+  # The same suite in the profile the gates are measured in. D §10.3's runtime gates and every
+  # parity run of D §10.2 use the release binary, so a test that only passes in debug is a test
+  # that does not cover what ships: `colours_quantise_the_way_open3d_writes_them` failed at
+  # `-C opt-level=2` and above for two steps while this workflow stayed green (V4-D2). Two
+  # runners rather than four — the difference this job exists to catch is the optimiser's, not
+  # the platform's, and these are the two D §10.5 gives the `parity` job.
+  test-release:
+    name: test --release (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: cargo build --workspace --all-targets --locked --release
+      - run: cargo nextest run --workspace --all-targets --locked --release
+
   # Layers 3, 5 and 6 — GPU cross-checks on software adapters, the injected and native parity runs
   # against the large fixtures, and the benchmark gates on a self-hosted M2 Pro — arrive with the
   # stages they test (D §10.5).

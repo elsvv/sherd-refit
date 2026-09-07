@@ -183,13 +183,20 @@ mod tests {
 
     #[test]
     fn colours_quantise_the_way_open3d_writes_them() {
-        for k in 0..=255_u8 {
+        // `0..255` and not `0..=255`: with the inclusive range, `k + 1` under a `k < 255` guard
+        // is a release-only panic. The optimiser folds the guard into `RangeInclusive`'s own
+        // exhaustion test, whose increment carries the `add nuw i8` of `Step::forward_unchecked`,
+        // and the last iteration then evaluates the guarded body with a poisoned `k + 1` that
+        // materialises as 0 (V4-D2: this test was the only failure of the release suite, at
+        // `-C opt-level=2` and above, while `quantize_color` itself was right the whole time).
+        // The loop stops one short and 255 is asserted after it.
+        for k in 0..255_u8 {
             assert_eq!(quantize_color(f64::from(k)), k);
             // Open3D rounds a half up, measured on all 255 exact half values.
-            if k < 255 {
-                assert_eq!(quantize_color(f64::from(k) + 0.5), k + 1);
-            }
+            assert_eq!(quantize_color(f64::from(k) + 0.5), k + 1);
         }
+        assert_eq!(quantize_color(255.0), 255);
+        assert_eq!(quantize_color(255.5), 255);
         assert_eq!(quantize_color(-1.0), 0);
         assert_eq!(quantize_color(300.0), 255);
         assert_eq!(quantize_color(254.5), 255);

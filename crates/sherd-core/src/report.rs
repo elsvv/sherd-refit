@@ -41,6 +41,136 @@ use crate::params::Params;
 use crate::types::{FragId, apply_transform_fused};
 use crate::{ALGO_REF, CORE_VERSION};
 
+/// A JSON object that keeps the order it was built in.
+///
+/// R §11.1's `fragments` and R §11.2's `timings` are Python dicts written by `json.dump`, and a
+/// Python dict iterates in **insertion** order: `transforms.json` comes out in R §8's placement
+/// order (the seed's two fragments, then each placement, then the singletons in collection order)
+/// and `timings` in the order the stages finished. A `BTreeMap` sorts by key and writes a
+/// different file — which is what V4-D5 and V4-D4 found, `FY234007` first instead of last and
+/// `assembly, matching, preprocess, refine` instead of `preprocess, matching, assembly, refine`.
+///
+/// Small on purpose: a lookup is a linear scan, which is what a collection of at most a few
+/// hundred fragments wants, and it keeps the dependency list as D §3 has it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Ordered<V>(Vec<(String, V)>);
+
+impl<V> Ordered<V> {
+    /// An empty object.
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// `d[key] = value`: a new key is appended, an existing one keeps its place.
+    pub fn insert(&mut self, key: impl Into<String>, value: V) {
+        let key = key.into();
+        match self.0.iter_mut().find(|(k, _)| *k == key) {
+            Some(slot) => slot.1 = value,
+            None => self.0.push((key, value)),
+        }
+    }
+
+    /// The value under `key`, or `None`.
+    pub fn get(&self, key: &str) -> Option<&V> {
+        self.0.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    /// Whether the object has that key.
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+
+    /// The pairs, in order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &V)> {
+        self.0.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// The keys, in order.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(|(k, _)| k.as_str())
+    }
+
+    /// How many entries the object has.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether it has none.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<V> FromIterator<(String, V)> for Ordered<V> {
+    fn from_iter<T: IntoIterator<Item = (String, V)>>(iter: T) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl<'a, V> IntoIterator for &'a Ordered<V> {
+    type Item = (&'a str, &'a V);
+    type IntoIter =
+        std::iter::Map<std::slice::Iter<'a, (String, V)>, fn(&'a (String, V)) -> (&'a str, &'a V)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter().map(|(k, v)| (k.as_str(), v))
+    }
+}
+
+impl<V> std::ops::Index<&str> for Ordered<V> {
+    type Output = V;
+
+    fn index(&self, key: &str) -> &V {
+        self.get(key).expect("no such key")
+    }
+}
+
+impl<V: Serialize> Serialize for Ordered<V> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (k, v) in &self.0 {
+            map.serialize_entry(k, v)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de, V: Deserialize<'de>> Deserialize<'de> for Ordered<V> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct Visitor<V>(std::marker::PhantomData<V>);
+
+        impl<'de, V: Deserialize<'de>> serde::de::Visitor<'de> for Visitor<V> {
+            type Value = Ordered<V>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> std::result::Result<Ordered<V>, M::Error> {
+                let mut out = Vec::with_capacity(map.size_hint().unwrap_or(0));
+                while let Some((k, v)) = map.next_entry::<String, V>()? {
+                    out.push((k, v));
+                }
+                Ok(Ordered(out))
+            }
+        }
+
+        deserializer.deserialize_map(Visitor(std::marker::PhantomData))
+    }
+}
+
+/// R §11.2's `timings`: seconds per stage, in the order the pipeline finished them.
+pub type Timings = Ordered<f64>;
+
 /// One fragment's row of `report.json`'s `fragments` and of R §11.3's fragment table — the
 /// reference's `Fragment.stats()`, key for key and in its order.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -119,8 +249,9 @@ pub struct Transforms {
     pub thickness: f64,
     /// Every field of [`Params`].
     pub params: Params,
-    /// One entry per fragment, by name.
-    pub fragments: BTreeMap<String, Placement>,
+    /// One entry per fragment, by name, **in R §8's placement order** — the order the
+    /// reference's `poses` dict was built in, which is what `json.dump` writes (V4-D5).
+    pub fragments: Ordered<Placement>,
     /// The groups, as name lists, in R §8's final order.
     pub groups: Vec<Vec<String>>,
 }
@@ -205,7 +336,7 @@ pub struct ReportJson {
     /// `Option` because the reference's *fixture dump* replaces every value with `null` for
     /// exactly that reason (`pipeline._dump_outputs`), and this type has to read the dump's copy
     /// as well as the run's own.
-    pub timings: BTreeMap<String, Option<f64>>,
+    pub timings: Ordered<Option<f64>>,
     /// The joins R §8 used, in the order it took them.
     pub joins_used: Vec<CandidateJson>,
     /// The accepted joins R §8 refused, with the reason.
@@ -236,15 +367,22 @@ pub fn rows(m: &Matrix4<f64>) -> [[f64; 4]; 4] {
 /// by id, after R §8.2. The `group` of a fragment is its index in `groups` and `placed` is whether
 /// that group has two or more members — which is not the same as "the assembly moved it", and is
 /// the reference's definition.
+///
+/// `order` is the order the entries come out in: the reference builds `fragments` from
+/// `poses.items()`, and its `poses` is an insertion-ordered dict written by R §8's greedy loop —
+/// the seed's two fragments, then every placement in the order it happened, then the singletons in
+/// collection order ([`Assembly::order`](crate::assembly::Assembly::order)). Anything `order`
+/// leaves out follows in collection order.
 pub fn write_transforms(
     path: impl AsRef<Path>,
     names: &[String],
     poses: &[Matrix4<f64>],
     groups: &[Vec<FragId>],
+    order: &[FragId],
     thickness: f64,
     params: &Params,
 ) -> Result<()> {
-    write_json(path.as_ref(), &transforms(names, poses, groups, thickness, params))
+    write_json(path.as_ref(), &transforms(names, poses, groups, order, thickness, params))
 }
 
 /// The value [`write_transforms`] serialises, for callers that want it in memory.
@@ -252,6 +390,7 @@ pub fn transforms(
     names: &[String],
     poses: &[Matrix4<f64>],
     groups: &[Vec<FragId>],
+    order: &[FragId],
     thickness: f64,
     params: &Params,
 ) -> Transforms {
@@ -263,16 +402,20 @@ pub fn transforms(
             placed[n as usize] = group.len() > 1;
         }
     }
-    let fragments = names
-        .iter()
-        .enumerate()
-        .map(|(n, name)| {
-            (
-                name.clone(),
-                Placement { matrix: rows(&poses[n]), group: group_of[n], placed: placed[n] },
-            )
-        })
-        .collect();
+    // `order` is R §8's insertion order, and a fragment the assembly never saw would be missing
+    // from the file rather than merely late, so the collection order closes the walk.
+    let mut fragments = Ordered::new();
+    let rest = 0..u32::try_from(names.len()).expect("fewer than 2^32 fragments");
+    for n in order.iter().copied().chain(rest) {
+        let n = n as usize;
+        if fragments.contains_key(&names[n]) {
+            continue;
+        }
+        fragments.insert(
+            names[n].clone(),
+            Placement { matrix: rows(&poses[n]), group: group_of[n], placed: placed[n] },
+        );
+    }
     Transforms {
         thickness,
         params: *params,
@@ -305,7 +448,7 @@ pub fn write_report(
     stats: &[FragmentStats],
     thickness: f64,
     outcome: &Outcome<'_>,
-    timings: &BTreeMap<String, f64>,
+    timings: &Timings,
     params: &Params,
     backend: &str,
 ) -> Result<()> {
@@ -322,7 +465,7 @@ pub fn report_json(
     stats: &[FragmentStats],
     thickness: f64,
     outcome: &Outcome<'_>,
-    timings: &BTreeMap<String, f64>,
+    timings: &Timings,
     params: &Params,
     backend: &str,
 ) -> ReportJson {
@@ -336,7 +479,7 @@ pub fn report_json(
             .map(|g| g.iter().map(|&n| names[n as usize].clone()).collect())
             .collect(),
         params: *params,
-        timings: timings.iter().map(|(k, &v)| (k.clone(), Some(v))).collect(),
+        timings: timings.iter().map(|(k, &v)| (k.to_owned(), Some(v))).collect(),
         joins_used: outcome
             .used
             .iter()
@@ -358,7 +501,7 @@ pub fn report_markdown(
     stats: &[FragmentStats],
     thickness: f64,
     outcome: &Outcome<'_>,
-    timings: &BTreeMap<String, f64>,
+    timings: &Timings,
     params: &Params,
 ) -> String {
     let names = outcome.names;
@@ -696,7 +839,6 @@ mod tests {
     use crate::mesh::Mesh;
     use crate::params::Params;
     use nalgebra::Matrix4;
-    use std::collections::BTreeMap;
 
     fn names() -> Vec<String> {
         vec!["one".to_owned(), "two".to_owned(), "three".to_owned()]
@@ -723,7 +865,10 @@ mod tests {
         let mut poses = vec![Matrix4::identity(); 3];
         poses[1][(0, 3)] = 12.5;
         let groups = vec![vec![0_u32, 1], vec![2]];
-        let value = transforms(&names(), &poses, &groups, 3.75, &Params::default());
+        // R §8's insertion order: the seed's two, then the singleton — deliberately not the
+        // collection order, so that the file's own key order is the thing under test.
+        let value = transforms(&names(), &poses, &groups, &[1, 0, 2], 3.75, &Params::default());
+        assert_eq!(value.fragments.keys().collect::<Vec<&str>>(), ["two", "one", "three"]);
         let text = serde_json::to_string(&value).expect("transforms serialise");
         let back: Transforms = serde_json::from_str(&text).expect("transforms parse");
 
@@ -756,7 +901,7 @@ mod tests {
             groups: &[vec![0, 1], vec![2]],
         };
         let stats = Vec::new();
-        let timings = BTreeMap::from([("matching".to_owned(), 1.25)]);
+        let timings = super::Timings::from_iter([("matching".to_owned(), 1.25)]);
         let json = report_json(&stats, 3.75, &outcome, &timings, &Params::default(), "cpu");
         let text = serde_json::to_string(&json).expect("report serialises");
         let value: serde_json::Value = serde_json::from_str(&text).expect("report parses");
@@ -806,7 +951,7 @@ mod tests {
             rejected: &rejected,
             groups: &[vec![0, 1], vec![2]],
         };
-        let timings = BTreeMap::from([("matching".to_owned(), 12.34)]);
+        let timings = super::Timings::from_iter([("matching".to_owned(), 12.34)]);
         let md = report_markdown(&stats, 3.75, &outcome, &timings, &Params::default());
 
         let sections: Vec<&str> = md.lines().filter(|l| l.starts_with('#')).collect();

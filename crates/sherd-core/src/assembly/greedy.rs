@@ -136,6 +136,10 @@ pub struct Assembly {
     /// R §8's `accepted`: the best candidate of every pair that had one, in score order — indices
     /// into the candidate list, and the order everything above was decided in.
     pub accepted: Vec<usize>,
+    /// The order the poses were filled in: each seed's two fragments, then every placement, then
+    /// the singletons in collection order. R §11.1's `transforms.json` is written in it, because
+    /// the reference's `poses` is an insertion-ordered dict (V4-D5).
+    pub order: Vec<FragId>,
 }
 
 /// R §8's `best_per_pair`, then its sort: one candidate per pair, strongest pair first.
@@ -379,5 +383,6 @@ pub fn assemble(pieces: &[Piece<'_>], candidates: &[Candidate], p: &Params) -> A
         seconds = started.elapsed().as_secs_f64(),
         "assembly"
     );
-    Assembly { poses: grouping.into_poses(), groups, used, rejected, accepted }
+    let order = grouping.order().to_vec();
+    Assembly { poses: grouping.into_poses(), groups, used, rejected, accepted, order }
 }

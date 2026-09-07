@@ -212,23 +212,19 @@ pub fn principal_views(points: &[[f64; 3]]) -> [View; 4] {
 
 /// The three eigenvectors of the centred scatter matrix, **ascending** by eigenvalue.
 ///
-/// `XᵀX` is accumulated with [`pairwise_sum`](crate::mesh::geometry::pairwise_sum) per entry,
-/// which is how numpy reduces an axis — not how `dgemm` blocks a matrix product, so the last bits
-/// of the scatter matrix are the port's own. PMC-10 covers the consequence.
+/// The mean is numpy's own axis-0 reduction, row by row
+/// ([`column_mean`](crate::mesh::geometry::column_mean); V4-D10 — this comment used to claim
+/// [`pairwise_sum`](crate::mesh::geometry::pairwise_sum) was numpy's answer for this shape, and it
+/// is not). `XᵀX` is then accumulated with `pairwise_sum` per entry, which is neither the
+/// reference's `X.T @ X` — a blocked `dgemm` — nor anything numpy does here, so the last bits of
+/// the scatter matrix are the port's own. PMC-10 covers the consequence.
 pub fn principal_axes(points: &[[f64; 3]]) -> [[f64; 3]; 3] {
-    use crate::mesh::geometry::pairwise_sum;
+    use crate::mesh::geometry::{column_mean, pairwise_sum};
 
     if points.is_empty() {
         return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     }
-    #[allow(clippy::cast_precision_loss, reason = "sample counts are far below 2^53")]
-    let n = points.len() as f64;
-    let mean: Vec<f64> = (0..3)
-        .map(|axis| {
-            let column: Vec<f64> = points.iter().map(|p| p[axis]).collect();
-            pairwise_sum(&column) / n
-        })
-        .collect();
+    let mean = column_mean(points);
     let mut scatter = nalgebra::Matrix3::zeros();
     for i in 0..3 {
         for j in i..3 {

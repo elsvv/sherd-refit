@@ -9,9 +9,9 @@
 
 use nalgebra::Matrix4;
 
-use crate::mesh::geometry::{median, pairwise_sum};
+use crate::mesh::geometry::{column_mean, median};
 use crate::spatial::bvh::RayScene;
-use crate::types::{FragId, apply_transform};
+use crate::types::{FragId, apply_transform_fused};
 
 /// R §8's view of one fragment: everything the assembly reads of it and nothing else.
 ///
@@ -64,12 +64,20 @@ pub struct Grouping {
     group_of: Vec<Option<usize>>,
     /// `groups`: each group's members, in the order they were placed.
     groups: Vec<Vec<FragId>>,
+    /// The order `poses` was filled in — the reference's dict is insertion-ordered and R §11.1
+    /// writes `transforms.json` from it (V4-D5).
+    order: Vec<FragId>,
 }
 
 impl Grouping {
     /// An empty assembly over `n` fragments: nothing placed, no group.
     pub fn new(n: usize) -> Self {
-        Self { poses: vec![None; n], group_of: vec![None; n], groups: Vec::new() }
+        Self {
+            poses: vec![None; n],
+            group_of: vec![None; n],
+            groups: Vec::new(),
+            order: Vec::new(),
+        }
     }
 
     /// How many fragments the collection has.
@@ -112,6 +120,13 @@ impl Grouping {
         &self.groups
     }
 
+    /// The fragments in the order they were placed: the reference's `poses` is a dict and R §11.1
+    /// writes `transforms.json` in its insertion order.
+    #[inline]
+    pub fn order(&self) -> &[FragId] {
+        &self.order
+    }
+
     /// R §8's seed: a new group holding `a` at the identity and `b` at `transform`.
     ///
     /// The seed is placed without any check. Nothing has been placed for it to disagree with, and
@@ -122,6 +137,8 @@ impl Grouping {
         self.groups.push(vec![a, b]);
         self.poses[a as usize] = Some(Matrix4::identity());
         self.poses[b as usize] = Some(transform);
+        self.order.push(a);
+        self.order.push(b);
         self.group_of[a as usize] = Some(g);
         self.group_of[b as usize] = Some(g);
         g
@@ -133,6 +150,7 @@ impl Grouping {
         self.poses[new as usize] = Some(transform);
         self.group_of[new as usize] = Some(g);
         self.groups[g].push(new);
+        self.order.push(new);
     }
 
     /// R §8's `group_thickness`: the median wall over a set of fragments.
@@ -160,10 +178,11 @@ impl Grouping {
                 continue;
             }
             let g = self.groups.len();
+            let id = u32::try_from(n).expect("a collection has fewer than 2^32 fragments");
             self.poses[n] = Some(Matrix4::identity());
             self.group_of[n] = Some(g);
-            self.groups
-                .push(vec![u32::try_from(n).expect("a collection has fewer than 2^32 fragments")]);
+            self.order.push(id);
+            self.groups.push(vec![id]);
         }
     }
 
@@ -191,9 +210,11 @@ impl Grouping {
 /// through that member's pose, which is `md[n].S[::10]` on the reference's side and therefore the
 /// same `s_pen` the penetration test above casts.
 ///
-/// The mean is numpy's: `pts.mean(0)` reduces a `(N, 3)` array along its first axis, and numpy
-/// reduces with [`pairwise_sum`] rather than left to right. Only the translation moves; the
-/// rotation block is untouched.
+/// The mean is numpy's: `pts.mean(0)` reduces a `(N, 3)` array along its first axis, which numpy
+/// walks **row by row** — a running sum per column, not [`pairwise_sum`], measured on the
+/// fixtures' own arrays (V4-D10) and factored out as [`column_mean`]. The points are moved with
+/// [`apply_transform_fused`], which is the reference's `P @ T[:3,:3].T + T[:3,3]`. Only the
+/// translation moves; the rotation block is untouched.
 pub fn recenter(
     poses: &[Matrix4<f64>],
     pieces: &[Piece<'_>],
@@ -201,22 +222,17 @@ pub fn recenter(
 ) -> Vec<Matrix4<f64>> {
     let mut out = poses.to_vec();
     for g in groups {
-        let mut columns = [Vec::new(), Vec::new(), Vec::new()];
+        let mut points = Vec::new();
         for &n in g {
             let pose = poses[n as usize];
             for point in pieces[n as usize].s_pen.iter().step_by(10) {
-                let moved = apply_transform(&pose, *point);
-                for (column, value) in columns.iter_mut().zip(moved) {
-                    column.push(value);
-                }
+                points.push(apply_transform_fused(&pose, *point));
             }
         }
-        if columns[0].is_empty() {
+        if points.is_empty() {
             continue;
         }
-        #[allow(clippy::cast_precision_loss, reason = "sample counts are far below 2^53")]
-        let n_points = columns[0].len() as f64;
-        let centre = columns.map(|column| pairwise_sum(&column) / n_points);
+        let centre = column_mean(&points);
         for &n in g {
             for (i, c) in centre.into_iter().enumerate() {
                 out[n as usize][(i, 3)] -= c;

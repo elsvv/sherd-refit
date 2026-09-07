@@ -48,8 +48,8 @@ enum Command {
     /// surface, fracture and shell-margin samples, and writes `<OUT>/cache/<name>.sherd`. A second
     /// run over the same files reuses those caches.
     ///
-    /// The segmentation preview the reference's `segment` also produces arrives with the renderer
-    /// (phase 1d).
+    /// Writes `<OUT>/preview_segmentation.png` as well, which is the tail of the reference's
+    /// own `segment_only`: every fragment drawn at the identity with its fracture faces in red.
     Segment(SegmentArgs),
 
     /// Run the port's stages against a Python fixture dump and report D §10.2's tolerances.
@@ -76,7 +76,7 @@ struct RunArgs {
     #[arg(long, default_value_t = 200_000)]
     target_faces: u32,
     /// Parallel workers; the reference's process count, and here the size of the one rayon pool
-    /// (default: one per core).
+    /// (default: one per core minus one, which is `cli.py`'s own default).
     #[arg(long)]
     workers: Option<usize>,
     /// Threads per matching worker. One process here, so this sizes the same pool `--workers`
@@ -212,9 +212,14 @@ struct SegmentArgs {
     /// Working-mesh face budget per fragment (R §3.3 caps its adaptive budget with this).
     #[arg(long, default_value_t = 200_000)]
     target_faces: u32,
-    /// Worker threads; 0 means one per core.
-    #[arg(long, default_value_t = 0)]
-    threads: usize,
+    /// Parallel workers, as the reference's `segment` takes them (default: one per core minus
+    /// one).
+    #[arg(long)]
+    workers: Option<usize>,
+    /// Worker threads. One process here, so this sizes the same pool `--workers` does and wins
+    /// when both are given; 0 means one per core.
+    #[arg(long)]
+    threads: Option<usize>,
     /// Recompute every fragment and overwrite its cache, even when the cache is valid.
     #[arg(long)]
     force: bool,
@@ -359,8 +364,9 @@ fn info() {
 /// R §3.1–3.5 for a whole collection, with the cache of R §3.7 (plan steps S4, B1, B2 and B3).
 #[allow(clippy::cast_precision_loss, reason = "counts printed in a table")]
 fn segment(args: &SegmentArgs) -> Result<()> {
-    if let Err(e) = pipeline::set_threads(args.threads) {
-        bail!("--threads {}: {e}", args.threads);
+    let threads = args.threads.or(args.workers).unwrap_or_else(pipeline::default_workers);
+    if let Err(e) = pipeline::set_threads(threads) {
+        bail!("--threads {threads}: {e}");
     }
     let entries = collection::discover(&args.input)
         .with_context(|| format!("scanning {}", args.input.display()))?;
@@ -448,6 +454,12 @@ fn segment(args: &SegmentArgs) -> Result<()> {
     if failed > 0 {
         bail!("{failed} of {} fragments could not be preprocessed", entries.len());
     }
+    // R's `segment_only` ends here: the caches, then the segmentation preview (V4-D7).
+    let fragments: Vec<sherd_core::fragment::Fragment> =
+        results.into_iter().map(|r| r.expect("no fragment failed").fragment).collect();
+    for file in pipeline::write_segmentation_preview(&args.out, &fragments)? {
+        println!("{}", file.display());
+    }
     Ok(())
 }
 
@@ -462,7 +474,7 @@ fn run(args: &RunArgs) -> Result<()> {
         );
     }
     let backend = resolve_backend(args.backend)?;
-    let threads = args.threads.or(args.workers).unwrap_or(0);
+    let threads = args.threads.or(args.workers).unwrap_or_else(pipeline::default_workers);
     if let Err(e) = pipeline::set_threads(threads) {
         bail!("--threads {threads}: {e}");
     }
@@ -474,7 +486,7 @@ fn run(args: &RunArgs) -> Result<()> {
         refine: !args.no_refine,
         write_meshes: !args.no_meshes,
         cache: !args.no_cache,
-        workers: args.workers.unwrap_or(0),
+        workers: args.workers.unwrap_or_else(pipeline::default_workers),
         backend,
     };
     if args.force && !args.no_cache {
@@ -556,7 +568,7 @@ fn bench(args: &BenchArgs) -> Result<()> {
 }
 
 /// The per-stage table both `run` and `bench` print; the same numbers `report.json` carries.
-fn print_timings(timings: &std::collections::BTreeMap<String, f64>, wall: f64) {
+fn print_timings(timings: &sherd_core::report::Timings, wall: f64) {
     for (stage, seconds) in timings {
         println!("  {stage:<12} {seconds:>8.2} s");
     }
@@ -772,7 +784,11 @@ mod tests {
         match cli.command {
             super::Command::Segment(args) => {
                 assert_eq!(args.target_faces, 200_000, "the Python's --target-faces default");
-                assert_eq!(args.threads, 0);
+                // `cli.py`'s `segment` declares `--workers default=None` and resolves it in
+                // `segment_only` to `max(1, cpu_count() - 1)`; `--threads` is the port's own and
+                // wins over it (V4-D7, V4-D8).
+                assert_eq!(args.workers, None);
+                assert_eq!(args.threads, None);
                 assert!(!args.force && !args.no_cache);
             }
             other => panic!("{other:?}"),

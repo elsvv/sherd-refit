@@ -18,8 +18,6 @@
 //! reference's own joins exactly (the `assembly` row), so `evaluate.py` has to print the numbers
 //! of `notes/2026-09-06-scale-pairs.md` and `notes/2026-09-07-t1-deterministic-thickness.md`.
 
-use std::collections::BTreeMap;
-
 use nalgebra::Matrix4;
 use sherd_core::assembly::{assemble, recenter};
 use sherd_core::error::Result;
@@ -27,7 +25,7 @@ use sherd_core::mesh::geometry::face_geometry;
 use sherd_core::refine::{FractureCloud, MAX_POINTS, RefinePiece, fracture_cloud, refine_joins};
 use sherd_core::render::{PALETTE, Paint, Splat, group_label, principal_views, render_views};
 use sherd_core::report::{
-    FragmentStats, Outcome, write_placed_meshes, write_report, write_transforms,
+    FragmentStats, Outcome, Timings, write_placed_meshes, write_report, write_transforms,
 };
 use sherd_core::types::FragId;
 use sherd_parity::FixtureDir;
@@ -153,6 +151,7 @@ fn main() -> Result<()> {
         &names,
         &poses,
         &assembly.groups,
+        &assembly.order,
         thickness,
         &params,
     )?;
@@ -165,7 +164,7 @@ fn main() -> Result<()> {
         rejected: &rejected,
         groups: &assembly.groups,
     };
-    let timings = BTreeMap::from([("output".to_owned(), 0.0)]);
+    let timings = Timings::from_iter([("output".to_owned(), 0.0)]);
     write_report(&out, &stats, thickness, &outcome, &timings, &params, "cpu")?;
     write_placed_meshes(
         &out,

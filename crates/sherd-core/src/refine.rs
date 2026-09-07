@@ -52,6 +52,15 @@ use crate::types::{FragId, apply_transform_fused, rotate_fused};
 
 /// R §9's cap on one fragment's fracture cloud.
 pub const MAX_POINTS: usize = 150_000;
+
+/// The seed R §9's cap draws with: the literal **0**, not [`Params::seed`](crate::params::Params).
+///
+/// R §10's inventory gives this stream its own line — "refinement (§9) | 0 |
+/// `choice(idx, 150000, replace=False)`" — and `refine.py:35` is `np.random.default_rng(0)`, a
+/// literal, where every other stream of the reference takes `p.seed`. The two are the same number
+/// today because no CLI exposes `--seed`; they would part on the day one does, and the port would
+/// be the side that moved (V4-D9).
+pub const CAP_SEED: u64 = 0;
 /// R §9's acceptance radius in wall thicknesses.
 pub const SELECT_T: f64 = 0.15;
 /// R §9's acceptance radius in working-mesh edges — the floor that keeps a coarse mesh's fracture.

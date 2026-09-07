@@ -137,6 +137,36 @@ pub fn pairwise_sum(x: &[f64]) -> f64 {
     pairwise_sum(&x[..half]) + pairwise_sum(&x[half..])
 }
 
+/// numpy's `a.mean(0)` over an `(N, 3)` C-contiguous array: **left to right, row by row**.
+///
+/// Not [`pairwise_sum`], although `np.sum` of a one-dimensional array is. numpy blocks its
+/// summation along the axis it walks *contiguously*, and an axis-0 reduction of a C-contiguous
+/// 2-D array walks the rows: it accumulates each row into a three-element buffer in order, so the
+/// answer is a plain running sum per column, and then divides by `N`.
+///
+/// **Measured** (V4-D10) against numpy 2.5.2 on the parity fixtures' own arrays — the concatenated
+/// recentring cloud of terracotta's group (4 500 × 3), a working mesh's vertices (61 130 × 3) and
+/// an assembly sample set (15 000 × 3): this expression reproduces `a.mean(0)` **bit for bit on
+/// every column of all three**, and the pairwise form differs from it by up to 8 ULP. Two doc
+/// comments in this crate used to assert the opposite.
+///
+/// An empty set has no mean and comes back as the origin, which is the one case numpy would call
+/// a warning and a NaN; no caller here has one.
+pub fn column_mean(points: &[[f64; 3]]) -> [f64; 3] {
+    if points.is_empty() {
+        return [0.0; 3];
+    }
+    let mut acc = [0.0_f64; 3];
+    for p in points {
+        for (a, v) in acc.iter_mut().zip(p) {
+            *a += *v;
+        }
+    }
+    #[allow(clippy::cast_precision_loss, reason = "point counts are far below 2^53")]
+    let n = points.len() as f64;
+    acc.map(|v| v / n)
+}
+
 /// numpy's `np.median` of a slice: the middle value, or the mean of the two middle values.
 ///
 /// The slice is copied and sorted; NaNs are not expected here (edge lengths are finite) and would

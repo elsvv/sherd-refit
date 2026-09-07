@@ -48,11 +48,11 @@ use nalgebra::Matrix4;
 use sherd_core::assembly::recenter;
 use sherd_core::error::{Error, Result};
 use sherd_core::fragment::samples::points_from_uniforms;
-use sherd_core::mesh::geometry::{FaceGeometry, face_geometry, pairwise_sum};
+use sherd_core::matching::pair::Candidate;
+use sherd_core::mesh::geometry::{FaceGeometry, column_mean, face_geometry};
 use sherd_core::render::{
     self, PALETTE, Paint, Rgb, Splat, View, placed_splat, principal_axes, render_views,
 };
-use sherd_core::matching::pair::Candidate;
 use sherd_core::report::{self, Outcome, ReportJson};
 use sherd_core::types::FragId;
 
@@ -157,10 +157,15 @@ fn transforms_rows(collection: &Collection, report: &mut StageReport) -> Result<
     };
     let after = recenter(&before, &views, &groups);
     let thickness = collection.manifest.pairs.thickness_median;
+    // No insertion order to pass: the reference's own `transforms.json` is written into the dump
+    // by the fixture sink with `sort_keys=True`, so the file in the dump says nothing about the
+    // order R §11.1 wrote, and every row below is looked up by name. The order itself is V4-D5's
+    // and is checked against the reference's own `_run/transforms.json` by hand.
     let ours = report::transforms(
         &names,
         &after,
         &groups,
+        &[],
         thickness,
         &collection.manifest.collection.params,
     );
@@ -177,7 +182,7 @@ fn transforms_rows(collection: &Collection, report: &mut StageReport) -> Result<
     ));
     let differing = names
         .iter()
-        .filter(|n| match (ours.fragments.get(*n), theirs.fragments.get(*n)) {
+        .filter(|n| match (ours.fragments.get(n), theirs.fragments.get(n)) {
             (Some(a), Some(b)) => a.group != b.group || a.placed != b.placed,
             _ => true,
         })
@@ -378,7 +383,7 @@ fn markdown_row(
         &theirs.fragments,
         theirs.thickness,
         &outcome,
-        &BTreeMap::new(),
+        &report::Timings::new(),
         &theirs.params,
     );
     let file = std::fs::read_to_string(&path).map_err(|e| Error::read(&path, e))?;
@@ -410,7 +415,6 @@ fn markdown_row(
 
 /// Where R §11.3's report stops being reproducible: everything below it is a wall clock.
 const TIMING_HEADING: &str = "## Timing";
-
 
 /// Every leaf path where two JSON trees disagree, ignoring `timings` (wall clock) and the keys the
 /// port adds on top of the reference's schema.
@@ -748,12 +752,7 @@ fn build_splats(
         } else {
             // The segmentation preview: no pose, colours by R §3.4's label, and each fragment
             // shifted along x by `i · 1.3 · extent_x` after being centred on its own samples.
-            let mean = [0, 1, 2].map(|axis| {
-                let column: Vec<f64> = points.iter().map(|p| p[axis]).collect();
-                #[allow(clippy::cast_precision_loss, reason = "counts are far below 2^53")]
-                let n = column.len() as f64;
-                pairwise_sum(&column) / n
-            });
+            let mean = column_mean(&points);
             let mut lo = f64::INFINITY;
             let mut hi = f64::NEG_INFINITY;
             for v in &mesh.v {
@@ -921,6 +920,7 @@ fn native(collection: &Collection, report: &mut StageReport) -> Result<()> {
             &names,
             &poses,
             &groups,
+            &[],
             collection.manifest.pairs.thickness_median,
             &collection.manifest.collection.params,
         )?;
@@ -929,7 +929,7 @@ fn native(collection: &Collection, report: &mut StageReport) -> Result<()> {
             .iter()
             .enumerate()
             .filter(|(n, name)| {
-                back.fragments.get(*name).is_none_or(|e| {
+                back.fragments.get(name).is_none_or(|e| {
                     (0..4).any(|i| {
                         (0..4).any(|j| e.matrix[i][j].to_bits() != poses[*n][(i, j)].to_bits())
                     })

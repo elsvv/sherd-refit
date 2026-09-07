@@ -102,6 +102,39 @@ fn two_runs_on_the_terracotta_produce_byte_identical_caches() {
     two_runs_agree(&input);
 }
 
+/// R's `segment_only` ends with `write_previews(...)`, and so does the port's `segment` (V4-D7).
+///
+/// The file is the segmentation preview of a collection where every fragment is its own group:
+/// two views of 1 400 × 600, the fracture faces in red. Byte-identical between two runs, like the
+/// caches — the renderer draws from a seeded sampler.
+#[test]
+fn segment_writes_the_segmentation_preview() {
+    let first = scratch("preview-first");
+    let second = scratch("preview-second");
+    let input = repo_root().join("fixtures/slab/input");
+
+    let out = segment(&input, &first);
+    let png = first.join("preview_segmentation.png");
+    assert!(png.is_file(), "segment must write {}: {out}", png.display());
+    assert!(out.contains("preview_segmentation.png"), "and name it: {out}");
+
+    segment(&input, &second);
+    assert_eq!(
+        std::fs::read(&png).expect("the preview"),
+        std::fs::read(second.join("preview_segmentation.png")).expect("the preview"),
+        "two runs must draw the same preview"
+    );
+    // A PNG of the reference's own size: `render_views` lays the two views out side by side.
+    let bytes = std::fs::read(&png).expect("the preview");
+    assert_eq!(&bytes[1..4], b"PNG");
+    let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+    assert_eq!((width, height), (2800, 600), "two 1400x600 views of R §11.5");
+
+    std::fs::remove_dir_all(&first).ok();
+    std::fs::remove_dir_all(&second).ok();
+}
+
 #[test]
 fn info_names_the_algorithm_reference_the_caches_carry() {
     let out = Command::new(env!("CARGO_BIN_EXE_sherd-refit-rs"))

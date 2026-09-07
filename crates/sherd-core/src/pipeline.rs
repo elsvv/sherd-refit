@@ -39,9 +39,11 @@ use crate::matching::pair::{self, Candidate};
 use crate::matching::screen::{Screened, screen_pair, top_partners};
 use crate::mesh::geometry;
 use crate::params::Params;
-use crate::refine::{FractureCloud, RefinePiece, fracture_cloud, refine_joins};
+use crate::refine::{self, FractureCloud, RefinePiece, fracture_cloud, refine_joins};
 use crate::render::{self, PALETTE, Paint, Splat};
-use crate::report::{FragmentStats, Outcome, write_placed_meshes, write_report, write_transforms};
+use crate::report::{
+    FragmentStats, Outcome, Timings, write_placed_meshes, write_report, write_transforms,
+};
 use crate::spatial::kdtree::PointTree;
 use crate::types::FragId;
 
@@ -187,8 +189,8 @@ pub struct RunSummary {
     pub screened: Option<(usize, usize)>,
     /// Pairs R §8.1 rematched with the larger budget.
     pub second_pass: usize,
-    /// R §11.2's `timings`, in seconds.
-    pub timings: BTreeMap<String, f64>,
+    /// R §11.2's `timings`, in seconds, in the order the stages finished.
+    pub timings: Timings,
     /// The files written, in the order they were written.
     pub written: Vec<PathBuf>,
 }
@@ -203,6 +205,18 @@ impl RunSummary {
     pub fn assembled(&self) -> impl Iterator<Item = &Vec<FragId>> {
         self.groups.iter().filter(|g| g.len() > 1)
     }
+}
+
+/// The reference's default worker count: **one per core minus one**.
+///
+/// `cli.py` declares `--workers default=None` and `pipeline.run` resolves it to
+/// `workers or max(1, (os.cpu_count() or 2) - 1)` — nine on a ten-core machine, not ten. D §9 asks
+/// for the same default and the port used one per core until V4-D8. Nothing about the results
+/// depends on it (every parallel section collects by index, and R §4.2's block size comes out the
+/// same at nine and at ten on all six benchmark sets); it is the flag's documented meaning that
+/// has to match.
+pub fn default_workers() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZero::get).saturating_sub(1).max(1)
 }
 
 /// R §2–§11 for one collection: the whole pipeline, in one process (D §5).
@@ -229,7 +243,7 @@ pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSumm
     std::fs::create_dir_all(out_dir).map_err(|e| Error::write(out_dir, e))?;
     let workers = if options.workers == 0 { rayon::current_num_threads() } else { options.workers };
     let params = &options.params;
-    let mut timings: BTreeMap<String, f64> = BTreeMap::new();
+    let mut timings = Timings::new();
     tracing::info!(
         fragments = entries.len(),
         input = %input.display(),
@@ -241,7 +255,7 @@ pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSumm
     let started = Instant::now();
     let cache_dir = options.cache.then(|| out_dir.to_path_buf());
     let fragments = preprocess_collection(&entries, options.target_faces, cache_dir.as_deref())?;
-    timings.insert("preprocess".to_owned(), started.elapsed().as_secs_f64());
+    timings.insert("preprocess", started.elapsed().as_secs_f64());
     let names: Vec<String> = fragments.iter().map(|f| f.name.clone()).collect();
     let thickness = geometry::median(&fragments.iter().map(|f| f.thick).collect::<Vec<f64>>());
     let resolution = geometry::median(&fragments.iter().map(Fragment::res).collect::<Vec<f64>>());
@@ -289,7 +303,7 @@ pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSumm
         let started = Instant::now();
         let before = pairs.len();
         pairs = screen(&fragments, &names, &pairs, params);
-        timings.insert("screen".to_owned(), started.elapsed().as_secs_f64());
+        timings.insert("screen", started.elapsed().as_secs_f64());
         screened = Some((before, pairs.len()));
         tracing::info!(
             screened = before,
@@ -309,7 +323,7 @@ pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSumm
     // 2b. matching (R §5–§6)
     let started = Instant::now();
     let mut per_pair = match_all(&fragments, &pairs, params, options.keep_per_pair, workers, None);
-    timings.insert("matching".to_owned(), started.elapsed().as_secs_f64());
+    timings.insert("matching", started.elapsed().as_secs_f64());
     let mut candidates: Vec<Candidate> = per_pair.iter().flatten().copied().collect();
     tracing::info!(
         seconds = timings["matching"],
@@ -338,7 +352,7 @@ pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSumm
         })
         .collect();
     let mut assembly = assemble(&pieces, &candidates, params);
-    timings.insert("assembly".to_owned(), started.elapsed().as_secs_f64());
+    timings.insert("assembly", started.elapsed().as_secs_f64());
 
     // 3a. second pass (R §8.1, off by default)
     let retry = second_pass_pairs(&names, &pairs, &candidates, &assembly.groups, params);
@@ -357,7 +371,7 @@ pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSumm
             per_pair[at] = found;
         }
         candidates = per_pair.iter().flatten().copied().collect();
-        timings.insert("second_pass".to_owned(), started.elapsed().as_secs_f64());
+        timings.insert("second_pass", started.elapsed().as_secs_f64());
         assembly = assemble(&pieces, &candidates, params);
         tracing::info!(
             pairs = retry.len(),
@@ -377,7 +391,7 @@ pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSumm
     if options.refine && assembly.groups.iter().any(|g| g.len() > 1) {
         let started = Instant::now();
         poses = refine(&fragments, &assembly.groups, &poses, &used, params)?;
-        timings.insert("refine".to_owned(), started.elapsed().as_secs_f64());
+        timings.insert("refine", started.elapsed().as_secs_f64());
         tracing::info!(seconds = timings["refine"], joins = used.len(), "refinement done");
     }
     let poses = recenter(&poses, &pieces, &assembly.groups);
@@ -400,6 +414,7 @@ pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSumm
         &names,
         &poses,
         &assembly.groups,
+        &assembly.order,
         thickness,
         params,
     )?;
@@ -426,7 +441,7 @@ pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSumm
     // carries every stage but this one. The fixture dumps confirm it — their `timings` hold
     // `preprocess`, `matching`, `assembly` and `refine` and nothing else — and the port keeps the
     // key out of the file for the same reason, reporting it only to the caller and the log.
-    timings.insert("output".to_owned(), started.elapsed().as_secs_f64());
+    timings.insert("output", started.elapsed().as_secs_f64());
     tracing::info!(out = %out_dir.display(), files = written.len(), "outputs written");
 
     Ok(RunSummary {
@@ -691,7 +706,12 @@ fn refine(
                 &fracture,
                 fragment.thick,
                 fragment.res(),
-                params.seed,
+                // R §10's inventory gives the refinement stream the literal 0, and `refine.py:35`
+                // is `np.random.default_rng(0)` — not `Params.seed`, which every other stream
+                // takes. The two agree today because no CLI exposes `--seed`; passing `p.seed`
+                // here would make the port's refinement move under a flag the reference's does
+                // not answer to (V4-D9).
+                refine::CAP_SEED,
             )))
         })
         .collect::<Result<Vec<Option<FractureCloud>>>>()?;
@@ -701,6 +721,20 @@ fn refine(
         .map(|(f, c)| RefinePiece { thick: f.thick, res: f.res(), cloud: c.as_ref() })
         .collect();
     Ok(refine_joins(&pieces, poses, groups, used, params, Numerics::REFERENCE).poses)
+}
+
+/// The tail of the reference's `pipeline.segment_only`: the segmentation preview alone.
+///
+/// `write_previews(out_dir, frags, {n: I}, [[n] …])` — every fragment at the identity and in a
+/// group of its own, so no group preview is drawn and `preview_segmentation.png` is the one file
+/// written. `sherd-refit segment` writes it and so does this one (V4-D7).
+pub fn write_segmentation_preview(out_dir: &Path, fragments: &[Fragment]) -> Result<Vec<PathBuf>> {
+    let names: Vec<String> = fragments.iter().map(|f| f.name.clone()).collect();
+    let poses = vec![Matrix4::identity(); fragments.len()];
+    let groups: Vec<Vec<FragId>> = (0..fragments.len())
+        .map(|n| vec![u32::try_from(n).expect("fewer than 2^32 fragments")])
+        .collect();
+    write_previews(out_dir, fragments, &names, &poses, &groups)
 }
 
 /// R §11.5: one preview per group of two or more, then the segmentation preview.
@@ -773,10 +807,7 @@ pub fn write_previews(
             PREVIEW_POINTS / 2,
             &mut rng,
         );
-        let mean = [0, 1, 2].map(|axis| {
-            let column: Vec<f64> = points.iter().map(|p| p[axis]).collect();
-            geometry::pairwise_sum(&column) / column.len().max(1) as f64
-        });
+        let mean = geometry::column_mean(&points);
         let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
         for v in &v64 {
             lo = lo.min(v[0]);

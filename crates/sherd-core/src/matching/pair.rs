@@ -22,11 +22,14 @@
 //! candidate list, the ranking and the accepted set are what they are whatever the thread count
 //! does (D §7); the reference makes the same promise through `ThreadPoolExecutor.map`.
 
+use std::sync::Arc;
+
 use nalgebra::Matrix4;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::fragment::Fragment;
 use crate::fragment::samples::MatchData;
+use crate::matching::cache::MatchCache;
 use crate::matching::coarse::{self, Probe, Target};
 use crate::matching::hypotheses::{self, Frames, Hypotheses};
 use crate::matching::icp::{IcpTarget, Numerics, Registration, cloud_points, homogeneous};
@@ -47,12 +50,16 @@ pub const COARSE_ORDER_LIMIT: usize = 5000;
 pub const COARSE_FLOOR: f64 = 0.1;
 
 /// Two fragments and everything R §5 measures them with.
+///
+/// The two `MatchData` are behind an `Arc` because D §5's cache hands the same arrays to every
+/// pair that asks for that fragment at that `t`; without a cache the `Arc` is one allocation per
+/// pair and nothing else.
 #[derive(Debug)]
 pub struct Pair<'a> {
     /// A's match arrays at `t_pair` (R §4.2).
-    pub a: MatchData<'a>,
+    pub a: Arc<MatchData<'a>>,
     /// B's match arrays at `t_pair`.
-    pub b: MatchData<'a>,
+    pub b: Arc<MatchData<'a>>,
     /// The pair's resolved distances (R §1.2).
     pub scales: Scales,
     /// A's breakline frames in `f64` (R §5.1).
@@ -81,10 +88,32 @@ impl<'a> Pair<'a> {
     /// Building this is the expensive part of a pair — one of the two fragments usually has to
     /// redraw R §3.5 — and it is why the pipeline groups a fragment's pairs together (D §5).
     pub fn build(a: &'a Fragment, b: &'a Fragment, p: &Params) -> Self {
+        Self::build_cached(a, b, p, None)
+    }
+
+    /// [`Pair::build`] through D §5's shared cache, which the pipeline owns for the whole
+    /// matching stage.
+    ///
+    /// `None` builds both fragments outright, which is what every caller outside the pipeline
+    /// wants: a cache of one pair's two entries can never hit.
+    pub fn build_cached(
+        a: &'a Fragment,
+        b: &'a Fragment,
+        p: &Params,
+        cache: Option<&MatchCache<'a>>,
+    ) -> Self {
         let scales = Scales::for_fragments(p, a, b);
         let reg_points = p.reg_points as usize;
-        let a = MatchData::at(a, scales.t, reg_points);
-        let b = MatchData::at(b, scales.t, reg_points);
+        let (a, b) = match cache {
+            Some(cache) => (
+                cache.get_or_build(a, scales.t, reg_points),
+                cache.get_or_build(b, scales.t, reg_points),
+            ),
+            None => (
+                Arc::new(MatchData::at(a, scales.t, reg_points)),
+                Arc::new(MatchData::at(b, scales.t, reg_points)),
+            ),
+        };
         Self { frames_a: Frames::of(&a), frames_b: Frames::of(&b), a, b, scales }
     }
 
@@ -377,6 +406,25 @@ pub fn match_pair(a: &Fragment, b: &Fragment, p: &Params, keep: usize) -> Vec<Ca
         return Vec::new();
     }
     Pair::build(a, b, p).match_pair(p, keep, Numerics::REFERENCE)
+}
+
+/// [`match_pair`] through D §5's shared `MatchData` cache.
+///
+/// The cache changes no answer — `MatchData::at` is a pure function of `(fragment, t,
+/// reg_points)` (D §5, [`cache`](super::cache)) — so this and [`match_pair`] return the same
+/// candidates bit for bit; only the pipeline calls it, because only the pipeline matches enough
+/// pairs for an entry to be asked for twice.
+pub fn match_pair_cached<'a>(
+    a: &'a Fragment,
+    b: &'a Fragment,
+    p: &Params,
+    keep: usize,
+    cache: &MatchCache<'a>,
+) -> Vec<Candidate> {
+    if Pair::skipped(a, b, p) {
+        return Vec::new();
+    }
+    Pair::build_cached(a, b, p, Some(cache)).match_pair(p, keep, Numerics::REFERENCE)
 }
 
 /// One pose surviving R §5.4, with the hypothesis it came from and its re-score.

@@ -15,10 +15,11 @@
 //!
 //! Step D3 filled in the rest: [`run`] is the reference's `sherd_refit.pipeline.run`, stage for
 //! stage, and the schedule below it is the reference's too — [`pair_blocks`] is `_pair_blocks` and
-//! [`block_size`] the one number `_match_workers` leaves for a single process to act on. The
-//! per-fragment `MatchData` LRU of D §5 is not there: a pair rebuilds one of its two fragments'
-//! arrays at `t_pair`, which R's cost table puts at 0.2 s against a pair's several seconds, and the
-//! block order is already the one an LRU would want when it arrives.
+//! [`block_size`] the one number `_match_workers` leaves for a single process to act on. Step E2
+//! added D §5's per-fragment `MatchData` cache ([`matching::cache`](crate::matching::cache)),
+//! which the block order was already written for; E1 measured what it can remove and the answer is
+//! the cheap half of a pair's two builds, because R §1.2's `t_pair = min(t_A, t_B)` gives every
+//! *rebuild* a key that belongs to one partner alone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -33,6 +34,7 @@ use crate::collection::{self, Entry};
 use crate::error::{Error, Result};
 use crate::executor::Backend;
 use crate::fragment::{Fragment, cache, samples};
+use crate::matching::cache::MatchCache;
 use crate::matching::hypotheses::Frames;
 use crate::matching::icp::Numerics;
 use crate::matching::pair::{self, Candidate};
@@ -529,6 +531,10 @@ fn match_all(
         "matching"
     );
     let done = AtomicUsize::new(0);
+    // D §5's shared `MatchData` cache, one per pass and sized by D §8. It serves the fragment of
+    // a pair whose own `t` is `t_pair` — the other half of every pair is a rebuild at a thickness
+    // that belongs to one partner and is a miss by construction (`matching::cache`).
+    let cache = MatchCache::sized();
     let mut out: Vec<Vec<Candidate>> = vec![Vec::new(); pairs.len()];
     let found: Vec<Vec<(usize, Vec<Candidate>)>> = blocks
         .par_iter()
@@ -538,7 +544,8 @@ fn match_all(
                 .map(|&k| {
                     let (a, b) = pairs[k];
                     let started = Instant::now();
-                    let cs = pair::match_pair(&fragments[a], &fragments[b], params, keep);
+                    let cs =
+                        pair::match_pair_cached(&fragments[a], &fragments[b], params, keep, &cache);
                     tracing::info!(
                         pair = %format!("{}__{}", fragments[a].name, fragments[b].name),
                         seconds = started.elapsed().as_secs_f64(),
@@ -556,6 +563,15 @@ fn match_all(
     for (k, cs) in found.into_iter().flatten() {
         out[k] = cs;
     }
+    let stats = cache.stats();
+    tracing::info!(
+        hits = stats.hits,
+        misses = stats.misses,
+        evictions = stats.evictions,
+        hit_rate = stats.hit_rate(),
+        pass = tag.unwrap_or("first"),
+        "match data cache"
+    );
     out
 }
 

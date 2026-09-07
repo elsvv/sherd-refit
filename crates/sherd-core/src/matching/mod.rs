@@ -13,7 +13,11 @@
 //! fracture rungs of R §5.6. Step C3 closed it: [`verify`] measures R §6's five scores at a pose
 //! and applies §6.5's rule, [`pair::match_pair`] drives the whole chain and ranks what comes out
 //! (§5.7), and [`screen`] is R §4.3's optional partner pass, off by default.
+//!
+//! Step E2 added [`cache`]: D §5's shared `MatchData` cache, which the pipeline hands to
+//! [`pair::match_pair_cached`] so that the fragments a block of pairs shares are built once.
 
+pub mod cache;
 pub mod coarse;
 pub mod hypotheses;
 pub mod icp;

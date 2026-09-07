@@ -632,7 +632,12 @@ fn run(
 
 /// `A[mask].sum()`: numpy's pairwise sum over the selected faces, so that the fracture fraction is
 /// the reference's to the last bit.
-fn masked_area(areas: &[f64], mask: &[bool]) -> f64 {
+///
+/// Public because the parity harness sums the *reference's* own areas over the *reference's* own
+/// mask for R §6.1's `frac_area`, and a left-to-right sum there would be the harness's arithmetic
+/// rather than the reference's — the one number in the injected `verify` row that the port would
+/// have contributed (defect D7 of the phase-1c verification).
+pub fn masked_area(areas: &[f64], mask: &[bool]) -> f64 {
     let selected: Vec<f64> = areas.iter().zip(mask).filter_map(|(&a, &m)| m.then_some(a)).collect();
     pairwise_sum(&selected)
 }

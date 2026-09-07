@@ -347,13 +347,10 @@ impl RefGeometry {
                     "the fracture mask does not describe the dump's own mesh",
                 ));
             }
-            let area = geom
-                .areas
-                .iter()
-                .zip(&frac)
-                .filter(|&(_, &is_fracture)| is_fracture)
-                .map(|(a, _)| a)
-                .sum();
+            // `float(self.A[self.frac].sum())` is numpy's **pairwise** sum, and this is the
+            // reference's own areas over the reference's own mask: summing it left to right would
+            // put the harness's arithmetic into a number the injected `verify` row then compares.
+            let area = sherd_core::fragment::segment::masked_area(&geom.areas, &frac);
             (RayScene::of_subset(&v32, &mesh.f, |i| frac[i]), area)
         } else {
             (None, 0.0)

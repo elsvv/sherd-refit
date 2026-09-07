@@ -353,6 +353,7 @@ now the measured ones.
 | `--threads 1` against the default, `segment` | **ok**, byte-identical caches |
 | `match_pair` at one and at ten threads | **ok**, the same candidate list on all six terracotta pairs |
 | two `parity --details` runs byte-identical | **ok** (slab, all thirteen stages) |
+| the whole 16-file sweep re-run and compared | **ok**, identical once the log timestamps are stripped |
 | `parity --details` at `RAYON_NUM_THREADS` 1 and 10 | **ok** (terracotta, native `candidates` and `breakline`) |
 
 ### 9.1 The sweep, set by set

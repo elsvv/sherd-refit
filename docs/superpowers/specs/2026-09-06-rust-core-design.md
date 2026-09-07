@@ -196,6 +196,14 @@ was corrected to follow (phase-1a verification, finding F11):
 * **`face_budget` and `area0` are part of the struct**, because the fixture sink dumps
   `thick.target` as `{target, area0, faces0, target_faces}` and the parity harness compares the
   first two directly.
+* **The two BVHs are `OnceLock<Option<Arc<RayScene>>>`**, not `OnceLock<Arc<Bvh>>`: `parry3d`
+  refuses a mesh with no triangle, so "built" and "buildable" are different states and the type
+  says so. `Fragment::surface_scene` (R §6.4) and `Fragment::fracture_scene` (R §6.1) build them on
+  first use and every pair the fragment takes part in borrows the same one; a 150 000-face mesh
+  costs 40 ms to build and a fragment of a ten-fragment collection is in nine pairs (step C3).
+* **`Candidate` has no `tier`** in phase 1. The field above belongs to roadmap item 3's confidence
+  bands, and in phase 1 it would be `accepted` under a second name; it arrives with the constraint
+  solver that reads it (§11).
 * **`WorkingMesh` is `f32`** — `v`, and `res` with it — and `fn_`, `area` and `centroid` are
   derived from the *narrowed* vertices, not from the `f64` ones they came from. That is what makes
   a cold run and a cache hit bit-identical, since the cache stores `V`, `F` and `res` and both
@@ -628,10 +636,12 @@ Two more places where the table is narrower than it sounds:
 | nms | kept hypotheses, on the reference's own walk order `nms1.order` | identical, in order | — |
 | nms, PMC-6 tie effect (a measurement, not a parity requirement) | with the port's **own** tie-break: kept count; share of the reference's kept set missed; score at equal rank; share of its kept poses not covered by a kept pose of the port's | ±5 %; ≤ 0.5; ≤ 3/60; ≤ 0.5 | — |
 | stage 1 | pose per kept hypothesis (by id); `s1`; the ICP's own fitness and rmse at both poses; `kept2` on the reference's own walk order `nms2.order` | 0.05° / 0.01 t; ±0.02; 1e-4 and 1e-4 t; identical, in order | — |
-| stage 2 | pose per candidate (by stage-1 id) **on each of the four rungs**; fitness and rmse at both poses; `tight`; `gap`; `seam`; `cont`; `cont_n`; `pen`; `accepted` | 0.05° / 0.01 t; 1e-4 and 1e-4 t; ±0.01; ±0.002 t; ±0.34 t; ±0.005 t; ±0.01; ±0.0005; identical | — |
+| stage 2 | pose per candidate (by stage-1 id) **on each of the four rungs**; fitness and rmse at both poses | 0.05° / 0.01 t; 1e-4 and 1e-4 t | — |
+| verify (R §6, at the reference's own `s2.T_frac2`) | `tight`; `gap`; `seam`; `cont`; `cont_n`; `pen` **on a pair of closed meshes**; `pen` on a pair with an open one; `pen limit` and `accepted` | ±0.01; ±0.002 t; ±0.34 t; ±0.005 t; ±0.01; ±0.0005; ≤ `max_pen`; identical | — (the port scores its own candidates natively, which is the row below) |
+| candidates (R §5.7) | how many candidates come back; which of the reference's own stage-2 candidates they are, in order; `accepted` of each; `brk_best` | exact; exact; exact; ±0.02 | see `pair result` |
 | stage 1, stage 2 — distribution (a measurement beside the worst case) | `p50`, `p90`, `p99` and `max` of the same pose deviations over every candidate of the dump | the row's own tolerance | — |
 | stage 1, stage 2 — `chaotic` (an alarm, not a parity requirement) | share of candidates whose own ladder moves further than the row's tolerance when the initial pose moves by one ULP; and, exactly, how many of those the reference itself kept | ≤ 0.002 / ≤ 0.06 per dump and ≤ 0.06 / ≤ 0.4 per pair; zero kept | — |
-| pair result | accepted set; best candidate of pairs with an accepted join | identical; 1° / 0.05 t | identical; 1° / 0.05 t (perf-note criterion); no requirement on the best candidate of pairs without a join |
+| pair result | (the `candidates` row above) | — | **a regression alarm, not a parity claim** (see below): share of pairs returning a different candidate count ≤ 0.4; share accepted by one side only ≤ 0.25 each; share of both-accepted pairs placed more than a wall apart ≤ 0.25; on the rest, median rotation ≤ 1° and median displacement of the moving fragment ≤ 0.3 t |
 | assembly | groups, joins used, rejections | identical | identical |
 | refine | relative poses within a group | 0.2° / 0.02 t | 0.2° / 0.02 t |
 | outputs | `transforms.json` poses; `report.json` keys | as refine; schema | as refine; schema |
@@ -831,6 +841,76 @@ and the candidates.
 `p99 distance` and `dihedral KS` rows of the paragraphs above, on three fragments of synthetic_20.
 Before T1 the same sweep failed 43 native comparisons across three stages.
 
+**The two verification rows of step C3 are met on all eight sets, and most of them are met
+exactly** (`notes/2026-09-06-c3-verify.md`). Injected — R §6 run at the reference's own
+`s2.T_frac2`, on the reference's own samples, meshes and `Scales` — **2 508 comparisons over 256
+pairs and 2 249 candidates, none failed**. `tight` and `seam` are *bit-identical on every
+candidate of every set*; `gap` is 0 at the median and 3.0e-6 t at its worst (pot B); `cont` is
+2.7e-14 t at worst and `cont_n` 2.2e-16; `pen` is 0 on six of the eight sets and 5e-5 — one sample
+of 20 000 — on the other two. R §6.5's verdict is identical on all 2 249. The `candidates` row is
+the ranking on top of that: fed the same candidates the port returns the reference's own five, in
+the reference's own order, with the same `accepted` flags and the same `brk_best`, on all 256
+pairs.
+
+**The `pen` row is split by whether the two working meshes are closed, and that is a statement
+about Open3D rather than a widening.** R §3.3.2's `closed_enough` calls a mesh watertight at up to
+0.2 % boundary edges, so R §6.4 asks "is this point inside" of meshes with holes, where a ray that
+leaves through a hole flips the parity and the answer is not a function of the geometry. On
+`Pot_A_Piece_03_Mesh` (149 boundary edges, wall 3.45) Open3D calls 54 of `Pot_A_Piece_08_Mesh`'s
+20 000 samples inside it at depths of 7.6–7.8 units — **2.2 t**, inside a solid whose half wall is
+1.72 — and its own `count_intersections` reports an **even** number of crossings for every one of
+those points along **all six** axis directions. The port's majority-of-three says outside, and so
+does the geometry. `pen` is therefore gated at 0.0005 on the 193 pairs whose two meshes are closed
+(met: worst 5e-5) and reported against `max_pen` on the 63 that have an open one (worst 2.7e-3, on
+pot A); on both kinds the *decision* is gated exactly and met exactly — no candidate of any set
+crosses `max_pen` on one side and not the other, and no `accepted` flag differs.
+
+**The native `pair result` row asked for something unreachable, and C3 measured what is reachable
+instead.** "Accepted set identical" cannot hold: the port scores what the reference scores exactly,
+but natively it *scores different poses*, because PMC-9 gives it different samples and PMC-6 lets
+R §5.3's suppression keep a different set — 14.3 % of the reference's kept hypotheses differ on
+average and 43.6 % at worst, which step C1 measured and this section already accepts for the stages
+above. R §6.5 is a threshold on the output of that search, and R §13 already records that the
+decision "flips on nothing" for a candidate sitting on `min_tight`. The row is now a regression
+alarm gated at its measured worst plus headroom, the shape the PMC-6 tie rows already use, and the
+*quality* claim is made against the ground truth rather than against the reference:
+
+| set | pairs | port accepts | reference accepts | port true / false | reference true / false |
+|---|---:|---:|---:|---:|---:|
+| terracotta | 6 | 2 | 2 | exactly R §13's `{021–094, 094–104}` | the same two |
+| pot_A | 28 | 17 | 16 | 9 / 8 | 10 / 6 |
+| pot_B | 36 | 26 | 21 | 13 / 13 | 11 / 10 |
+| pot_C | 21 | 3 | 4 | 2 / 1 | 3 / 1 |
+| pot_G | 21 | 2 | 0 | **2 / 0** | 0 / 0 |
+| pot_H | 55 | 13 | 16 | 7 / 6 | 7 / 9 |
+| synthetic_20 | 187 | 23 | 23 | **23 / 0** | **23 / 0** |
+
+Summed over the sets with an adjacency list the port accepts **56 true joins and 28 false** against
+the reference's **54 and 26** — the same quality by any reading — and on `synthetic_20`, the one
+set whose ground truth is complete and does not interpenetrate, both accept 23 of 23 true joins
+with no false one at all, differing only in which three of them each search happened to find. The
+two joins the port accepts on pot_G, where the reference accepts none, are both ground-truth
+adjacent; R §13's "no join must be accepted" on that set is a statement about the *assembly* of a
+collection whose ground truth interpenetrates, and phase 1d is where it is tested.
+
+**Where both implementations accept a join, they place the sherd in the same spot.** Measured as
+the largest displacement the two best candidates give any vertex of the moving fragment — not
+`pose_gap`'s origin displacement, which a 0.19° difference 450 units from the origin inflates
+tenfold — the median is 0.0096 t on synthetic_20 (max 0.065 t over its twenty shared joins),
+0.020 t on the terracotta and 0.007–0.108 t on the pot sets. The tail belongs to the pairs both
+sides accept *falsely*: six of the 354 pairs place the sherd more than a wall apart, and every one
+of them is a pair with no ground-truth join, where "the best candidate" is one arbitrary way of
+resting one sherd on another.
+
+**Cost of a whole `match_pair`, on the terracotta's six pairs** (mean per pair, this machine):
+7.62 s for the reference single-threaded (`OMP_NUM_THREADS=1`, `n_threads=1` — R §13's "≈ 7 core-s
+per pair" confirmed) against the port's **1.04 s**, a factor of **7.3**; 5.83 s for the reference
+with ten threads inside the pair against the port's **0.198 s**, a factor of **29**. The reference's
+best use of this machine for one pair is 3.40 s (its own `_map` at one thread with Open3D's OpenMP
+free), still **17×** the port's ten-thread number. Within-pair scaling from one thread to ten is
+5.2× for the port and 1.3× for the reference, which is why the reference's pipeline takes its
+parallelism from worker processes over pairs instead.
+
 ### 10.3 Benchmark gates
 
 Quality: exactly R§13 on every listed set, run natively (no injection), CPU and GPU. Runtime
@@ -901,6 +981,7 @@ shorten phase 1+2 to ≈ 14 weeks because GPU work can start once the CPU ICP is
 | 1c | hypotheses, coarse, NMS, ICP (E5), verification, `match_pair`, screening flags | 2.5 | stage-2 injected tolerances on every fixture pair | ICP corner cases (empty correspondences), tie handling |
 | 1c, step C1 | done: pair scales (R §1.2, §4.2), hypotheses (R §5.1), the coarse score (R §5.2) and the NMS (R §5.3), with the `hypotheses`, `coarse` and `nms` parity rows | | injected 6 086 of 6 086 on 358 pairs of eight sets — the `(pa, pb)` set and order exact, `Scales` bit-identical, `cs` bit-identical on 38.1 M hypotheses, the kept list identical on the reference's own walk order; native 1 074 of 1 074 (§10.2) | PMC-6's tie effect is now measured rather than assumed: membership differs by up to 43.6 %, quality by at most two probe points |
 | 1c, step C2 | done: Open3D's ICP (R §7), the two refinement ladders (R §5.4–5.6), R §5.5's suppression and the `stage1`/`stage2` parity rows, with experiment E5 | | injected 3 654 (stage 1) and 3 400 (stage 2) with no failure on 358 pairs of eight sets — median pose deviation 0.000° / 1e-13 t, worst 5.4e-3 t of 0.01 t; no native column (§10.2) | 48 candidates of 74 090 have ladders neither implementation can reproduce, measured on Open3D itself; E5 answered: `f32` point loops and the centred assembly are both outside §10.2 (§3, §7) |
+| 1c, step C3 | done: R §6's five verification scores and R §6.5's rule, R §5.7's ranking, the whole of `match_pair`, R §4.3's screening, and the `verify` and `candidates` parity rows | | injected 2 508 of 2 508 on 256 pairs of eight sets — `tight` and `seam` bit-identical on every candidate, `gap` ≤ 3e-6 t, `cont` ≤ 2.7e-14 t, `accepted` identical, the returned five in the reference's own order; natively the accepted sets differ and the row becomes an alarm (§10.2) | Open3D's own signed distance is self-contradictory on a mesh that `closed_enough` accepts (R §6.4); the native accepted set cannot be identical and is measured against the ground truth instead |
 | 1d | assembly, refinement, recentre, report/transforms/meshes, renderer, CLI, determinism tests | 2 | R§13 gates natively; CI green on 4 OSs | none major |
 | 1e | profiling and CPU tuning to §10.3 CPU gates | 1.5 | CPU gates | 2 h collection gate has 1.6× margin only |
 | **phase 1 total** | | **11** | | |

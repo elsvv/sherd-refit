@@ -10,7 +10,9 @@
 //! (§5.2), [`nms`] (§5.3) and the [`pair`] that drives them. Step C2 added the refinement:
 //! Open3D's ICP as R §7 freezes it ([`icp`]) and the two ladders it drives ([`ladder`]) — R §5.4's
 //! breakline rungs with their re-score, R §5.5's suppression, and the four registration and
-//! fracture rungs of R §5.6. The verification of R §6 and the ranking of R §5.7 follow.
+//! fracture rungs of R §5.6. Step C3 closed it: [`verify`] measures R §6's five scores at a pose
+//! and applies §6.5's rule, [`pair::match_pair`] drives the whole chain and ranks what comes out
+//! (§5.7), and [`screen`] is R §4.3's optional partner pass, off by default.
 
 pub mod coarse;
 pub mod hypotheses;

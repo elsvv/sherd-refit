@@ -13,13 +13,17 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use sherd_core::error::{Error, Result};
 use sherd_core::fragment::samples::registration_split;
 use sherd_core::matching::hypotheses::Frames;
 use sherd_core::matching::icp::IcpTarget;
 use sherd_core::matching::scales::Scales;
+use sherd_core::matching::verify::Surfaces;
 use sherd_core::mesh::geometry::face_geometry;
+use sherd_core::spatial::bvh::RayScene;
+use sherd_core::vec3::Vec3f;
 
 use super::{Collection, FragmentFixture};
 use crate::npy;
@@ -297,6 +301,158 @@ pub fn reference_clouds(
         reg,
         frac: RefCloud { p: pf, n: nf },
     }))
+}
+
+/// One fragment's working mesh as R §6 reads it: the two BVHs, the face normals and the two
+/// numbers the scores need — all from the dump's own `mesh.V`, `mesh.F` and `seg.frac_final`.
+///
+/// The reference builds exactly these: `Fragment.scene` over the whole working mesh (R §6.4) and
+/// `Fragment.frac_scene` over the fracture faces alone (R §6.1), both on `V.astype(float32)`,
+/// which is what [`RayScene`] holds too. `frac_area` is `A[frac].sum()` over the dump's own mesh.
+#[derive(Debug)]
+pub struct RefGeometry {
+    /// A BVH over the whole working mesh; `None` when the dump carries no mesh for the fragment.
+    pub scene: Option<RayScene>,
+    /// A BVH over the fracture faces alone.
+    pub fracture: Option<RayScene>,
+    /// `FN`, the face normals of that mesh.
+    pub normals: Vec<[f64; 3]>,
+    /// R §3.4's `fracture_area`.
+    pub frac_area: f64,
+    /// R §3.3.2's verdict, from `mesh.watertight.json`.
+    pub watertight: bool,
+    /// How many edges of that mesh are used by a number of faces other than two.
+    ///
+    /// R §3.3.2's `closed_enough` accepts up to 0.2 % of them, so `watertight` can be true on a
+    /// mesh with holes — and on such a mesh a signed distance has no definition, which is what
+    /// the `verify` stage's `pen` row has to know about (PMC-7).
+    pub n_boundary: u32,
+}
+
+impl RefGeometry {
+    /// Reads one fragment's mesh, labels and watertightness out of the dump.
+    ///
+    /// Returns `None` when the dump carries no working mesh (level `min`). A dump without
+    /// `seg.frac_final` has no fracture mask and therefore no fracture scene, which the caller
+    /// reports as a skip rather than scoring against the whole mesh.
+    pub fn of(fragment: &FragmentFixture) -> Result<Option<Self>> {
+        let Some(mesh) = fragment.working()? else { return Ok(None) };
+        let geom = face_geometry(&mesh.v, &mesh.f);
+        let v32: Vec<Vec3f> = mesh.v.iter().map(|p| Vec3f::from_f64(*p)).collect();
+        let (fracture, frac_area) = if fragment.has("seg.frac_final.npy") {
+            let frac = crate::npy::read_bool(fragment.file("seg.frac_final.npy"))?;
+            if frac.len() != mesh.f.len() {
+                return Err(Error::fixture(
+                    fragment.file("seg.frac_final.npy"),
+                    "the fracture mask does not describe the dump's own mesh",
+                ));
+            }
+            let area = geom
+                .areas
+                .iter()
+                .zip(&frac)
+                .filter(|&(_, &is_fracture)| is_fracture)
+                .map(|(a, _)| a)
+                .sum();
+            (RayScene::of_subset(&v32, &mesh.f, |i| frac[i]), area)
+        } else {
+            (None, 0.0)
+        };
+        let (watertight, n_boundary) = if fragment.has("mesh.watertight.json") {
+            let path = fragment.file("mesh.watertight.json");
+            let value = crate::npy::read_json(&path)?;
+            let boundary = crate::npy::field_u64(&value, "n_boundary", &path)?;
+            (
+                crate::npy::field_bool(&value, "watertight", &path)?,
+                u32::try_from(boundary).unwrap_or(u32::MAX),
+            )
+        } else {
+            (false, u32::MAX)
+        };
+        Ok(Some(Self {
+            scene: RayScene::of_mesh(&v32, &mesh.f),
+            fracture,
+            normals: geom.normals,
+            frac_area,
+            watertight,
+            n_boundary,
+        }))
+    }
+}
+
+/// R §6's view of one fragment, built entirely from the dump: the reference's own samples at the
+/// pair's `t`, its own breakline, its own margin and its own two meshes.
+///
+/// Returns `None` when the dump has no arrays at that `(t, surface_points)` or no fracture scene.
+pub fn reference_surfaces<'a>(
+    fragment: &FragmentFixture,
+    geometry: &'a RefGeometry,
+    frames: &Frames,
+    t: f64,
+    surface_points: u64,
+) -> Result<Option<Surfaces<'a>>> {
+    let (Some(dir), Some(fracture)) = (arrays_at(fragment, t, surface_points)?, &geometry.fracture)
+    else {
+        return Ok(None);
+    };
+    let file = |name: &str| dir.join(name);
+    for name in ["md.Pf.npy", "md.S.npy", "md.sp.npy", "md.margin_idx.npy"] {
+        if !file(name).is_file() {
+            return Ok(None);
+        }
+    }
+    let pf = npy::read_points(file("md.Pf.npy"))?;
+    let s = npy::read_points(file("md.S.npy"))?;
+    let sp = npy::read_indices(file("md.sp.npy"))?;
+    let margin_idx = npy::read_indices(file("md.margin_idx.npy"))?;
+    if s.len() != sp.len()
+        || margin_idx.iter().any(|&i| (i as usize) >= s.len())
+        || sp.iter().any(|&f| (f as usize) >= geometry.normals.len())
+    {
+        return Err(Error::fixture(
+            file("md.margin_idx.npy"),
+            "the dump's sample indices do not address its own mesh",
+        ));
+    }
+    let margin_p: Vec<[f64; 3]> = margin_idx.iter().map(|&i| s[i as usize]).collect();
+    let margin_n: Vec<[f64; 3]> =
+        margin_idx.iter().map(|&i| geometry.normals[sp[i as usize] as usize]).collect();
+    Ok(Some(Surfaces::new(
+        fracture,
+        geometry.scene.as_ref(),
+        geometry.watertight,
+        geometry.frac_area,
+        pf,
+        s,
+        frames.p.clone(),
+        frames.ns.clone(),
+        margin_p,
+        margin_n,
+    )))
+}
+
+/// The [`RefGeometry`] of every fragment of a dump, built once and kept.
+///
+/// A BVH over a 150 000-face mesh costs 40 ms and a fragment of a ten-fragment collection takes
+/// part in nine pairs; the fracture scene is built once too, and the reference caches it the same
+/// way (`Fragment.frac_scene` is a lazily-built property).
+/// The entries are behind an [`Arc`] rather than borrowed out of the map, because a pair needs
+/// *both* of its fragments' geometries alive at once and the cache would otherwise hand out one
+/// borrow at a time.
+#[derive(Debug, Default)]
+pub struct GeometryCache {
+    cached: BTreeMap<String, Option<Arc<RefGeometry>>>,
+}
+
+impl GeometryCache {
+    /// The geometry of one fragment, read on first use.
+    pub fn get(&mut self, fragment: &FragmentFixture) -> Result<Option<Arc<RefGeometry>>> {
+        if !self.cached.contains_key(&fragment.name) {
+            let geometry = RefGeometry::of(fragment)?.map(Arc::new);
+            self.cached.insert(fragment.name.clone(), geometry);
+        }
+        Ok(self.cached.get(&fragment.name).and_then(Clone::clone))
+    }
 }
 
 /// The face normals of every fragment of a dump, computed once and kept.

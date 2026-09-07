@@ -574,9 +574,25 @@ else:
     pen_depth = max( −min(sdA), −min(sdB) ) / t_pair
 ```
 
+`frac_scene` is built over the faces `frac` selects, and over `F[:1]` — the mesh's **first face** —
+when it selects none: a raycasting scene needs a triangle, and a fragment with no fracture face has
+no candidate to score anyway (it never reaches §5). A port has to reproduce the fallback or refuse
+the same fragments.
+
 Open3D's sign: closest-point distance, sign from the parity of intersections of one ray from the
 query point (**PMC-7**: the port may use a different ray direction or the angle-weighted
 pseudo-normal; `pen` must agree within 0.0005 on the parity gates).
+
+**On a mesh that §3.3.2 accepts but that has boundary edges, that sign is not a function of the
+geometry**, and the two implementations cannot be compared there. `closed_enough` tolerates up to
+0.2 % boundary edges so that a decimated scan with a few holes still gets a penetration test; a ray
+that leaves through a hole crosses the surface one time fewer and the parity flips. Measured on
+`Pot_A_Piece_03_Mesh` (149 boundary edges, wall 3.45), Open3D calls 54 of `Pot_A_Piece_08_Mesh`'s
+20 000 samples inside it at depths of 7.6–7.8 units — 2.2 t, inside a solid whose half wall is 1.72
+— while its own `count_intersections` reports an **even** number of crossings for every one of them
+along all six axis directions. D §10.2's `pen` row therefore applies to pairs of closed meshes, and
+on an open one it is the *decision* (`pen ≤ max_pen`, and `accepted`) that is compared instead
+(task C3, `notes/2026-09-06-c3-verify.md` §4).
 
 ### 6.5 Acceptance
 
@@ -931,6 +947,18 @@ which one it is. The two ladders of §5.4 and §5.6, R §7's two estimators and 
 are implemented in `crates/sherd-core/src/matching/{icp,ladder}.rs` and verified against the dump
 on all eight fixture sets (`notes/2026-09-07-c2-icp.md`); the only other amendment C2 makes is to
 D §7's ill-conditioning row, which is the port's own numerics and not the reference's.
+
+**2026-09-07, step C3 — §6 is implemented and PMC-7, PMC-11 and PMC-12 are re-verified.**
+`crates/sherd-core/src/matching/verify.rs` computes every score of §6 and §6.5's rule, and
+`crates/sherd-core/src/matching/pair.rs` closes `match_pair` around it. Fed the reference's own
+stage-2 poses, samples and meshes, the port reproduces `tight` and `seam` **exactly** on all 2 249
+candidates of the eight fixture sets, `gap` to 3e-6 t, `cont` to 2.7e-14 t, `cont_n` to 2.2e-16 and
+`pen` to 5e-5 wherever both working meshes are closed; §6.5's verdict is identical on every
+candidate, and §5.7's ranking and cut return the reference's own five candidates in the reference's
+own order on every pair. PMC-11's and PMC-12's "equivalent formulation" clauses are what the port
+implements (an AABB reject and a parity test before any distance; a bounded closest point with
+`r_max = sc.facing`), and both come out identical rather than merely close. PMC-7 is the one row
+with a residual, and §6.4 above now says where it lives.
 
 ## 13. Reference results and parity gates
 

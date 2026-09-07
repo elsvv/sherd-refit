@@ -21,6 +21,9 @@ rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# The native `candidates` row logs the wall time of every `match_pair` and every preprocessing
+# (task C3's cost table); `sherd-cli` turns those lines on with `-v`.
+tracing.workspace = true
 
 [lints]
 workspace = true

@@ -9,11 +9,14 @@
 //! Plan step S4 filled in the first three rows of D §10.2's table — `load`, `thickness` and
 //! `working mesh` — step B1 the fourth, `segmentation`, step B2 the fifth, `breakline`, and step
 //! B3 the sixth, `samples`. Step C1 added the first three *pair* rows — `hypotheses`, `coarse` and
-//! `nms` — which read `DIR/pairs/<a>__<b>/` through [`pairs`] instead of a fragment directory, and
-//! step C2 the two refinement rows, [`stage1`] and [`stage2`]. The verification half of D §10.2's
-//! `stage 2` row and the `pair result` row follow their stages in phases 1c–1d.
+//! `nms` — which read `DIR/pairs/<a>__<b>/` through [`pairs`] instead of a fragment directory,
+//! step C2 the two refinement rows, [`stage1`] and [`stage2`], and step C3 the last two:
+//! [`verify`], which is R §6 at the reference's own stage-2 poses, and [`candidates`], which is
+//! R §5.7's ranking injected and the whole of `match_pair` natively. R §8's assembly follows in
+//! phase 1d.
 
 pub mod breakline;
+pub mod candidates;
 pub mod coarse;
 pub mod hypotheses;
 pub mod load;
@@ -24,6 +27,7 @@ pub mod segmentation;
 pub mod stage1;
 pub mod stage2;
 pub mod thickness;
+pub mod verify;
 pub mod working_mesh;
 
 use std::path::{Path, PathBuf};
@@ -65,11 +69,15 @@ pub enum Stage {
     Stage1,
     /// R §5.6 — the four registration and fracture rungs.
     Stage2,
+    /// R §6 — the verification scores at a candidate pose, and R §6.5's verdict.
+    Verify,
+    /// R §5.7 — what `match_pair` returns: the ranking, the cut and the accepted set.
+    Candidates,
 }
 
 impl Stage {
     /// Every stage this build can run, in pipeline order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self::Load,
         Self::Thickness,
         Self::WorkingMesh,
@@ -81,6 +89,8 @@ impl Stage {
         Self::Nms,
         Self::Stage1,
         Self::Stage2,
+        Self::Verify,
+        Self::Candidates,
     ];
 
     /// The name the command line and the table use.
@@ -97,6 +107,8 @@ impl Stage {
             Self::Nms => "nms",
             Self::Stage1 => "stage1",
             Self::Stage2 => "stage2",
+            Self::Verify => "verify",
+            Self::Candidates => "candidates",
         }
     }
 
@@ -345,6 +357,8 @@ impl Collection {
             Stage::Nms => nms::run(self, mode),
             Stage::Stage1 => stage1::run(self, mode),
             Stage::Stage2 => stage2::run(self, mode),
+            Stage::Verify => verify::run(self, mode),
+            Stage::Candidates => candidates::run(self, mode),
         }
     }
 
@@ -529,7 +543,7 @@ mod tests {
             assert_eq!(Stage::parse(stage.as_str()), Some(stage));
             assert_eq!(stage.to_string(), stage.as_str());
         }
-        assert_eq!(Stage::parse("verify"), None, "R §6, not this build");
+        assert_eq!(Stage::parse("no such stage"), None);
     }
 
     /// Finding F2: `target_faces = 0` and a manifest with no `target_faces` key are the same

@@ -108,7 +108,7 @@ fn every_stage_passes_on_the_slab_in_both_modes() {
             // natively there is nothing to compare and the stage says so instead of inventing a
             // tolerance.
             let no_native_column = mode == Mode::Native
-                && matches!(report.stage, "coarse" | "nms" | "stage1" | "stage2");
+                && matches!(report.stage, "coarse" | "nms" | "stage1" | "stage2" | "verify");
             assert_eq!(
                 report.status(),
                 if no_native_column { "SKIP" } else { "PASS" },

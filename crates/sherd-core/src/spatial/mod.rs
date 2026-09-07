@@ -12,8 +12,10 @@
 //! Step B1 filled in what R §3 needs: [`bvh::RayScene`] (first-hit rays for the thickness of
 //! R §3.2 and the seven-ray cone of R §3.4.3, and the closest face the parity harness transfers
 //! labels along) and [`kdtree::PointTree`] (the nearest representative and the radius balls of
-//! R §3.4.1–3.4.7). The inside test and the bounded closest point join them with the penetration
-//! and contact scores of R §6 in phase 1c; [`grid`] stays a GPU structure (phase 2b).
+//! R §3.4.1–3.4.7). Step C3 added what R §6 measures through: the bounded closest point of
+//! R §6.1 ([`bvh::RayScene::bounded_distance`], D §6.5's `bounded_distance`) and the inside test
+//! of R §6.4 ([`bvh::RayScene::inside`], three axis rays and a majority). [`grid`] stays a GPU
+//! structure (phase 2b).
 
 pub mod bvh;
 pub mod grid;

@@ -232,3 +232,68 @@ fn the_slab_pairs_two_ladders_reach_the_ground_truth() {
     );
     assert!(best2.1 < best1.1, "the surface rungs improve on the breakline ones");
 }
+
+/// R §4–§6 end to end on the slab: `match_pair` accepts the join, at the true pose.
+///
+/// The two tests above take the pipeline apart stage by stage; this one asks it the question the
+/// whole pair stage exists to answer — *are these two fragments adjacent, and where?* — through
+/// the one entry point the pipeline uses, and checks the verdict as well as the pose.
+///
+/// The reference's own answer for this pair is in the committed dump
+/// (`fixtures/slab/dump/pairs/pieceA__pieceB/result.candidates.json`): one accepted candidate,
+/// `seam` 21.0, `tight` 0.840, `gap` 0.00103, `pen` 0, `cont_n` 0.992. The port draws its own
+/// samples (PMC-9), so the numbers here are its own; what has to agree is the decision, the pose
+/// and the order of magnitude of every score.
+#[test]
+fn the_slab_pair_is_accepted_at_the_true_pose() {
+    let params = Params::default();
+    let (a, b) = slab_fragments();
+    let candidates = sherd_core::matching::pair::match_pair(a, b, &params, 5);
+    assert!(!candidates.is_empty(), "the pair produces candidates");
+    assert!(candidates.len() <= 5, "R §5.7 returns at most `keep`");
+
+    // R §5.7's ranking: `seam · tight`, descending.
+    for pair in candidates.windows(2) {
+        assert!(pair[0].score() >= pair[1].score(), "the candidates are not ranked");
+    }
+
+    // More than one candidate can pass R §6.5, and the reference's own answer for this pair says
+    // so: it accepts **two** of its ten, the join (`seam` 21.0, `tight` 0.840) and a second
+    // placement of the curved slab against itself 88° away (`seam` 15.0, `tight` 0.275, right on
+    // `min_tight`). The port accepts three, for the same reason and with the same shape — R §13's
+    // note on `pot_C` is the same observation on real sherds. What has to be true is that the
+    // *ranking* separates them: R §5.7's `seam · tight` puts the join first, by a factor of four
+    // here, and the assembly of R §8 sees the pair through that ranking.
+    let accepted: Vec<_> = candidates.iter().filter(|c| c.accepted).collect();
+    assert!(!accepted.is_empty(), "the join is not accepted at all");
+    let best = &candidates[0];
+    assert!(best.accepted, "the best-ranked candidate is not the accepted one");
+    assert!(
+        candidates.len() == 1 || best.score() > 2.0 * candidates[1].score(),
+        "the join does not stand out: {:.2} against {:.2}",
+        best.score(),
+        candidates[1].score()
+    );
+
+    let s = &best.scores;
+    assert!(s.tight >= params.min_tight, "tight {}", s.tight);
+    assert!(s.seam >= params.min_seam, "seam {}", s.seam);
+    assert!(s.cont_n >= params.min_cont_n, "cont_n {}", s.cont_n);
+    assert!(s.pen <= params.max_pen, "pen {}", s.pen);
+    assert!(s.gap * a.thick <= 0.03 * a.thick + f64::EPSILON, "gap {}", s.gap);
+    assert!(!s.partial && !s.pen_unavailable, "the full verification ran");
+    assert!(s.brk_best >= s.brk, "`brk_best` is the pair's best stage-1 score");
+    // The reference's are 21.0 and 0.840 on its own samples; a factor of two either way is a
+    // regression alarm on the port's, not a parity claim.
+    assert!(s.seam > 10.0 && s.tight > 0.4, "seam {} tight {}", s.seam, s.tight);
+
+    // And the accepted pose is the one that reassembles the slab, to `test_synthetic.py`'s bounds.
+    let r = best.transform.fixed_view::<3, 3>(0, 0).into_owned();
+    let tau = best.transform.fixed_view::<3, 1>(0, 3).into_owned();
+    let (angle, distance) = pose_error(&r, &tau, &relative_truth(), &probe_points(b));
+    assert!(
+        angle <= 2.0 && distance <= 0.1 * a.thick,
+        "the accepted candidate is {angle:.3}° and {:.4} t from the truth",
+        distance / a.thick
+    );
+}

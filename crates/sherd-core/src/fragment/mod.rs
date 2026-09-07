@@ -21,6 +21,7 @@ pub mod segment;
 pub mod thickness;
 
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use crate::error::{Error, Result};
 use crate::fragment::breakline::{Breaklines, BrkParams};
@@ -84,6 +85,11 @@ pub struct Fragment {
     /// Area of the faces labelled fracture (R §3.4's `fracture_area`) — what R §6.1's `contact`
     /// scales by, and what R §3.5.2's sample count is a density over.
     pub frac_area: f64,
+    /// A BVH over the whole working mesh, built on first use — R §6.4's signed distance.
+    bvh_full: OnceLock<Option<Arc<RayScene>>>,
+    /// A BVH over the **fracture faces alone**, built on first use — R §6.1's point-to-surface
+    /// distance.
+    bvh_frac: OnceLock<Option<Arc<RayScene>>>,
 }
 
 impl Fragment {
@@ -220,6 +226,8 @@ impl Fragment {
             area0,
             area: seg.area,
             frac_area: seg.frac_area,
+            bvh_full: OnceLock::new(),
+            bvh_frac: OnceLock::new(),
         })
     }
 
@@ -339,6 +347,32 @@ impl Fragment {
     #[inline]
     pub fn fracture_fraction(&self) -> f64 {
         if self.area <= 0.0 { 0.0 } else { self.frac_area / self.area }
+    }
+
+    /// A BVH over the whole working mesh, built on first use and shared by every pair the
+    /// fragment takes part in (D §4.1).
+    ///
+    /// R §6.4's penetration test casts through it. Building it costs 19–41 ms on a 75 000–156 000
+    /// face mesh (E4 §4), which is why it is neither built eagerly nor rebuilt per pair.
+    pub fn surface_scene(&self) -> Option<&RayScene> {
+        self.bvh_full
+            .get_or_init(|| RayScene::of_mesh(&self.mesh.v, &self.mesh.f).map(Arc::new))
+            .as_deref()
+    }
+
+    /// A BVH over this fragment's **fracture faces alone**, built on first use (R §6.1, D §4.1).
+    ///
+    /// This is the reference's `frac_scene`, and the submesh is what makes `tight` and `gap`
+    /// distances to the *fracture* surface rather than to the nearest wall.
+    pub fn fracture_scene(&self) -> Option<&RayScene> {
+        self.bvh_frac
+            .get_or_init(|| {
+                RayScene::of_subset(&self.mesh.v, &self.mesh.f, |i| {
+                    self.labels.get(i).copied().is_some_and(FaceLabel::is_fracture)
+                })
+                .map(Arc::new)
+            })
+            .as_deref()
     }
 }
 

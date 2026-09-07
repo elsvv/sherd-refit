@@ -4,9 +4,10 @@
 //! `parity`, `bench` and `info` are new. Phase 1a implemented `info`, `segment` up to the working
 //! mesh and `parity` for the stages the port computes; step B1 added R §3.4's shell/fracture
 //! labels to `segment` and its own `parity` row, step B2 R §3.5's breaklines and theirs, step
-//! B3 the sampled match arrays and the `samples` row, and step C1 the first three pair rows —
-//! `hypotheses`, `coarse` and `nms`. `run` and `bench` arrive with the pipeline they drive
-//! (phase 1d) and report that plainly until then.
+//! B3 the sampled match arrays and the `samples` row, step C1 the first three pair rows —
+//! `hypotheses`, `coarse` and `nms` — step C2 the two refinement rows and step C3 the last two,
+//! `verify` and `candidates`, which is the whole of `match_pair`. `run` and `bench` arrive with
+//! the pipeline they drive (phase 1d) and report that plainly until then.
 
 use std::path::PathBuf;
 
@@ -110,7 +111,8 @@ struct ParityArgs {
     #[arg(long)]
     input: Option<PathBuf>,
     /// Stage to compare: `load`, `thickness`, `working-mesh`, `segmentation`, `breakline`,
-    /// `samples`, `hypotheses`, `coarse`, `nms`, `stage1`, `stage2`, or `all`. Repeatable.
+    /// `samples`, `hypotheses`, `coarse`, `nms`, `stage1`, `stage2`, `verify`, `candidates`, or
+    /// `all`. Repeatable.
     #[arg(long, default_value = "all")]
     stage: Vec<String>,
     /// Feed each stage the Python stage's own inputs instead of the port's upstream results
@@ -467,8 +469,13 @@ mod tests {
             vec![Stage::Stage1, Stage::Stage2],
             "and so do the two refinement stages"
         );
-        let err = requested_stages(&["verify".to_owned()]).unwrap_err().to_string();
-        assert!(err.contains("stage2"), "{err}");
+        assert_eq!(
+            requested_stages(&["candidates".to_owned(), "verify".to_owned()]).unwrap(),
+            vec![Stage::Verify, Stage::Candidates],
+            "and so do the two verification stages"
+        );
+        let err = requested_stages(&["assembly".to_owned()]).unwrap_err().to_string();
+        assert!(err.contains("candidates"), "{err}");
     }
 
     #[test]

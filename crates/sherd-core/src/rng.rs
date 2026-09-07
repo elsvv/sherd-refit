@@ -54,6 +54,9 @@ pub enum Draw {
     /// R §5.2's probe: one `choice(B.brk_sub, coarse_points, replace=False)` per pair, the first
     /// draw of the reference's `rng_pair`.
     CoarsePoints,
+    /// R §4.3's cap on each fragment's breakline subset before the screening pass: one
+    /// `choice(brk_sub, screen_points, replace=False)`, and only when the subset is larger.
+    ScreenSubset,
 }
 
 impl Draw {
@@ -68,6 +71,7 @@ impl Draw {
             Self::Fracture => fnv1a(b"fracture"),
             Self::Margin => fnv1a(b"margin"),
             Self::CoarsePoints => fnv1a(b"coarse_points"),
+            Self::ScreenSubset => fnv1a(b"screen_subset"),
         }
     }
 }
@@ -190,8 +194,11 @@ mod tests {
         assert_eq!(Draw::Fracture.tag(), 0x5f49_d730_66d9_516b);
         assert_eq!(Draw::Margin.tag(), 0x56b5_a72b_50ec_d75b);
         assert_eq!(Draw::CoarsePoints.tag(), 0x3ccd_0910_606d_802a);
+        assert_eq!(Draw::ScreenSubset.tag(), 0x7df6_d4aa_e0f9_cc18);
 
-        let tags = [Draw::Surface, Draw::Fracture, Draw::Margin, Draw::CoarsePoints].map(Draw::tag);
+        let tags =
+            [Draw::Surface, Draw::Fracture, Draw::Margin, Draw::CoarsePoints, Draw::ScreenSubset]
+                .map(Draw::tag);
         for i in 0..tags.len() {
             assert_ne!(tags[i], 0, "tag {i} would collide with the bare seed");
             for j in (i + 1)..tags.len() {

@@ -9,8 +9,18 @@
 //! Step C1 filled in the first half of `match_pair`: [`Pair::hypotheses`] (R §5.1),
 //! [`Pair::coarse`] (R §5.2) and [`Pair::suppress`] (R §5.3). Step C2 added the two refinement
 //! ladders on top of exactly that state: [`Pair::stage1`] (R §5.4's breakline ICP and its
-//! re-score), [`Pair::suppress_stage1`] (R §5.5) and [`Pair::stage2`] (R §5.6's four rungs). The
-//! verification of R §6 and the ranking of R §5.7 follow.
+//! re-score), [`Pair::suppress_stage1`] (R §5.5) and [`Pair::stage2`] (R §5.6's four rungs). Step
+//! C3 closed the chain: [`Pair::match_pair`] drives all of it, R §6's verification
+//! ([`verify`](super::verify)) scores each surviving pose, and R §5.7 ranks what comes out.
+//!
+//! # Where the threads are
+//!
+//! Two stages are spread over `rayon`, and both are spread over *candidates*: R §5.4's 250
+//! breakline ladders and R §5.6's ten surface ladders with the verification behind each of them.
+//! Everything else — the hypotheses, the coarse score, both suppressions — is either already
+//! parallel inside itself or too cheap to matter. The results are collected by index, so the
+//! candidate list, the ranking and the accepted set are what they are whatever the thread count
+//! does (D §7); the reference makes the same promise through `ThreadPoolExecutor.map`.
 
 use nalgebra::Matrix4;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
@@ -20,10 +30,12 @@ use crate::fragment::samples::MatchData;
 use crate::matching::coarse::{self, Probe, Target};
 use crate::matching::hypotheses::{self, Frames, Hypotheses};
 use crate::matching::icp::{IcpTarget, Numerics, Registration, cloud_points, homogeneous};
-use crate::matching::ladder;
+use crate::matching::ladder::{self, Rung};
 use crate::matching::nms;
 use crate::matching::scales::Scales;
+use crate::matching::verify::{self, Scores, Surfaces};
 use crate::params::Params;
+use crate::types::FragId;
 
 /// R §5.3's cap on the hypotheses the coarse NMS walks.
 ///
@@ -112,7 +124,12 @@ impl<'a> Pair<'a> {
     /// The candidates are independent — each one starts from its own hypothesis and touches
     /// nothing the others touch — so they are `rayon`'s to spread; the results are collected by
     /// index, so the list is the reference's `kept` order whatever the thread count does (D §7).
-    pub fn stage1(&self, hyp: &Hypotheses, kept: &[u32], numerics: Numerics) -> Vec<Candidate> {
+    pub fn stage1(
+        &self,
+        hyp: &Hypotheses,
+        kept: &[u32],
+        numerics: Numerics,
+    ) -> Vec<Stage1Candidate> {
         let target = IcpTarget::from_cloud(&self.a.pc_brk_full);
         let source = cloud_points(&self.b.pc_brk);
         let rungs = ladder::stage1_rungs(&source, &target);
@@ -131,13 +148,13 @@ impl<'a> Pair<'a> {
                     &transform,
                     self.scales.stage1,
                 );
-                Candidate { hypothesis: h, transform, score }
+                Stage1Candidate { hypothesis: h, transform, score }
             })
             .collect()
     }
 
     /// R §5.5's suppression over the stage-1 poses: the candidates stage 2 refines.
-    pub fn suppress_stage1(&self, stage1: &[Candidate], p: &Params) -> Vec<u32> {
+    pub fn suppress_stage1(&self, stage1: &[Stage1Candidate], p: &Params) -> Vec<u32> {
         let poses: Vec<Matrix4<f64>> = stage1.iter().map(|c| c.transform).collect();
         let scores: Vec<f64> = stage1.iter().map(|c| c.score).collect();
         let order = ladder::stage1_order(&scores);
@@ -146,15 +163,135 @@ impl<'a> Pair<'a> {
 
     /// R §5.6's four rungs from one stage-1 pose, one [`Registration`] per rung.
     ///
-    /// The verification that follows them (R §6) and the ranking (R §5.7) are not here yet; what
-    /// this returns is the pose the ladder leaves and the ICP's own view of it.
+    /// The clouds and their trees are built for this one call, so a caller with several poses to
+    /// refine should build a [`SurfaceLadder`] once and climb it instead — which is what
+    /// [`Pair::match_pair`] does, and most of why one thread of the port outruns ten of Open3D's
+    /// (C2's note §6: `registration_icp` rebuilds a `KDTreeFlann` on every call).
     pub fn stage2(&self, init: &Matrix4<f64>, numerics: Numerics) -> Vec<Registration> {
-        let reg_target = IcpTarget::from_cloud(&self.a.pc_reg);
-        let frac_target = IcpTarget::from_cloud(&self.a.pc_frac);
-        let reg_source = cloud_points(&self.b.pc_reg);
-        let frac_source = cloud_points(&self.b.pc_frac);
-        let rungs = ladder::stage2_rungs(&reg_source, &reg_target, &frac_source, &frac_target);
-        ladder::climb(&rungs, init, &self.scales, numerics)
+        let ladder = SurfaceLadder::of(self);
+        ladder::climb(&ladder.rungs(), init, &self.scales, numerics)
+    }
+
+    /// R §6's view of both fragments, built once for the whole pair.
+    ///
+    /// `None` when either working mesh has no triangle — the one case [`RayScene`] refuses, and
+    /// one no fragment of a real collection reaches.
+    ///
+    /// [`RayScene`]: crate::spatial::bvh::RayScene
+    pub fn surfaces(&self) -> Option<(Surfaces<'a>, Surfaces<'a>)> {
+        Some((Surfaces::of(&self.a)?, Surfaces::of(&self.b)?))
+    }
+
+    /// R §5.6 and R §6 for one stage-1 pose: the four rungs, then the verification and R §6.5.
+    ///
+    /// `brk` is the pose's own stage-1 re-score, which travels with the candidate into the report.
+    /// With `Params::early_reject_tight > 0` the fracture scores are taken after the two `pc_reg`
+    /// rungs and a candidate below the threshold skips the two `pc_frac` rungs and the expensive
+    /// half of R §6; it keeps its cheap scores, is marked `partial`, and can never be accepted.
+    /// That is off by default, and R §5.6 says why: the estimate can still rise by 0.09 over the
+    /// two remaining rungs, so a threshold safe against `min_tight` saves almost nothing.
+    pub fn stage2_candidate(
+        &self,
+        ladder: &SurfaceLadder,
+        surfaces: &(Surfaces<'_>, Surfaces<'_>),
+        init: &Matrix4<f64>,
+        brk: f64,
+        p: &Params,
+        numerics: Numerics,
+    ) -> Candidate {
+        let (a, b) = surfaces;
+        let rungs = ladder.rungs();
+        let climbed = ladder::climb(&rungs[..2], init, &self.scales, numerics);
+        let mut pose = climbed.last().map_or(*init, |r| r.transform);
+        if p.early_reject_tight > 0.0 {
+            let frac = verify::fracture_scores(a, b, &pose, &self.scales);
+            if frac.tight[2] < p.early_reject_tight {
+                let mut scores = verify::verify(a, b, &pose, &self.scales, false, Some(frac));
+                scores.brk = brk;
+                return self.candidate(pose, scores, false);
+            }
+        }
+        let climbed = ladder::climb(&rungs[2..], &pose, &self.scales, numerics);
+        pose = climbed.last().map_or(pose, |r| r.transform);
+        let mut scores = verify::verify(a, b, &pose, &self.scales, true, None);
+        scores.brk = brk;
+        let accepted = verify::accept(&scores, p, &self.scales);
+        self.candidate(pose, scores, accepted)
+    }
+
+    /// R §4–§6 for this pair: the best `keep` candidates, best first (R §5.7).
+    ///
+    /// The whole chain, in the reference's order — hypotheses, coarse score, suppression, the
+    /// breakline ladder and its re-score, the second suppression, the surface ladder, R §6 and
+    /// R §6.5 — and the three places it gives up early are the reference's too: a pair with no
+    /// fracture sample or no breakline, a pair with no hypothesis, and a pair whose coarse
+    /// suppression kept nothing.
+    pub fn match_pair(&self, p: &Params, keep: usize, numerics: Numerics) -> Vec<Candidate> {
+        if !self.matchable() {
+            return Vec::new();
+        }
+        let hyp = self.hypotheses(p);
+        if hyp.is_empty() {
+            tracing::info!(pair = self.name(), "no hypotheses");
+            return Vec::new();
+        }
+        let cs = self.coarse(&hyp, &self.probe(p));
+        let kept = self.suppress(&hyp, &cs, p);
+        let stage1 = self.stage1(&hyp, &kept, numerics);
+        let Some(best1) = stage1.iter().map(|c| c.score).reduce(f64::max) else {
+            tracing::info!(pair = self.name(), "nothing passed the coarse stage");
+            return Vec::new();
+        };
+        let Some(surfaces) = self.surfaces() else { return Vec::new() };
+        if p.stage1_floor > 0.0 && best1 < p.stage1_floor {
+            // R §5.4: nothing the breakline stage found comes near a seam, and stage 2 is where
+            // all the time goes. The pair keeps its best stage-1 pose, marked `partial` so that it
+            // still appears in the report and can never be accepted.
+            let best = stage1
+                .iter()
+                .max_by(|x, y| x.score.partial_cmp(&y.score).unwrap_or(std::cmp::Ordering::Equal))
+                .expect("a non-empty stage-1 list has a maximum");
+            tracing::info!(
+                pair = self.name(),
+                best1,
+                floor = p.stage1_floor,
+                "the best stage-1 score is below the floor; stage 2 skipped"
+            );
+            return vec![self.candidate(
+                best.transform,
+                Scores::partial(&self.scales, best1),
+                false,
+            )];
+        }
+        let kept2 = self.suppress_stage1(&stage1, p);
+        let ladder = SurfaceLadder::of(self);
+        let mut candidates: Vec<Candidate> = kept2
+            .par_iter()
+            .map(|&k| {
+                let pose = &stage1[k as usize];
+                self.stage2_candidate(&ladder, &surfaces, &pose.transform, pose.score, p, numerics)
+            })
+            .collect();
+        // R §5.7: `seam · tight`, descending, stable — ties keep the `kept2` order. `brk_best` is
+        // the pair's own best stage-1 score and goes on every candidate, the reference's included.
+        candidates.sort_by(|x, y| {
+            y.scores.score().partial_cmp(&x.scores.score()).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for candidate in &mut candidates {
+            candidate.scores.brk_best = best1;
+        }
+        candidates.truncate(keep);
+        candidates
+    }
+
+    /// One candidate of this pair, with the two fragment ids R §11.1 writes it under.
+    fn candidate(&self, transform: Matrix4<f64>, scores: Scores, accepted: bool) -> Candidate {
+        Candidate { a: self.a.fragment.id, b: self.b.fragment.id, transform, scores, accepted }
+    }
+
+    /// `a__b`, for the log lines and the fixture scope.
+    fn name(&self) -> String {
+        format!("{}__{}", self.a.fragment.name, self.b.fragment.name)
     }
 
     /// B's breakline subset and its shell normals, in `f64` — R §5.4's `P_B[brk_sub]`, `ns_B[brk_sub]`.
@@ -166,9 +303,86 @@ impl<'a> Pair<'a> {
     }
 }
 
-/// One pose surviving R §5.4, with the hypothesis it came from and its re-score.
+/// R §5.6's two clouds, their trees and their sources, built once for a whole pair.
+///
+/// The four rungs register `pc_reg` twice and `pc_frac` twice, ten times over on a full pair, and
+/// the trees behind the two targets are what makes each of those forty registrations cheap. They
+/// are built here, once, and borrowed by every rung of every candidate.
+#[derive(Debug)]
+pub struct SurfaceLadder {
+    reg_target: IcpTarget,
+    frac_target: IcpTarget,
+    reg_source: Vec<[f64; 3]>,
+    frac_source: Vec<[f64; 3]>,
+}
+
+impl SurfaceLadder {
+    /// The clouds of one pair: A's are the targets, B's move (R §0's convention).
+    pub fn of(pair: &Pair<'_>) -> Self {
+        Self {
+            reg_target: IcpTarget::from_cloud(&pair.a.pc_reg),
+            frac_target: IcpTarget::from_cloud(&pair.a.pc_frac),
+            reg_source: cloud_points(&pair.b.pc_reg),
+            frac_source: cloud_points(&pair.b.pc_frac),
+        }
+    }
+
+    /// R §5.6's four rungs over those clouds.
+    pub fn rungs(&self) -> [Rung<'_>; 4] {
+        ladder::stage2_rungs(
+            &self.reg_source,
+            &self.reg_target,
+            &self.frac_source,
+            &self.frac_target,
+        )
+    }
+}
+
+/// One verified candidate: a pose, R §6's scores and R §6.5's verdict (D §4.1).
+///
+/// `a` and `b` are the two fragments' ids in the collection, and the pose maps **b** into **a**'s
+/// frame (R §0). `tier` — roadmap item 3's confidence band — is not here: in phase 1 it would be
+/// `accepted` under another name, and it arrives with the constraint solver that needs it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Candidate {
+    /// The fragment the pose maps *into* (R §4.1's first name).
+    pub a: FragId,
+    /// The fragment the pose moves.
+    pub b: FragId,
+    /// `T`: `p_A = R·p_B + τ`.
+    pub transform: Matrix4<f64>,
+    /// Every score of R §6.
+    pub scores: Scores,
+    /// R §6.5's verdict.
+    pub accepted: bool,
+}
+
+impl Candidate {
+    /// R §5.7's ranking key, `seam · tight`.
+    #[inline]
+    pub fn score(&self) -> f64 {
+        self.scores.score()
+    }
+}
+
+/// R §4–§6 for one pair of fragments, from the two fragments themselves.
+///
+/// R §4.1's wall-ratio test is applied first: a pair whose walls differ by more than
+/// `p.thick_ratio` produces no candidate and never builds its [`Pair`], which is the expensive
+/// part. `keep` is R §5.7's `keep = 5`.
+pub fn match_pair(a: &Fragment, b: &Fragment, p: &Params, keep: usize) -> Vec<Candidate> {
+    if Pair::skipped(a, b, p) {
+        return Vec::new();
+    }
+    Pair::build(a, b, p).match_pair(p, keep, Numerics::REFERENCE)
+}
+
+/// One pose surviving R §5.4, with the hypothesis it came from and its re-score.
+///
+/// Not to be confused with [`Candidate`], which is what R §6 makes of the ten of these that
+/// R §5.5 keeps.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stage1Candidate {
     /// Index into the hypothesis set the pose started as (R §5.1).
     pub hypothesis: u32,
     /// The pose after both breakline rungs.

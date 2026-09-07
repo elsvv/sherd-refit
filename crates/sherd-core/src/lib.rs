@@ -24,8 +24,8 @@
 //! | [`io`] | §3.1, §11 | S2 |
 //! | [`mesh`] | §3.1 (clean, components) S2; §3.3 (the rest) S3; §3.4.6 islands B1 | S2, S3, B1 |
 //! | [`fragment`] | §3.2, §3.4–3.7 | S3 (mesh), S4 (cache), B1 (segmentation), B2 (breaklines), B3 (samples) |
-//! | [`spatial`] | §3.2, §3.4.1–3.4.3, §6.1, §6.4 | B1 (rays, KD-tree), phase 1c (inside test) |
-//! | [`matching`] | §1.2, §4–§7 | C1 (scales, hypotheses, coarse, NMS), C2 (ICP and the two ladders), phase 1c (the rest) |
+//! | [`spatial`] | §3.2, §3.4.1–3.4.3, §6.1, §6.4 | B1 (rays, KD-tree), C3 (bounded distance, inside test) |
+//! | [`matching`] | §1.2, §4–§7 | C1 (scales, hypotheses, coarse, NMS), C2 (ICP and the two ladders), C3 (verification, `match_pair`, screening) |
 //! | [`assembly`] | §8 | phase 1d |
 //! | [`refine`], [`report`], [`render`], [`pipeline`] | §9, §11, §2 | phase 1d |
 //!
@@ -56,8 +56,13 @@
 //! R §7 freezes it ([`matching::icp`]) and the two ladders it drives ([`matching::ladder`]) — the
 //! breakline rungs of R §5.4 with their re-score, the suppression of R §5.5, and the four
 //! registration and fracture rungs of R §5.6 — with the `stage1` and `stage2` rows of the parity
-//! table. The remaining algorithm modules are documented but empty; they
-//! are filled in step by step, each step gated on the fixtures under `fixtures/` and on
+//! table. Step C3 closed the pair: R §6's five verification scores and R §6.5's accept rule
+//! ([`matching::verify`]), the bounded closest point and the ray-parity inside test they measure
+//! through ([`spatial::bvh`]), R §5.7's ranking and the whole of
+//! [`match_pair`](matching::pair::match_pair), and the optional partner screening of R §4.3
+//! ([`matching::screen`]) — with the `verify` and `candidates` rows of the parity table. What is
+//! left is R §8's assembly and R §9–§11's outputs; they are documented but empty, and are filled
+//! in step by step, each step gated on the fixtures under `fixtures/` and on
 //! `tools/compare_fixtures.py`.
 
 pub mod assembly;

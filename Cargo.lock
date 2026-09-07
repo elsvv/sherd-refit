@@ -1559,6 +1559,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sherd-core",
+ "tracing",
 ]
 
 [[package]]

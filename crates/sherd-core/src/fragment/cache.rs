@@ -407,6 +407,8 @@ pub fn from_bytes(bytes: &[u8], path: impl AsRef<Path>) -> Result<Fragment> {
         area0: meta.area0,
         area: meta.area,
         frac_area: meta.frac_area,
+        bvh_full: std::sync::OnceLock::new(),
+        bvh_frac: std::sync::OnceLock::new(),
     })
 }
 
@@ -672,6 +674,8 @@ mod tests {
             area0: 17.529_384_756_291_3,
             area: 2.115_384_756_291_31,
             frac_area: 1.015_384_756_291_31,
+            bvh_full: std::sync::OnceLock::new(),
+            bvh_frac: std::sync::OnceLock::new(),
         }
     }
 

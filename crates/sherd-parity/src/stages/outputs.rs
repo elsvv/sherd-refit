@@ -536,6 +536,7 @@ fn mesh_rows(collection: &Collection, report: &mut StageReport) -> Result<()> {
         &poses,
         &groups,
         sherd_core::io::writer::OPEN3D_COMMENT,
+        sherd_core::memory::Budget::default_for_machine(),
     )?;
 
     let mut differing_bytes = 0_usize;

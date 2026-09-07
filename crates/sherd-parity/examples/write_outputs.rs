@@ -173,6 +173,7 @@ fn main() -> Result<()> {
         &poses,
         &assembly.groups,
         sherd_core::io::writer::DEFAULT_COMMENT,
+        sherd_core::memory::Budget::default_for_machine(),
     )?;
     write_previews(&collection, &out, &names, &poses, &assembly.groups)?;
     println!("{} written", out.display());

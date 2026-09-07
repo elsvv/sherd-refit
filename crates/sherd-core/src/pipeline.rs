@@ -461,6 +461,7 @@ pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSumm
             &poses,
             &assembly.groups,
             crate::io::writer::DEFAULT_COMMENT,
+            options.memory,
         )?);
     }
     if options.preview {

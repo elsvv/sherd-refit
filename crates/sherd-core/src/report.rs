@@ -29,6 +29,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use nalgebra::Matrix4;
+use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -36,6 +37,7 @@ use crate::fragment::Fragment;
 use crate::io::writer::PlyStream;
 use crate::matching::pair::Candidate;
 use crate::matching::verify::Scores;
+use crate::memory::{self, Budget, MemorySemaphore, reservation};
 use crate::mesh::Mesh;
 use crate::params::Params;
 use crate::types::{FragId, apply_transform_fused};
@@ -745,25 +747,53 @@ pub fn write_placed_meshes(
     poses: &[Matrix4<f64>],
     groups: &[Vec<FragId>],
     comment: &str,
+    budget: Budget,
 ) -> Result<Vec<PathBuf>> {
     let out_dir = out_dir.as_ref();
     let placed_dir = out_dir.join("placed");
     std::fs::create_dir_all(&placed_dir).map_err(|e| Error::write(&placed_dir, e))?;
-    let mut written = Vec::new();
-    for (n, path) in paths.iter().enumerate() {
-        let mesh = place(path, &poses[n])?;
-        let file = placed_dir.join(format!("{}.ply", names[n]));
-        crate::io::writer::write_ply_with_comment(&file, &mesh, comment)?;
-        written.push(file);
+    // The placed meshes are independent files with fixed names, so they are written in parallel
+    // and their results collected by index: the same bytes in the same files in the same order,
+    // and the first failure in *fragment* order is the one the run reports. E1 §9 measured this
+    // stage at 1.6 % of the machine's work but 12 % of the user's wait, because one thread read,
+    // transformed and wrote one full-resolution mesh at a time.
+    //
+    // The semaphore of D §5 step 2 bounds what that costs in memory: `place` holds one original
+    // scan, which is the same thing preprocessing reserves for, so the same budget prices it.
+    let semaphore = MemorySemaphore::new(budget);
+    let placed: Vec<Result<PathBuf>> = (0..paths.len())
+        .into_par_iter()
+        .map(|n| {
+            let path = &paths[n];
+            let _permit = semaphore.acquire(memory::scan_faces(path).map_or(0, reservation));
+            let mesh = place(path, &poses[n])?;
+            let file = placed_dir.join(format!("{}.ply", names[n]));
+            crate::io::writer::write_ply_with_comment(&file, &mesh, comment)?;
+            Ok(file)
+        })
+        .collect();
+    let mut written = Vec::with_capacity(placed.len());
+    for file in placed {
+        written.push(file?);
     }
     for (k, group) in groups.iter().enumerate() {
         if group.len() < 2 {
             continue;
         }
-        let members: Vec<Mesh> = group
-            .iter()
-            .map(|&n| place(&paths[n as usize], &poses[n as usize]))
-            .collect::<Result<_>>()?;
+        // The members are placed in parallel and merged in group order, which is the order
+        // R §11.4's vertex and face blocks are written in and therefore the file's own.
+        let loaded: Vec<Result<Mesh>> = group
+            .par_iter()
+            .map(|&n| {
+                let path = &paths[n as usize];
+                let _permit = semaphore.acquire(memory::scan_faces(path).map_or(0, reservation));
+                place(path, &poses[n as usize])
+            })
+            .collect();
+        let mut members = Vec::with_capacity(loaded.len());
+        for mesh in loaded {
+            members.push(mesh?);
+        }
         let file = out_dir.join(format!("assembly_{k}.ply"));
         write_merged(&file, &members, comment)?;
         written.push(file);
@@ -1044,6 +1074,7 @@ mod tests {
             &poses,
             &[vec![0, 1], vec![2]],
             OPEN3D_COMMENT,
+            crate::memory::Budget::default_for_machine(),
         )
         .expect("the placed meshes write");
         assert_eq!(written.len(), 4, "three placed files and one assembly");

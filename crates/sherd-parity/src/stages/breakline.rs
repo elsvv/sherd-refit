@@ -30,9 +30,31 @@
 //!
 //! The port's working mesh is its own — a different decimation — so the two breaklines are two
 //! different point sets on nearly the same curve, and D §10.2 gates them loosely: the curve's
-//! length within 10 %, the 99th percentile of the symmetric point-to-set distance within `0.5 t`,
-//! and the two dihedral distributions within a KS statistic of 0.05. The `t` the middle one is
-//! measured in is the *reference's*, which is the fixture's own unit.
+//! length within 10 %, the 99th percentile of the symmetric point-to-set distance within
+//! [`NATIVE_P99_T`], and the two dihedral distributions within a KS statistic of [`NATIVE_KS`]. The
+//! `t` the middle one is measured in is the *reference's*, which is the fixture's own unit.
+//!
+//! **The last two constants are calibrated to PMC-2 and not to the port** (task X,
+//! `notes/2026-09-07-x-phase1c-findings.md` §7). They used to be `0.5 t` and `0.05`, numbers placed
+//! before anything was known about how far a decimator can move a breakline, and step T1 showed
+//! that the reference itself cannot meet them: run its own pipeline twice on one fragment with
+//! nothing changed but the face budget and its two breaklines land further apart than the port is
+//! from either. Measured properly here — three collections, 33 fragments, three budget
+//! perturbations each, 99 comparisons — the reference against itself at `res` gaps **inside the
+//! ±10 % the working-mesh row already allows** (46 of those comparisons, on 24 fragments of
+//! terracotta and synthetic_20) moves its own p99 distance by up to **1.160 t** and its own
+//! dihedral KS by up to **0.0431**. Both constants are twice that. The factor of two is a stated
+//! choice, not a measurement: this experiment varies the *budget* of one decimator, while PMC-2
+//! licenses a *different* decimator, which redistributes the same budget differently even at an
+//! identical `res` — a strictly larger perturbation than the one measured — and 46 comparisons
+//! under-estimate a maximum.
+//!
+//! What the rows are worth as alarms is therefore the port's own distance from them: **0.901 t of
+//! 2.3 t** and **0.0655 of 0.086**. The second is the least headroom of any native row and T1
+//! measured why: the three fragments that produce it carry three of the four lowest segmentation
+//! agreements of their set, and a breakline is the *boundary* of the mask that agreement measures,
+//! so a 1.9 % area disagreement is a far larger fraction of a boundary than of a surface. Both
+//! rows are inside their gates and the pair of them is the thing to watch.
 //!
 //! **The length, not the count.** The row used to gate the number of points at ±10 %, and step B2
 //! measured that gate contradicting the one above it: `res` is allowed ±10 % natively, a breakline
@@ -76,9 +98,19 @@ pub const INJECTED_FRAME_DEG: f64 = 0.1;
 /// D §10.2, native column: the curve's length, the sum of the nearest-neighbour distances.
 pub const NATIVE_CURVE_LENGTH: f64 = 0.10;
 /// D §10.2, native column: the 99th percentile of the symmetric point-to-set distance, in `t`.
-pub const NATIVE_P99_T: f64 = 0.5;
+///
+/// **Twice the reference's own sensitivity to PMC-2**, which is what this row measures — see the
+/// module documentation and D §10.2 for the derivation. The reference against itself, at `res` gaps
+/// inside the ±10 % the working-mesh row allows, puts its own two breaklines up to **1.160 t** apart
+/// at the 99th percentile; the port against the reference is at 0.901 t, 39 % of this gate.
+pub const NATIVE_P99_T: f64 = 2.3;
 /// D §10.2, native column: the two-sample KS statistic of the dihedral distributions.
-pub const NATIVE_KS: f64 = 0.05;
+///
+/// **Twice the reference's own sensitivity to PMC-2**, on the same 46 comparisons: its own two
+/// dihedral distributions move by up to **0.0431**. The port against the reference is at 0.0655,
+/// 76 % of this gate — the least headroom of any native row, and the reason is in the module
+/// documentation.
+pub const NATIVE_KS: f64 = 0.086;
 
 /// Runs R §3.5.3–3.5.5 for every fragment and compares it with the dump.
 #[allow(clippy::too_many_lines, reason = "one arm per mode, each a flat list of comparisons")]

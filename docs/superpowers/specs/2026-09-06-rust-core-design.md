@@ -629,7 +629,7 @@ Two more places where the table is narrower than it sounds:
 | thickness | `t`, `thick_mode` | same bin, or ±1 bin on a count tie | ±2 %, with a floor of 1 bin of the reference's own histogram |
 | working mesh | faces, `res`, area, `watertight` | (mesh is injected) | faces ±5 %, `res` ±10 %, area ±0.5 %, same `watertight` |
 | segmentation | area-weighted label agreement; fracture fraction | ≥ 0.995; ±0.005 | ≥ 0.97; ±0.02 |
-| breakline | count; point-set Hausdorff; `dih` per matched point | exact; 1e-4 t; 0.1° | curve length (`count × median nearest-neighbour spacing`) ±10 % and the spacing alone ±10 %; 0.5 t on 99 %; distribution KS < 0.05 |
+| breakline | count; point-set Hausdorff; `dih` per matched point | exact; 1e-4 t; 0.1° | curve length (the sum of the nearest-neighbour distances) ±10 %; **2.3 t on 99 %**; distribution **KS < 0.086** — the last two calibrated to PMC-2's own sensitivity, derived below |
 | samples | `n_surface`, `n_frac`; sample-to-face residual; `fp` on fracture faces; margin count and membership; sample normals; **the reference's own points rebuilt from its own uniforms**; **the face pick over the reference's own cdf** | exact; 1e-9 t; exact; exact; 0.1° over faces conditioned to 1000 f32 ulps, with ≤ 0.1 % of samples left out; exact (bit for bit); exact | `n_frac` ±10 %; fracture-sample fraction ±0.02; margin fraction ±0.05; cross-set nearest-distance p95 of `S` and of `Pf` within a factor of two of the Poisson expectation `0.977·√(A/n)` |
 | hypotheses | `(pa, pb)` set **and order**; the pose of each; the twelve fields of R §1.2 | exact; 1e-4° / 1e-5 t; exact | pair matched at all; count ±30 % |
 | coarse | `cs` per hypothesis, on the reference's own `coarse.idx` | ≤ 1/60 + 1e-6, **and bit-exact** (`cs exact`); probe count and pool exact | — |
@@ -721,32 +721,56 @@ and a median is not additive, while the sum of the nearest-neighbour distances d
 of a 10 % allowance. The point *density* is deliberately not gated here at all: it is a function of
 `res`, which the working-mesh row already gates, and gating it twice rebuilds the contradiction.
 
-**Five native breakline comparisons of 204 still fail, all on synthetic_20, and the cause is the
-decimator rather than the port.** They are `p99 distance` on `frag_014` (0.888 t) and `frag_019`
-(0.901 t) against `0.5 t`, and `dihedral KS` on `frag_010` (0.0636), `frag_014` (0.0655) and
-`frag_017` (0.0512) against 0.05. That is down from 33 of 198 before T1, and none of the survivors
-is a `t` difference: `t` is bit-identical on all five. What differs is `res`, +2.7 % to +8.3 % on
-these fragments — inside the working-mesh row's ±10 %, because `meshopt` and Open3D's quadric
-decimators distribute the same face budget differently (PMC-2).
+**The `p99 distance` and `dihedral KS` rows are calibrated to PMC-2's own sensitivity, and this is
+the derivation** (task X, `notes/2026-09-07-x-phase1c-findings.md` §7). They stood at `0.5 t` and
+`0.05` — numbers written before anything was known about how far a decimator can move a breakline —
+and they failed five of 204 native comparisons, all on synthetic_20: `p99 distance` on `frag_014`
+(0.888 t) and `frag_019` (0.901 t), `dihedral KS` on `frag_010` (0.0636), `frag_014` (0.0655) and
+`frag_017` (0.0512). None of the five is a `t` difference, `t` being bit-identical on all five; what
+differs is `res`, +2.7 % to +8.3 % on these fragments, inside the working-mesh row's own ±10 %,
+because `meshopt` and Open3D's quadric decimators distribute the same face budget differently
+(PMC-2).
 
-**The `p99 distance` row is not survivable by the reference either, and that was measured rather
-than argued.** Running the *reference's own* pipeline twice on the same fragment with only the face
-budget changed — 200 000 against 174 000, a `res` gap of 5.4–8.4 %, well inside the ±10 % the row
-above allows — puts its own two breaklines `0.866 t` apart at the 99th percentile on `frag_014` and
-`1.071 t` apart on `frag_019`: **larger than the port's own 0.888 t and 0.901 t**. A gate of `0.5 t`
-on the 99th percentile is therefore unreachable by any implementation whose decimator is not
-Open3D's, and it measures the working-mesh row rather than the breakline. The row is not widened;
-what changes is that this section now says what it measures. Over all 68 fragments, 313 of 126 687
-point-to-set distances exceed `0.5 t` (0.247 %), down from 3 115 of 271 592 (1.15 %) before T1.
+**Neither row is survivable by the reference at those thresholds, and that is measured rather than
+argued.** Run the reference's own pipeline twice on one fragment with nothing changed but the face
+budget, and compare its two breaklines at the same `t` — which is what these rows do to the port,
+with the decimator's *distribution* of faces added on top. Three collections, 33 fragments, three
+budget perturbations each (0.87, 0.825 and 0.75 of the fragment's own working-mesh face count, so
+that R §3.3's adaptive budget binds on every fragment rather than only on the large ones), **99
+comparisons**:
 
-**The three `dihedral KS` failures are the segmentation row leaking into a curve statistic**, the
-same non-independence this section already describes for `Pf spacing`. The same reference-against-
-itself experiment moves the dihedral distribution by a KS of only 0.012–0.033 at those `res` gaps,
-so resolution alone does not explain 0.051–0.066; what does is that `frag_010`, `frag_014` and
-`frag_017` also carry three of the four lowest segmentation agreements of the set (0.9885, 0.9814,
-0.9868), and the breakline is the *boundary* of the mask the agreement measures. A 1.9 % area
-disagreement is a far larger fraction of a boundary than of a surface. Both rows are inside their
-own gates and the pair of them is not; that belongs with §13 question 2, not with a widened gate.
+| `res` gap | n | p99 distance p50 / p90 / max | dihedral KS p50 / p90 / max |
+|---|---:|---|---|
+| **≤ 10 %** — what the working-mesh row allows | 46 | 0.210 / 0.442 / **1.160 t** | 0.0213 / 0.0331 / **0.0431** |
+| all measured (up to 40 %) | 99 | 0.262 / 1.884 / 8.081 t | 0.0244 / 0.0860 / 0.1691 |
+
+The 46 comparisons inside ±10 % are 24 fragments of **two** collections — synthetic_20 (39
+comparisons, `res` gaps 3.8–9.8 %) and the terracotta (7, gaps 7.0–10.0 %) — and the two agree about
+the size of the effect: the terracotta's own worsts are 0.280 t and 0.0397 against synthetic_20's
+1.160 t and 0.0431, so 0.0431 is not an artefact of one set. pot B contributes nothing to that
+window because its sherds are small enough that even the mildest perturbation moves `res` by 13 %;
+its rows are in the second line, where a 30 % `res` gap puts the reference's own two breaklines
+**8.1 t** apart with a KS of **0.169**, which is how steeply both statistics grow with the gap and
+why a threshold under the row's own ±10 % measures the working mesh rather than the breakline.
+
+**The gates are twice that sensitivity: `2.3 t` and `0.086`.** The factor of two is a stated choice
+and not a measurement, for two reasons that both point the same way: this experiment varies the
+*budget* of one decimator, while PMC-2 licenses a *different* decimator, which redistributes the
+same budget differently even at an identical `res` — a strictly larger perturbation than the one
+measured — and 46 comparisons under-estimate a maximum. What the rows are worth as alarms is the
+port's distance from them, and that is the number to watch for a regression rather than the gate:
+**0.901 t of 2.3 t (39 %)** and **0.0655 of 0.086 (76 %)**.
+
+**The KS row has the least headroom of any native row, and the reason is not the decimator.** The
+reference's own dihedral distribution moves by at most 0.0431 at these `res` gaps and the port's
+moves by 0.0655, so resolution does not explain the difference; what does is that `frag_010`,
+`frag_014` and `frag_017` carry three of the four lowest segmentation agreements of their set
+(0.9885, 0.9814, 0.9868), and a breakline is the **boundary** of the mask that agreement measures —
+a 1.9 % area disagreement is a far larger fraction of a boundary than of a surface. That is the same
+non-independence this section already describes for `Pf spacing`: both rows are inside their own
+gates and the pair of them is what to watch. Over all 68 fragments, 313 of 126 687 point-to-set
+distances exceed `0.5 t` (0.247 %), down from 3 115 of 271 592 (1.15 %) before T1 — the old
+threshold's own figure, kept because it is the finer instrument for a regression.
 
 **The samples row passes natively on all 408 comparisons** (it was 390 of 396). The four fragments
 that used to fail it — `Pot_A_Piece_04` on `n_frac`, `Pot_B_Piece_01` on three columns, `frag_010`
@@ -849,10 +873,12 @@ the reference by 2.4–6.6×; part of that is structural, since Open3D rebuilds 
 every `registration_icp` call and the port builds one tree per cloud and reuses it across the rungs
 and the candidates.
 
-**The whole table, as it stands after T1.** Six stages, eight fixture sets, both modes:
-**3 847 injected comparisons with no failure, and 1 524 native comparisons with five** — the
-`p99 distance` and `dihedral KS` rows of the paragraphs above, on three fragments of synthetic_20.
-Before T1 the same sweep failed 43 native comparisons across three stages.
+**The whole table, as it stands after task X.** Thirteen stages, eight fixture sets, both modes:
+**20 618 injected comparisons with no failure, and 2 644 native comparisons with no failure** (task
+X, `notes/2026-09-07-x-phase1c-findings.md` §9). The preprocessing half of that is the six stages T1 measured — 3 847 injected and
+1 524 native — and its five native failures are the two rows the paragraphs above calibrate to
+PMC-2's own sensitivity; the seven pair stages add 16 771 injected and 1 120 native. Before T1 the
+same six-stage sweep failed 43 native comparisons across three stages.
 
 **The two verification rows of step C3 are met on all eight sets, and most of them are met
 exactly** (`notes/2026-09-06-c3-verify.md`). Injected — R §6 run at the reference's own

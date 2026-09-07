@@ -992,6 +992,18 @@ point at exactly `radius` came back as a **miss** — so the port could drop a n
 reference's strict test would have kept. `nearest_below` widens the square by its own rounding and
 applies `d < bound` itself. No fixture had a query on the boundary; the new sweep test does.
 
+**2026-09-07, task X — PMC-2 gets a number, and two of D §10.2's rows are calibrated to it.**
+PMC-2's re-verify column says "`res` within 10 %, pair gates" and says nothing about how far a
+different decimator may move the *breakline*, which is where its whole effect lands. D §10.2's two
+native breakline rows stood at `0.5 t` on the 99th percentile and `0.05` on the dihedral KS, and
+step T1 showed the reference cannot meet them against itself. Measured over three collections, 33
+fragments and three budget perturbations each (99 comparisons): at the `res` gaps the working-mesh
+row already allows, the reference's own two breaklines move **1.160 t** at the 99th percentile and
+**0.0431** in KS, and at a 30 % gap they move 8.1 t and 0.169. The two rows are now twice that —
+`2.3 t` and `0.086` — with the derivation, the margin's justification and the port's own distance
+from them (39 % and 76 %) in D §10.2. This is a change to two harness tolerances, not to anything
+this document specifies; it is recorded here because PMC-2 is the row it belongs to.
+
 Also corrected: this document's header named the wrong fixture commits (see it), and R §7's
 `solve_ldlt` claimed Eigen's pivot permutation was a *stable* descending sort. It is a selection
 sort by transpositions, which agrees with a stable sort on distinct diagonal entries and not on a

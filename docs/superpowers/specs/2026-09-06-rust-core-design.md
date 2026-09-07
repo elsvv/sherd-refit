@@ -283,17 +283,31 @@ One process, one `rayon` pool sized `--threads` (default: all cores). Stages:
 
 1. **Discover** files, names, pair order (R§2, R§4.1).
 2. **Preprocess** (R§3): a `par_iter` over fragments **bounded by a memory-aware semaphore**:
-   a job for a scan of `f` faces reserves `60 MB + 110 B·f` (measured for meshopt + our arrays;
-   re-measure in E1) from a budget of `--memory-budget` (default 50 % of physical RAM); jobs
-   wait for the reservation. Large scans are read straight from the file into the vertex/face
-   arrays (no intermediate copies). Cache hits skip everything.
+   a job for a scan of `f` faces reserves `344 MiB per million faces` over a process floor of
+   `98 MiB` from a budget of `--memory-budget` (default 50 % of physical RAM); jobs wait for the
+   reservation. Large scans are read straight from the file into the vertex/face arrays (no
+   intermediate copies). Cache hits skip everything. The constant used to read `60 MB + 110 B·f`
+   and to say "re-measure in E1"; E1 measured it — seven scans of 53 k to 1.34 M faces, one at a
+   time, give `peak RSS = 98 MiB + 361 B·f` with R² 0.978, and the fixed term is the process, not
+   the scan, so the *reservation* is the slope alone (`notes/2026-09-07-e1-profile.md` §7). The
+   model was checked at four concurrent scans (predicted 1 589 MiB, measured 1 492) and at nine
+   (predicted 1 959 MiB on synthetic 20, measured 2 038 for the whole cold run).
 3. **Match** (R§5–6): pairs are grouped into blocks of 3×3 fragments in collection order
    exactly as the Python does (`R` pipeline `_pair_blocks`), the blocks are the `par_iter` items,
    pairs inside a block run sequentially, candidates inside a pair run `par_iter` (nested
    parallelism is fine under rayon's work stealing; results are collected by index, so nothing
    depends on scheduling). Per-fragment derived data (`MatchData` at a given `t`) lives in a
    shared LRU (`moka`-free: a `Mutex<LruCache<(FragId, t_bits), Arc<MatchData>>>` of 64 entries)
-   so a fragment recomputed at `t_pair` for one pair serves the next.
+   so a fragment recomputed at `t_pair` for one pair serves the next. **E1 measured what that is
+   worth and the answer is almost nothing** (`notes/2026-09-07-e1-profile.md` §5): R §1.2 sets
+   `t_pair = min(t_A, t_B)`, so of a pair's two builds exactly one is the fragment at its *own*
+   `t` — free, its arrays are the cached ones — and the other is a rebuild at a thickness that
+   belongs to that one partner and recurs nowhere else. On synthetic 20 the 380 builds hold 209
+   distinct keys, but all 190 of the *expensive* ones are distinct: of `Pair::build`'s 30.4 core-s,
+   all but at most 0.63 is R §3.5 rebuilt at the partner's `t`, and only that 0.63 — the clouds and
+   the two KD-trees every build pays — can be cached at all. The LRU would drop 171 of those 190
+   cheap builds: **at most 0.57 core-s of 319, 0.18 %** (pot H: 0.065 of 82.18, 0.08 %). The cache is worth having when R §4.2's rebuild is
+   made cheaper or partially `t`-independent, and not before.
    With the GPU executor the block loop becomes a software pipeline (§6.4).
 4. **Assemble** (R§8), **refine** (R§9), **recentre**, **outputs** (R§11). Full-resolution meshes
    are streamed one at a time; the merged assembly PLY is written by first summing the members'
@@ -509,7 +523,7 @@ type) as a diagnostic, not a production mode.
 
 | item | per unit | 170 fragments | notes |
 |---|---|---|---|
-| original scan in memory during preprocessing | 3 M faces: 60 MB + 110 B·f ≈ 400 MB; 10 M faces ≈ 1.2 GB | bounded by the semaphore: `⌊0.5·RAM / cost⌋` concurrent | 16 GB laptop: 10 concurrent 1 M-face scans, 3 concurrent 10 M-face scans |
+| original scan in memory during preprocessing | **measured** (E1 §7): 344 MiB per million faces — 3 M faces ≈ 1.0 GiB, 10 M faces ≈ 3.4 GiB, over a 98 MiB process floor | bounded by the semaphore: `⌊(budget − 98 MiB) / cost⌋` concurrent | 16 GB laptop, budget 8 GiB: **23** concurrent 1 M-face scans, **11** at 2 M, **2** at 10 M. To hold the ≤ 6 GB row below with 170 fragments resident the budget has to be ≈ 4.5 GiB, and then it is 13 / **6** / 1 |
 | cache file (mmap) | ≈ 6 MB (V f32 1.2, F 2.4, labels 0.2, arrays 2) | ≈ 1 GB address space, paged | resident only when touched |
 | derived per fragment (FN, A, C, grids, fracture BVH) | ≈ 6 MB | ≈ 1 GB if all resident; LRU of 64 `MatchData` ≈ 400 MB | |
 | full BVH (penetration) | ≈ 4 MB | in the LRU | |
@@ -1051,21 +1065,39 @@ the working-mesh budget and found three of its seven rows moving, pot_G's prohib
 (`notes/2026-09-07-y-phase1d-findings.md` §3). Runtime (M2 Pro 10-core / 16-core GPU, warm cache,
 `--no-preview`):
 
-| set | CPU gate | GPU gate |
-|---|---|---|
-| terracotta (6 pairs) | ≤ 25 s wall | ≤ 15 s |
-| pot A (28 pairs) | ≤ 35 s | ≤ 15 s |
-| pot H (55 pairs) | ≤ 40 s | ≤ 15 s |
-| synthetic 20 (190 pairs) | ≤ 120 s | ≤ 40 s |
-| synthetic 170 (≈ 12 800 pairs) | ≤ 2 h | ≤ 30 min |
-| `mixed_all` (12 589 pairs) | ≤ 2 h | ≤ 30 min |
+| set | CPU gate | GPU gate | when it is run |
+|---|---|---|---|
+| terracotta (6 pairs) | ≤ 25 s wall | ≤ 15 s | every step |
+| pot A (28 pairs) | ≤ 35 s | ≤ 15 s | every step |
+| pot H (55 pairs) | ≤ 40 s | ≤ 15 s | every step |
+| synthetic 20 (190 pairs) | ≤ 120 s | ≤ 40 s | every step |
+| synthetic 60 (≈ 1 770 pairs) | ≤ 15 min | ≤ 5 min | **final acceptance only** (decision 2026-09-07); projected **6.1 min** CPU |
+| synthetic 170 (≈ 12 800 pairs) | ≤ 2 h | ≤ 30 min | **final acceptance only** (decision 2026-09-07); projected **44 min** CPU |
+| `mixed_all` (12 589 pairs) | ≤ 2 h | ≤ 30 min | **final acceptance only** (decision 2026-09-07); projected **39 min** CPU |
+
+The last three rows are the team's decision of 2026-09-07: the large collections are not run
+during development — the development sets are the terracotta, pots A/B/C/G/H, `mixed_ABG` and
+synthetic 20, and nothing above 27 fragments is started — and the three large rows are checked
+once, as the final acceptance after phase 2 and roadmap items 3–4. Until then they are carried as
+a **projection from the measured per-pair cost**, and E1 measured that cost
+(`notes/2026-09-07-e1-profile.md` §6): one pair costs **1.34 core-s** on 200 000-face working
+meshes (synthetic 20, mean over its 190 pairs) and **1.20 core-s** on real sherds (pot H, mean
+over 55), and the pool returns **6.5×** of ten cores on this machine. That gives 12 800 × 1.34 /
+6.5 = 44 min for synthetic 170, 12 589 × 1.20 / 6.5 = 39 min for `mixed_all` and 1 770 × 1.34 /
+6.5 = 6.1 min for synthetic 60 — the first two against the 2 h gate with 2.7× to spare, the
+synthetic-60 row's gate set at a comparable margin (2.5×, against the synthetic-20 row's 2.9×).
+The two synthetic figures are upper bounds in the one way that matters: the 170-piece and
+60-piece sets cut the *same* pot the 20-piece set cuts, so their fragments are smaller than the
+ones the per-pair cost was measured on. The projection is not a run and does not discharge the
+gate.
 
 **Measured, task Y** (`notes/2026-09-07-y-phase1d-findings.md` §2), CPU, warm cache and with the
 previews written — i.e. more work than the gate asks for: terracotta **2.6 s** (gate 25),
 pot A **8.9 s** (35), pot H **10.8 s** (40), synthetic 20 **40.7 s** (120); peak RSS 1.73 GiB on
 the largest set, against D §8's 6 GB. Against the reference on the same machine, cold on both
 sides, step D3's figures stand: 52.7 → 5.9 s on the terracotta, 130.9 → 10.9 s on pot H,
-426.7 → 49.9 s on synthetic 20. The two large sets have not been run.
+426.7 → 49.9 s on synthetic 20. The three large sets have not been run and will not be until the
+final acceptance.
 
 Quality, task Y, all seven collections run natively: R §13's terracotta row **exactly** (the two
 joins, 007 unplaced, both `pen` 0, tight 0.56/0.67 and 0.54/0.56, seams 20.667 t and 12.333 t);
@@ -1133,12 +1165,12 @@ shorten phase 1+2 to ≈ 14 weeks because GPU work can start once the CPU ICP is
 | 1c, step C2 | done: Open3D's ICP (R §7), the two refinement ladders (R §5.4–5.6), R §5.5's suppression and the `stage1`/`stage2` parity rows, with experiment E5 | | injected 3 654 (stage 1) and 3 400 (stage 2) with no failure on 358 pairs of eight sets — median pose deviation 0.000° / 1e-13 t, worst 5.4e-3 t of 0.01 t; no native column (§10.2) | 48 candidates of 74 090 have ladders neither implementation can reproduce, measured on Open3D itself; E5 answered: `f32` point loops and the centred assembly are both outside §10.2 (§3, §7) |
 | 1c, step C3 | done: R §6's five verification scores and R §6.5's rule, R §5.7's ranking, the whole of `match_pair`, R §4.3's screening, and the `verify` and `candidates` parity rows | | injected 2 508 of 2 508 on 256 pairs of eight sets — `tight` and `seam` bit-identical on every candidate, `gap` ≤ 3e-6 t, `cont` ≤ 2.7e-14 t, `accepted` identical, the returned five in the reference's own order; natively the accepted sets differ and the row becomes an alarm (§10.2) | Open3D's own signed distance is self-contradictory on a mesh that `closed_enough` accepts (R §6.4); the native accepted set cannot be identical and is measured against the ground truth instead |
 | 1d | assembly, refinement, recentre, report/transforms/meshes, renderer, CLI, determinism tests | 2 | R§13 gates natively; CI green on 4 OSs | none major |
-| 1e | profiling and CPU tuning to §10.3 CPU gates | 1.5 | CPU gates | 2 h collection gate has 1.6× margin only |
+| 1e | profiling and CPU tuning to §10.3 CPU gates | 1.5 | §10.3's CPU gates **on the development sets** — terracotta, pots A/B/C/G/H, `mixed_ABG`, synthetic 20 — with every output byte-identical to the one phase 1d wrote; the three large rows are carried as the projection §10.3 states and discharged at the final acceptance (decision 2026-09-07) | the 2 h collection gate is no longer measured here: E1 projects 39–44 min against it from the per-pair cost, which is a projection and not a run |
 | **phase 1 total** | | **11** | | |
 | 2a | wgpu device/adapter/self-test, buffers, slots, batch structs; E7, E8 | 1.5 | self-test passes on Metal + lavapipe | naga/driver issues |
 | 2b | hash grid + `icp_rung` (both estimators, in-kernel solves), `coarse_scores` | 2.5 | CPU/GPU cross-check within §10.2 | shared-memory limits; f32 conditioning |
 | 2c | BVH kernels (`bounded_distance`, `inside`) | 1.5 | cross-check | traversal stack in WGSL |
-| 2d | scheduler, pipelining, TDR chunking, memory management | 1.5 | synthetic 170 ≤ 30 min | overlap efficiency |
+| 2d | scheduler, pipelining, TDR chunking, memory management | 1.5 | the GPU gates of §10.3 **on the development sets**, and §5's memory semaphore holding a projected 170-scan preprocessing budget (E1 §7); "synthetic 170 ≤ 30 min" is the final acceptance after phase 2, not a 2d exit (decision 2026-09-07) | overlap efficiency; a projection carried this long can be wrong in a way only the run shows |
 | 2e | vendor matrix (NVIDIA/AMD/Intel/Apple), tuning | 2 | E8 matrix green | Intel/AMD driver quirks |
 | **phase 2 total** | | **9** | | |
 | 3a | pyo3 module, numpy interop, `SHERD_REFIT_BACKEND=rust` routing in the Python package, A/B on the fixtures | 2 | Python pipeline with Rust kernels reproduces the Rust CLI | packaging on Windows |

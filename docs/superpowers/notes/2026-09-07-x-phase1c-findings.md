@@ -346,6 +346,7 @@ now the measured ones.
 | `cargo fmt --all --check` | **ok** |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | **ok**, no warning |
 | `cargo test --workspace --locked` | **ok**, 266 passed, 1 ignored (259 before) |
+| `pytest -q` (the reference's own suite, untouched by this task) | **ok**, 58 passed in 103 s |
 | parity, 13 stages × 8 sets, injected | **20 618 comparisons, 0 failures**, 250 skipped |
 | parity, 13 stages × 8 sets, native | **2 644 comparisons, 0 failures**, 1 813 skipped |
 | two `segment` runs byte-identical | **ok**, `cmp` clean on all four terracotta caches |
@@ -407,6 +408,8 @@ slab 0.02, pot_A 0.03, pot_C 0.04, pot_H 0.05, pot_G 0.07, terracotta 0.45, synt
 | `0fce0d3` | X5 — PMC-18, PMC-19, and R's header (D8, D6) |
 | `76e5d14` | X6 — the cost figure re-measured, two constants' citations, the `load` row (D11, D12, D10) |
 | `9263c41` | X7 — the two native breakline rows calibrated to PMC-2 (T1 open issue 1) |
+| `b8b0bdf` | X8 — this note |
+| `eaad990` | X9 — D13's divergence claim withdrawn: the contract was wrong, the answers were not |
 
 ## 12. What this task did not do
 

@@ -242,15 +242,16 @@ impl<'a> Pair<'a> {
             tracing::info!(pair = self.name(), "nothing passed the coarse stage");
             return Vec::new();
         };
-        let Some(surfaces) = self.surfaces() else { return Vec::new() };
         if p.stage1_floor > 0.0 && best1 < p.stage1_floor {
             // R §5.4: nothing the breakline stage found comes near a seam, and stage 2 is where
             // all the time goes. The pair keeps its best stage-1 pose, marked `partial` so that it
             // still appears in the report and can never be accepted.
-            let best = stage1
-                .iter()
-                .max_by(|x, y| x.score.partial_cmp(&y.score).unwrap_or(std::cmp::Ordering::Equal))
-                .expect("a non-empty stage-1 list has a maximum");
+            //
+            // This branch runs **before** `surfaces()`, and that ordering is the reference's: R §5.4
+            // needs no BVH, and the reference builds `frac_scene` lazily on first use inside R §6.1.
+            // Demanding the two scenes above the floor test would turn a pair whose working mesh has
+            // no triangle into an empty return where R §5.4 returns the partial candidate.
+            let best = &stage1[argmax(&stage1)];
             tracing::info!(
                 pair = self.name(),
                 best1,
@@ -263,6 +264,7 @@ impl<'a> Pair<'a> {
                 false,
             )];
         }
+        let Some(surfaces) = self.surfaces() else { return Vec::new() };
         let kept2 = self.suppress_stage1(&stage1, p);
         let ladder = SurfaceLadder::of(self);
         let mut candidates: Vec<Candidate> = kept2
@@ -391,14 +393,62 @@ pub struct Stage1Candidate {
     pub score: f64,
 }
 
+/// `int(np.argmax(s1))` over a stage-1 list: the index of the **first** maximum.
+///
+/// numpy's `argmax` returns the lowest index among equal maxima, and R §5.4 reads its answer
+/// directly. That choice is not a detail here: `s1` is a mean of booleans over `|brk_sub|` probe
+/// points, so its values are multiples of `1/|brk_sub|` and exact ties between poses are the
+/// normal case rather than a corner one. Rust's [`Iterator::max_by`] documents the opposite rule —
+/// "if several elements are equally maximum, the last element is returned" — so a transcription
+/// through it returns a different pose for the same pair.
+///
+/// Panics on an empty list, which the one caller has already excluded.
+#[allow(
+    clippy::float_cmp,
+    reason = "the maximum is one of these very scores; the equality is the search, not a tolerance"
+)]
+fn argmax(stage1: &[Stage1Candidate]) -> usize {
+    let best = stage1.iter().map(|c| c.score).fold(f64::NEG_INFINITY, f64::max);
+    stage1.iter().position(|c| c.score == best).expect("a non-empty list has a maximum")
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::float_cmp, reason = "R §4.2 selects one of two doubles; there is no rounding")]
 
-    use super::Pair;
+    use super::{Pair, Stage1Candidate, argmax};
     use crate::fragment::Fragment;
     use crate::params::Params;
+    use nalgebra::Matrix4;
     use std::path::{Path, PathBuf};
+
+    fn stage1(scores: &[f64]) -> Vec<Stage1Candidate> {
+        scores
+            .iter()
+            .enumerate()
+            .map(|(i, &score)| Stage1Candidate {
+                hypothesis: u32::try_from(i).unwrap(),
+                transform: Matrix4::identity(),
+                score,
+            })
+            .collect()
+    }
+
+    /// R §5.4's `int(np.argmax(s1))` picks the **first** maximum, as numpy does.
+    ///
+    /// `s1` is a mean over `|brk_sub|` booleans, so equal scores are ordinary rather than rare, and
+    /// `Iterator::max_by` — which returns the *last* of several equal maxima — would hand R §5.4's
+    /// floor branch a different pose from the reference's on any pair whose best score ties.
+    #[test]
+    fn the_stage_one_floor_picks_the_first_maximum_like_numpy() {
+        assert_eq!(argmax(&stage1(&[0.1, 0.4, 0.4, 0.2, 0.4])), 1);
+        assert_eq!(argmax(&stage1(&[0.5, 0.5, 0.5])), 0, "an all-tie list picks index 0");
+        assert_eq!(argmax(&stage1(&[0.1, 0.2, 0.9])), 2);
+        assert_eq!(argmax(&stage1(&[0.9])), 0);
+        // A stage-1 score of exactly zero on every pose is the case a `>` scan would get wrong if
+        // it started from zero rather than from the list's own first entry.
+        assert_eq!(argmax(&stage1(&[0.0, 0.0, 0.0])), 0);
+    }
 
     fn slab(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/slab/input").join(name)

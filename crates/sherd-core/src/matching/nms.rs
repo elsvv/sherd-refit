@@ -18,6 +18,11 @@
 //! The walk stops at `topk` kept poses, and it *breaks* — not skips — at the first score below
 //! `floor`, because the order is descending and nothing after it can pass.
 //!
+//! The stop is tested **after** the pose has been kept, which is the reference's own loop shape and
+//! the reason `topk = 0` keeps one pose rather than none. Nothing ships with either count at zero —
+//! `stage1` is 250 and `stage2` is 10 — but a parameter sweep that sets one of them to zero would
+//! see the difference, so the loop is transcribed as R §5.3 writes it rather than as it reads.
+//!
 //! # PMC-6: the order is an input, and the reference's is arbitrary
 //!
 //! The reference walks `np.argsort(score)[::-1]`, an **unstable** quicksort. Coarse scores are
@@ -63,9 +68,6 @@ pub fn nms(
     floor: f64,
 ) -> Vec<u32> {
     let mut kept: Vec<u32> = Vec::new();
-    if topk == 0 {
-        return kept;
-    }
     for &h in order {
         let k = h as usize;
         if score[k] < floor {
@@ -150,8 +152,27 @@ mod tests {
         assert_eq!(nms(&order, &r, &tau, &score, 1.0, 2, 0.0), vec![0, 1]);
         assert_eq!(nms(&order, &r, &tau, &score, 1.0, 10, 0.5), vec![0, 1, 2], "0.5 is not < 0.5");
         assert_eq!(nms(&order, &r, &tau, &score, 1.0, 10, 0.6), vec![0]);
-        assert_eq!(nms(&order, &r, &tau, &score, 1.0, 0, 0.0), Vec::<u32>::new());
         assert!(nms(&[], &r, &tau, &score, 1.0, 10, 0.0).is_empty());
+    }
+
+    /// `topk = 0` keeps **one** pose, because R §5.3's loop appends before it tests the count.
+    ///
+    /// The reference's `nms` sizes its scratch array `max(topk, 1)`, walks the first entry of the
+    /// order, keeps it, and only then finds `len(kept) >= 0` true and breaks. Nothing ships with
+    /// `stage1` or `stage2` at zero; a sweep that set one of them there would find the two
+    /// implementations disagreeing about a loop R freezes, which is why this is a test and not a
+    /// comment.
+    #[test]
+    fn topk_zero_keeps_one_pose_because_the_count_is_tested_after_the_push() {
+        let r = vec![rot_z(0.0); 3];
+        let tau = vec![at(0.0), at(10.0), at(20.0)];
+        let score = [0.9, 0.5, 0.1];
+        let order = order_by_score(&score, usize::MAX);
+        assert_eq!(nms(&order, &r, &tau, &score, 1.0, 0, 0.0), vec![0]);
+        // The floor still breaks first: nothing is kept when the best score is below it.
+        assert_eq!(nms(&order, &r, &tau, &score, 1.0, 0, 1.0), Vec::<u32>::new());
+        // And an empty order keeps nothing whatever `topk` says.
+        assert!(nms(&[], &r, &tau, &score, 1.0, 0, 0.0).is_empty());
     }
 
     /// Both tests have to fire before a pose is a duplicate: same place, other orientation stays;

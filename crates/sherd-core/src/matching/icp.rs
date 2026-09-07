@@ -635,23 +635,58 @@ fn normal_equations<T: Real>(
     (a, jtr.map(Real::widen))
 }
 
+/// Eigen's pivot order for a symmetric 6×6 `LDLT`, as a permutation of the original indices.
+///
+/// `ldlt_inplace` chooses each pivot with
+/// `mat.diagonal().tail(size - k).cwiseAbs().maxCoeff(&index)` and then **swaps** that entry into
+/// position `k`. Two details of that decide the permutation on a tie, and neither is a descending
+/// sort:
+///
+/// * `maxCoeff` keeps the first index it sees, because its visitor tests `value > res` — but the
+///   indices it is walking are the *current* ones, and every earlier step has already moved entries
+///   around by transposition;
+/// * the swap is a transposition rather than a rotation, so the entry displaced out of position `k`
+///   lands where the pivot came from, not one place further down.
+///
+/// A selection sort by transpositions is not stable: on the diagonal `[3, 3, 5]` Eigen swaps
+/// positions 0 and 2 and ends at the original indices `[2, 1, 0]`, while a stable descending sort
+/// gives `[2, 0, 1]`. Two exactly equal diagonal entries of a real 6×6 normal-equations matrix are
+/// measure-zero and nothing on the fixtures has ever produced one — but the two orders factorise
+/// different matrices when one appears, so this reproduces Eigen's loop rather than a sort that
+/// agrees with it almost everywhere.
+fn eigen_pivots(a: &[[f64; 6]; 6]) -> [usize; 6] {
+    let mut perm = [0_usize, 1, 2, 3, 4, 5];
+    for k in 0..6 {
+        let mut best = k;
+        for i in k + 1..6 {
+            // Strictly greater: `maxCoeff` keeps the first of several equal maxima.
+            if a[perm[i]][perm[i]].abs() > a[perm[best]][perm[best]].abs() {
+                best = i;
+            }
+        }
+        perm.swap(k, best);
+    }
+    perm
+}
+
 /// Eigen's `LDLT` on a symmetric 6×6, which is the solver Open3D's point-to-plane step uses.
 ///
 /// Eigen pivots on the largest remaining `|diagonal|`, and its left-looking factorisation never
-/// touches a trailing diagonal entry before that entry has been chosen — so the permutation is
-/// exactly a **stable descending sort of the original diagonal**, and it can be computed up front
-/// instead of interleaved with the elimination. What follows is then the plain unpivoted
-/// factorisation on the permuted matrix, and the solve applies Eigen's pseudo-inverse of `D`: a
-/// component whose pivot is not above the smallest normal double is set to zero rather than
-/// divided by, which is what keeps a rank-deficient system — two flat surfaces have three
-/// unconstrained degrees of freedom — from returning infinities.
+/// touches a trailing diagonal entry before that entry has been chosen — `mat.coeffRef(k, k)` is
+/// decremented at step `k`, *after* `k` has been selected, and the rank-1 update below it touches
+/// the column and not the diagonal. The values `ldlt_inplace` compares are therefore the original
+/// diagonal's, and the permutation can be computed up front instead of interleaved with the
+/// elimination ([`eigen_pivots`]). What follows is then the plain unpivoted factorisation on the
+/// permuted matrix, and the solve applies Eigen's pseudo-inverse of `D`: a component whose pivot is
+/// not above the smallest normal double is set to zero rather than divided by, which is what keeps
+/// a rank-deficient system — two flat surfaces have three unconstrained degrees of freedom — from
+/// returning infinities.
 ///
 /// Returns `None` when the result is not finite, which R §7 does not describe because Eigen's
 /// solve always "succeeds"; an identity update is the caller's answer to it.
 #[allow(clippy::many_single_char_names, reason = "the names of a linear solve: A x = b, LDLᵀ")]
 fn solve_ldlt(a: &[[f64; 6]; 6], b: &[f64; 6]) -> Option<[f64; 6]> {
-    let mut perm = [0_usize, 1, 2, 3, 4, 5];
-    perm.sort_by(|&i, &j| a[j][j].abs().total_cmp(&a[i][i].abs()));
+    let perm = eigen_pivots(a);
     let mut m = [[0.0; 6]; 6];
     for (k, row) in m.iter_mut().enumerate() {
         for (l, cell) in row.iter_mut().enumerate() {
@@ -740,10 +775,37 @@ mod tests {
     #![allow(clippy::float_cmp, reason = "a fitness of exactly zero is the assertion")]
 
     use super::{
-        Assembly, IcpTarget, Numerics, Options, Precision, euler_zyx, homogeneous, register,
-        solve_ldlt,
+        Assembly, IcpTarget, Numerics, Options, Precision, eigen_pivots, euler_zyx, homogeneous,
+        register, solve_ldlt,
     };
     use nalgebra::{Matrix3, Matrix4, Vector3};
+
+    fn diagonal(d: [f64; 6]) -> [[f64; 6]; 6] {
+        let mut a = [[0.0; 6]; 6];
+        for (k, value) in d.into_iter().enumerate() {
+            a[k][k] = value;
+        }
+        a
+    }
+
+    /// The pivot order is Eigen's selection sort by transpositions, not a stable sort.
+    ///
+    /// On distinct diagonal entries the two agree and this is a descending sort by `|d|`. On a tie
+    /// they do not, and the case is written out because it is the one the port used to get wrong:
+    /// Eigen swaps the largest entry into place, which sends the entry it displaced to the *end* of
+    /// the tail rather than one step down it.
+    #[test]
+    fn the_pivot_order_is_eigens_transpositions_and_not_a_stable_sort() {
+        assert_eq!(eigen_pivots(&diagonal([1.0, 5.0, 3.0, -9.0, 2.0, 4.0])), [3, 1, 5, 2, 4, 0]);
+        assert_eq!(eigen_pivots(&diagonal([6.0, 5.0, 4.0, 3.0, 2.0, 1.0])), [0, 1, 2, 3, 4, 5]);
+        // `[3, 3, 5, 0, 0, 0]`: Eigen swaps positions 0 and 2, so the original index 0 ends last
+        // among the three; a stable descending sort would have given `[2, 0, 1, 3, 4, 5]`.
+        assert_eq!(eigen_pivots(&diagonal([3.0, 3.0, 5.0, 0.0, 0.0, 0.0])), [2, 1, 0, 3, 4, 5]);
+        // All equal: no transposition fires, because `maxCoeff` keeps the first of equal maxima.
+        assert_eq!(eigen_pivots(&diagonal([2.0; 6])), [0, 1, 2, 3, 4, 5]);
+        // The magnitude decides, not the sign.
+        assert_eq!(eigen_pivots(&diagonal([-7.0, 1.0, 0.0, 0.0, 0.0, 0.0]))[0], 0);
+    }
 
     /// A bumpy patch of surface: `n×n` points of `z = f(x, y)` with the exact unit normals.
     fn patch(n: usize, step: f64, offset: f64) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {

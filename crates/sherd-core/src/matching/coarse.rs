@@ -31,6 +31,7 @@ use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 
 use crate::matching::hypotheses::{Frames, Hypotheses};
 use crate::rng::{self, Draw};
+use crate::spatial::grid::NearMask;
 use crate::spatial::kdtree::PointTree;
 
 /// The agreement threshold between the two shell normals, `cos θ > 0.7` (R §5.2, R §5.4).
@@ -119,10 +120,24 @@ pub fn scores(target: &Target<'_>, probe: &Probe, hyp: &Hypotheses, delta: f64) 
     // pot_G, 52 of one pair's 40 029 hypotheses came out one ulp away before this was a division.
     #[allow(clippy::cast_precision_loss, reason = "the probe is 60 points")]
     let points = probe.len() as f64;
+    // One mask over A's breakline for the whole pair (D §6.2, `spatial::grid`): tens of thousands
+    // of hypotheses throw the same sixty points at the same curve, and the mask answers "nothing
+    // within `delta`" for most of them without a tree descent. It is a filter — a `true` still
+    // goes to `nearest_below` — so the scores are the scores.
+    let mask = NearMask::of(target.points, delta);
     (0..hyp.len())
         .into_par_iter()
         .map(|h| {
-            f64::from(agreeing(target, &probe.q, &probe.qn, &hyp.r[h], &hyp.tau[h], delta)) / points
+            let agree = agreeing_masked(
+                target,
+                mask.as_ref(),
+                &probe.q,
+                &probe.qn,
+                &hyp.r[h],
+                &hyp.tau[h],
+                delta,
+            );
+            f64::from(agree) / points
         })
         .collect()
 }
@@ -166,6 +181,24 @@ fn agreeing(
     tau: &Vector3<f64>,
     delta: f64,
 ) -> u32 {
+    agreeing_masked(target, None, points, normals, rot, tau, delta)
+}
+
+/// [`agreeing`] with `spatial::grid`'s near mask in front of the tree.
+///
+/// The mask can only turn a query that would have missed into a query that is not made; a `true`
+/// falls through to the same `nearest_below` call, so the count is the same count. It is built
+/// per *pair* rather than per hypothesis, which is why it is worth having at all.
+#[allow(clippy::too_many_arguments, reason = "one pose, one probe, one target, one filter")]
+fn agreeing_masked(
+    target: &Target<'_>,
+    mask: Option<&NearMask>,
+    points: &[[f64; 3]],
+    normals: &[[f64; 3]],
+    rot: &Matrix3<f64>,
+    tau: &Vector3<f64>,
+    delta: f64,
+) -> u32 {
     let mut agree = 0_u32;
     for (point, normal) in points.iter().zip(normals) {
         let moved = [
@@ -179,6 +212,9 @@ fn agreeing(
         // breakline, and a bounded search abandons those in a few comparisons. `nearest_below` is
         // both halves, and its radius is widened by the rounding of `delta · delta` so that the
         // traversal can never drop a neighbour the strict test would have kept.
+        if mask.is_some_and(|mask| !mask.may_be_near(&moved)) {
+            continue;
+        }
         let Some((near, _)) = target.tree.nearest_below(&moved, delta) else {
             continue;
         };

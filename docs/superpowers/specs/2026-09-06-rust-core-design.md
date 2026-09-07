@@ -625,7 +625,7 @@ Two more places where the table is narrower than it sounds:
 
 | stage | quantity | injected tolerance | native tolerance |
 |---|---|---|---|
-| load | counts after cleaning, largest component | exact | exact |
+| load | counts after cleaning, largest component; every vertex of the largest component | exact; 1 `f32` ULP | exact; 1 `f32` ULP |
 | thickness | `t`, `thick_mode` | same bin, or ±1 bin on a count tie | ±2 %, with a floor of 1 bin of the reference's own histogram |
 | working mesh | faces, `res`, area, `watertight` | (mesh is injected) | faces ±5 %, `res` ±10 %, area ±0.5 %, same `watertight` |
 | segmentation | area-weighted label agreement; fracture fraction | ≥ 0.995; ±0.005 | ≥ 0.97; ±0.02 |
@@ -647,6 +647,19 @@ Two more places where the table is narrower than it sounds:
 | outputs | `transforms.json` poses; `report.json` keys | as refine; schema | as refine; schema |
 
 The tool exits non-zero on any violation and prints a per-stage table.
+
+**The `load` row's coordinate column is a boundary gate by construction, and it is stated here so
+that the next OBJ set failing it is read as a parser change rather than as a port regression**
+(defect D10 of the phase-1c verification). D §10.2 used to gate only the counts; the harness has
+always compared the vertices as well, at one `f32` ULP (`stages/load.rs`'s `COORDINATE_ULPS`), and
+that column measures **exactly 1.000 ULP on pot_A and pot_B** — 0.50 on pot_C, 0.25 on pot_G and
+pot_H, 0.000 on every PLY set. The row therefore sits on its own limit on the OBJ sets and has no
+headroom at all. The cause is the reference's reader, not the port's: Open3D reads OBJ through
+Assimp, whose `fast_atof` accumulates the decimal digits itself instead of calling a correctly
+rounded `strtod`, and lands one ULP low on the coordinates that need the 24th mantissa bit. The
+gate is kept at one ULP because that is the whole of the observed difference and a wider one would
+stop measuring anything; what it cannot absorb is a *second* rounding difference on top, which is
+exactly the event worth failing on.
 
 **The native thickness row is ±2 % again, and there is nothing left for it to absorb** (task T1,
 `notes/2026-09-07-t1-deterministic-thickness.md`). Finding F1 widened it to
@@ -902,14 +915,30 @@ sides accept *falsely*: six of the 354 pairs place the sherd more than a wall ap
 of them is a pair with no ground-truth join, where "the best candidate" is one arbitrary way of
 resting one sherd on another.
 
-**Cost of a whole `match_pair`, on the terracotta's six pairs** (mean per pair, this machine):
-7.62 s for the reference single-threaded (`OMP_NUM_THREADS=1`, `n_threads=1` — R §13's "≈ 7 core-s
-per pair" confirmed) against the port's **1.04 s**, a factor of **7.3**; 5.83 s for the reference
-with ten threads inside the pair against the port's **0.198 s**, a factor of **29**. The reference's
-best use of this machine for one pair is 3.40 s (its own `_map` at one thread with Open3D's OpenMP
-free), still **17×** the port's ten-thread number. Within-pair scaling from one thread to ten is
-5.2× for the port and 1.3× for the reference, which is why the reference's pipeline takes its
-parallelism from worker processes over pairs instead.
+**Cost of a whole `match_pair`, on the terracotta's six pairs** (mean per pair, this machine,
+preprocessing excluded on both sides; `sherd-parity`'s `pair_cost` example and the Python driven
+through `matching.match_pair(A, B, p, n_threads=N)`). The reference's cost depends on *two* thread
+knobs and they interact, so all four combinations are given rather than one:
+
+| reference configuration | mean per pair | port | factor |
+|---|---:|---:|---:|
+| `OMP_NUM_THREADS=1`, `n_threads=1` | **7.43 s** | 1.03 s (1 thread) | **7.2×** |
+| OpenMP free, `n_threads=1` | 3.15 s | — | — |
+| OpenMP free, `n_threads=10` | 5.98 s | — | — |
+| **`OMP_NUM_THREADS=1`, `n_threads=10`** — the reference's best | **1.70 s** (1.82 s on a repeat) | **0.193 s** (10 threads) | **8.8×** |
+
+The single-thread row is R §13's "≈ 7 core-s per pair" confirmed. **The ten-thread row of this
+paragraph used to read 5.83 s and a factor of 29, and it was measured in the wrong configuration**
+(defect D11 of the phase-1c verification): with Open3D's OpenMP left free, ten Python threads each
+open up to ten OpenMP threads on ten cores and the run comes out *slower than one thread's* — 5.98 s
+here, which is the row above. Pinning OpenMP to one thread, which is exactly what the reference's
+own pipeline does for its worker processes (`pipeline.py::_worker_env`) and what `_map` already
+does for scipy, takes the reference to **1.70 s**. The port's advantage inside one pair is therefore
+**8.8× at ten threads and 7.2× at one**, not 29× and not the 17× the old paragraph claimed against
+3.40 s — 3.15 s is the OpenMP-free single-Python-thread row, not the reference's best. Within-pair
+scaling from one thread to ten is **5.3× for the port and 4.4× for the reference**, not 1.3×; the
+reference's pipeline still takes most of its parallelism from worker processes over pairs, but that
+is a choice about memory and Python's GIL rather than a within-pair scaling limit.
 
 ### 10.3 Benchmark gates
 

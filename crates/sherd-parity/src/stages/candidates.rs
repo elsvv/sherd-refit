@@ -85,14 +85,18 @@ fn same_pose(a: &Matrix4<f64>, b: &Matrix4<f64>) -> bool {
 pub const KEEP: usize = 5;
 /// D §10.2, native column: the rotation of the best candidate of a pair both sides accept.
 ///
-/// A regression alarm rather than a parity claim (see the module documentation); measured worst
-/// median 0.28° over the six sets.
+/// A regression alarm rather than a parity claim (see the module documentation). The measured worst
+/// median is **0.417°**, on `pot_B`; the six other sets run 0.033°–0.278°, and `pot_G` has no
+/// figure because the reference accepts nothing there. Measured in the phase-1c verification
+/// (`notes/2026-09-06-phase1c-verification.md` §7) and again after the phase-1c fixes
+/// (`notes/2026-09-07-x-phase1c-findings.md` §7).
 pub const NATIVE_ROTATION_DEG: f64 = 1.0;
 /// How far apart the two best candidates may place the sherd, in wall thicknesses, before they
 /// are counted as *different placements* rather than as a pose difference.
 pub const SAME_PLACEMENT_T: f64 = 1.0;
 /// The median displacement between the two best candidates of a pair both sides accept, in wall
-/// thicknesses (a regression alarm; measured worst median 0.267 t, on `pot_B`).
+/// thicknesses (a regression alarm; measured worst median **0.108 t**, on `pot_B`, with the other
+/// sets at 0.007–0.060 t).
 pub const NATIVE_MOVE_T: f64 = 0.3;
 /// The share of a collection's pairs whose acceptance may differ, and the share of the pairs both
 /// sides accept that may be placed differently (a regression alarm; measured worst 0.179).

@@ -1189,9 +1189,141 @@
    "sha256": "3d362ca0483025661ffab8f3f308a29dc6b07fa43d27967cf55945484f819f71",
    "size": 18
   },
+  "outputs/placed.sha256.json": {
+   "sha256": "93a951633f325bec4a588a7c0934b7386d026a6df1fbbe041407277224f1f895",
+   "size": 882
+  },
+  "outputs/preview_0.meta.json": {
+   "sha256": "3aac384ecee03fe53b8043e1be025e10fc05ca06a11b40117052b1c411854bf6",
+   "size": 890
+  },
+  "outputs/preview_0.nolabel.png": {
+   "sha256": "33689debca3a007aae21ca5380197f9e9da7be19f7f1d974e2f5b141872b8ee0",
+   "size": 297332
+  },
+  "outputs/preview_0.pieceA.pick.npy": {
+   "dtype": "uint32",
+   "sha256": "caa706ee3f5c3d7b6b6a0594c893966bc46e93e284628b326b7cf82460a27777",
+   "shape": [
+    20000
+   ],
+   "size": 80128
+  },
+  "outputs/preview_0.pieceA.u.npy": {
+   "dtype": "float64",
+   "sha256": "a01090e1149a43134890444877bbce0e74dc3515f0487cb76ec3698f2ff55794",
+   "shape": [
+    20000
+   ],
+   "size": 160128
+  },
+  "outputs/preview_0.pieceA.v.npy": {
+   "dtype": "float64",
+   "sha256": "a5f7c24826856fd650a54fc71ad7b9b1cbaa8041241afeacb8687546bb33acf4",
+   "shape": [
+    20000
+   ],
+   "size": 160128
+  },
+  "outputs/preview_0.pieceB.pick.npy": {
+   "dtype": "uint32",
+   "sha256": "8af5d2dbcc3071b15f206d0d893f4cb4620d4d2b52c71d4b842bbc22a44efd1f",
+   "shape": [
+    20000
+   ],
+   "size": 80128
+  },
+  "outputs/preview_0.pieceB.u.npy": {
+   "dtype": "float64",
+   "sha256": "e49dc470648de8775a785ba86837b6a740a7a5c0ba91dfda07d921b0ded0df46",
+   "shape": [
+    20000
+   ],
+   "size": 160128
+  },
+  "outputs/preview_0.pieceB.v.npy": {
+   "dtype": "float64",
+   "sha256": "e2d6819bab361b4ba593ddd83fd70598ac9c0ccaeda4f1d0b6ab8a73e7dd5f27",
+   "shape": [
+    20000
+   ],
+   "size": 160128
+  },
+  "outputs/preview_0.png": {
+   "sha256": "44203b8cf983330189cb3a58570cbfa4ee460feadb91bec0fd658989ec1c42ae",
+   "size": 298796
+  },
+  "outputs/preview_index.json": {
+   "sha256": "bc524380cd423051209bfb7032375d8d3b49e0569f95b14f294eafa210d58435",
+   "size": 41
+  },
+  "outputs/preview_segmentation.meta.json": {
+   "sha256": "e33691f36e325fab07ad3f1d656c7cc110c6aeabd2f5e692b851953641ed3b79",
+   "size": 519
+  },
+  "outputs/preview_segmentation.nolabel.png": {
+   "sha256": "149b60957f2d3725388044e6c0a0a4458be7909e038bfe297de1b6c01ab53477",
+   "size": 115102
+  },
+  "outputs/preview_segmentation.pieceA.pick.npy": {
+   "dtype": "uint32",
+   "sha256": "a64ae2f5f6f99ddf0ec3966518731f73394e7c2892aeb13ad93856b10df164a0",
+   "shape": [
+    10000
+   ],
+   "size": 40128
+  },
+  "outputs/preview_segmentation.pieceA.u.npy": {
+   "dtype": "float64",
+   "sha256": "5ea082b297d80e0cee2b74a5a45723e136520706fc71ead0213efed85e92745d",
+   "shape": [
+    10000
+   ],
+   "size": 80128
+  },
+  "outputs/preview_segmentation.pieceA.v.npy": {
+   "dtype": "float64",
+   "sha256": "2d55f1748313286b28b9644d771da9c3552ad5b037ac7d4c264dfc7bcf3ebbe4",
+   "shape": [
+    10000
+   ],
+   "size": 80128
+  },
+  "outputs/preview_segmentation.pieceB.pick.npy": {
+   "dtype": "uint32",
+   "sha256": "91b1ae177a701c3f9afcfdb762308155334bdd9e5c9d25e49e0b2fc5366fa192",
+   "shape": [
+    10000
+   ],
+   "size": 40128
+  },
+  "outputs/preview_segmentation.pieceB.u.npy": {
+   "dtype": "float64",
+   "sha256": "b3ae5e4402b708d3cef1f4245d00b7933074c2ebc5b5e2862bad49be9019e449",
+   "shape": [
+    10000
+   ],
+   "size": 80128
+  },
+  "outputs/preview_segmentation.pieceB.v.npy": {
+   "dtype": "float64",
+   "sha256": "a6c0f004b5d05589e871980070fe1dcc84c9b5cf87857c54d123fab460e05bb5",
+   "shape": [
+    10000
+   ],
+   "size": 80128
+  },
+  "outputs/preview_segmentation.png": {
+   "sha256": "913ac95bda4c54b14fc8cd42d6217eb0c6db1fa6c47e49a44006a56c507aca9c",
+   "size": 115841
+  },
   "outputs/report.json": {
    "sha256": "620c375a0a147808f805c8b2634c1316341fff05deb003e8b2cc7ecb1a08c40e",
    "size": 8641
+  },
+  "outputs/report.md": {
+   "sha256": "fedce4738174282d41de6c05bb6efe629295bd14c4ead2d37a2b1c974fd3ff57",
+   "size": 1626
   },
   "outputs/transforms.json": {
    "sha256": "bb2b0005f5d9aff878abaea193b6faeea35d04baa9339378c838db532923b173",

@@ -40,6 +40,20 @@ Written into ``DUMP_DIR/outputs``:
     fold — the same form D §10.2's `samples` row already compares points through (defect D6).
 ``preview_index.json``
     The list of previews written, so the harness knows what to look for.
+``report.md``
+    R §11.3's report, rebuilt from the dump's own ``outputs/report.json`` through the reference's
+    own ``report.write_report`` — the dump carries the report as data and this is the same data
+    rendered by the writer the port has to reproduce.  Its ``## Timing`` block is **empty**: the
+    dump nulls the wall clock (``pipeline._dump_outputs``) because two runs disagree on it, so
+    there is nothing to render there and nothing for the harness to compare.
+
+Finally the tool **rewrites** ``DUMP_DIR/manifest.json``.  D §10.1 gives the manifest as the
+SHA-256 of every file in the dump, and the files written here are files in the dump: without the
+rewrite ``sherd-refit-rs parity --verify-checksums`` reports "all N files match" while every
+preview, every sample array and ``placed.sha256.json`` go unhashed, and
+``tests/test_fixtures.py::test_committed_slab_dump_matches_its_manifest`` fails on the twenty files
+the manifest does not list (V4-D1).  Everything the run recorded — the commit, the versions, the
+parameters, the collection and pair order — is carried over unchanged; only ``files`` is rebuilt.
 """
 from __future__ import annotations
 
@@ -210,6 +224,64 @@ def write_previews(dump: str, frags: dict, poses: dict, groups: list, n_points: 
     return written
 
 
+def write_report_md(dump: str) -> str:
+    """R §11.3's `report.md`, rendered from the dump's own `outputs/report.json`.
+
+    The reference's own writer, called on the reference's own data: `write_report` takes the
+    fragment statistics, the candidates, the used and rejected joins and the parameters, and every
+    one of them is in the dump verbatim (`Candidate.from_json` is the reference's own reader for
+    the three candidate lists).  The writer produces `report.json` beside the markdown, so it is
+    called into a scratch directory and only `report.md` is kept — the dump's own `report.json` is
+    the one the sink wrote, with the wall clock nulled, and nothing here may touch it.
+
+    `timings` is empty for the same reason it is nulled there: R §11.3's `## Timing` block is
+    seconds, two runs disagree on them, and a fixture cannot carry a number that moves.  The block
+    therefore comes out as its heading alone, and D §10.2's `outputs` row compares the file down to
+    it.
+    """
+    import shutil
+    import tempfile
+    from sherd_refit.matching import Candidate
+    from sherd_refit.report import write_report
+
+    with open(os.path.join(dump, "outputs", "report.json")) as f:
+        rep = json.load(f)
+    with open(os.path.join(dump, "outputs", "transforms.json")) as f:
+        poses = {n: np.asarray(v["matrix"], float) for n, v in json.load(f)["fragments"].items()}
+    # `from_json` keeps every key it does not know as a score, and R §8's rejection sentence is a
+    # string, so it is taken out before the candidate is rebuilt and put back beside it.
+    def candidate(c):
+        return Candidate.from_json({k: v for k, v in c.items() if k != "reason"})
+
+    cands = [candidate(c) for c in rep["candidates"]]
+    used = [candidate(c) for c in rep["joins_used"]]
+    rejected = [(candidate(c), c.get("reason", "")) for c in rep["joins_rejected"]]
+
+    scratch = tempfile.mkdtemp(prefix="sherd-report-")
+    try:
+        write_report(scratch, rep["fragments"], rep["thickness"], cands, poses, rep["groups"],
+                     used, rejected, {}, rep["params"])
+        path = os.path.join(dump, "outputs", "report.md")
+        shutil.copyfile(os.path.join(scratch, "report.md"), path)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    return path
+
+
+def rewrite_manifest(dump: str) -> dict:
+    """Re-hash the whole dump into `manifest.json`, keeping everything the run recorded.
+
+    D §10.1's manifest is "a SHA-256 of every file", and this tool adds files; the entries the
+    dump was written with (commit, versions, parameters, collection and pair order) are carried
+    over untouched and only `files` is rebuilt.
+    """
+    from sherd_refit import fixture
+    with open(os.path.join(dump, "manifest.json")) as f:
+        man = json.load(f)
+    extra = {k: v for k, v in man.items() if k != "files"}
+    return fixture.write_manifest(dump, extra)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -221,6 +293,8 @@ def main() -> int:
                     help="keep the placed meshes in this directory instead of hashing and dropping them")
     ap.add_argument("--no-meshes", action="store_true", help="previews only")
     ap.add_argument("--no-previews", action="store_true", help="meshes only")
+    ap.add_argument("--no-manifest", action="store_true",
+                    help="leave manifest.json alone (it will then not list what was written)")
     args = ap.parse_args()
 
     dump = os.path.abspath(args.dump)
@@ -238,6 +312,11 @@ def main() -> int:
     if not args.no_previews:
         written = write_previews(dump, frags, poses, groups, args.n_points)
         print(f"{len(written)} previews written: {', '.join(written)}")
+    write_report_md(dump)
+    print("outputs/report.md rendered from the dump's own report.json")
+    if not args.no_manifest:
+        man = rewrite_manifest(dump)
+        print(f"manifest.json rewritten: {len(man['files'])} files hashed")
     return 0
 
 

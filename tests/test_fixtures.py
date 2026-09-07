@@ -86,6 +86,50 @@ def test_committed_slab_dump_matches_its_manifest():
         assert fixture.sha256_of(path) == man["files"][rel]["sha256"], f"{rel} changed"
 
 
+def test_committed_slab_dump_lists_every_outputs_file_dump_outputs_writes():
+    """D §10.1's `outputs/` block: on disk, in the manifest, and hashed there.
+
+    `tools/dump_outputs.py` writes into a dump that already exists, and until it rewrote the
+    manifest it wrote twenty files nothing hashed: `--verify-checksums` said "all 180 files match"
+    while every preview and every sample array behind D §10.2's `outputs` row went unchecked, and
+    the manifest test above failed on the difference (V4-D1).  This is the same agreement stated
+    over the file names the design document lists, so that a dump written by an older copy of the
+    tool fails here with the reason rather than as a set difference.
+    """
+    with open(os.path.join(SLAB_DUMP, "manifest.json")) as f:
+        man = json.load(f)
+    expected = {"outputs/transforms.json", "outputs/report.json", "outputs/report.md",
+                "outputs/placed.sha256.json", "outputs/preview_index.json"}
+    with open(os.path.join(SLAB_DUMP, "outputs", "preview_index.json")) as f:
+        tags = json.load(f)
+    assert tags == ["preview_0", "preview_segmentation"]
+    for tag in tags:
+        expected |= {f"outputs/{tag}.png", f"outputs/{tag}.nolabel.png", f"outputs/{tag}.meta.json"}
+        for name in ("pieceA", "pieceB"):
+            expected |= {f"outputs/{tag}.{name}.{k}.npy" for k in ("pick", "u", "v")}
+    on_disk = {rel for _, rel in fixture.iter_files(SLAB_DUMP) if rel.startswith("outputs/")}
+    assert expected <= on_disk, "tools/dump_outputs.py has not been run over this dump"
+    assert expected <= set(man["files"]), "the manifest does not list what dump_outputs.py wrote"
+    for rel in sorted(expected):
+        assert fixture.sha256_of(os.path.join(SLAB_DUMP, rel)) == man["files"][rel]["sha256"], rel
+
+
+def test_committed_slab_dumps_report_md_is_the_reference_writers_own():
+    """`outputs/report.md` is R §11.3 over the dump's own `report.json`, with no wall clock."""
+    text = open(os.path.join(SLAB_DUMP, "outputs", "report.md")).read()
+    with open(os.path.join(SLAB_DUMP, "outputs", "report.json")) as f:
+        rep = json.load(f)
+    lines = text.splitlines()
+    assert lines[0] == "# Reassembly report"
+    assert lines[2].startswith(f"Wall thickness (collection median): {rep['thickness']:.2f} units.")
+    for heading in ("## Fragments", "## Assembly", "## Joins used", "## Best candidate per pair",
+                    "## Timing"):
+        assert heading in lines, heading
+    assert lines[lines.index("## Timing"):] == ["## Timing", ""], "the dump may carry no wall clock"
+    for c in rep["joins_used"]:
+        assert any(line.startswith(f"| {c['a']} | {c['b']} | ") for line in lines)
+
+
 def test_committed_slab_dump_holds_every_documented_stage():
     d = cf.Dump(SLAB_DUMP)
     assert d.fragments() == ["pieceA", "pieceB"]

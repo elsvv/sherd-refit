@@ -14,9 +14,11 @@ measurement disagrees with an existing note the disagreement is stated rather th
 **In one line:** six of the twelve became code changes in `sherd-core` (D1, D2, D3, D4, D5, D9),
 one a change to the harness (D7), two of them also needed a licence row R §12 did not have
 (PMC-18 for D8, PMC-19 for what is left of D1), and four were documentation corrections
-(D6, D10, D11, D12) — plus **a thirteenth defect found while writing the proof that closed D2**. The
-native sweep is then green on all eight sets, on a calibration of the two breakline rows whose
-derivation is in D §10.2 rather than on a tolerance widened to fit.
+(D6, D10, D11, D12) — plus **a thirteenth defect found while writing the proof that closed D2**,
+which turned out on measurement to be a false contract rather than a wrong answer, and this note
+says so rather than keeping the better story. The native sweep is then green on all eight sets, on
+a calibration of the two breakline rows whose derivation is in D §10.2 rather than on a tolerance
+widened to fit.
 
 ---
 
@@ -36,7 +38,7 @@ derivation is in D §10.2 rather than on a tolerance widened to fit.
 | D10 | the injected `load` coordinate row is a gate with no headroom | documented in D §10.2 (§8) |
 | D11 | the ten-thread cost figure was measured with OpenMP oversubscribed | **re-measured**, four configurations, on an idle machine (§5) |
 | D12 | two `candidates` constants cited the wrong measured worsts | corrected to 0.417° and 0.108 t (§8) |
-| **D13** | `nearest_within(q, r)` misses a point at exactly `d = r` | **found and fixed here** (§6) |
+| **D13** | `nearest_within`'s documented radius test (`d ≤ r`) is not the one it performs | **found here**, and shown *not* to be a divergence — the contract was wrong, the answers were not (§6) |
 
 ---
 
@@ -175,21 +177,12 @@ so.
 
 ---
 
-## 6. D13 — the bounded query misses a point on its own radius
+## 6. D2 and D13 — the bounded query, and a claim I had to withdraw
 
 D2 asked for the reference's semantics "and then keep any bounded fast path only if results are
-provably identical". Writing that proof as a test found a case where they are not.
-
-`PointTree::nearest_within(q, r)` filters on `d² ≤ radius · radius`. The product rounds. `7² + 11²
-+ 13² = 339` exactly, and `√339` squared rounds back **below** 339 — so a query whose radius is the
-distance itself reports a **miss**, where the reference's unbounded `query` followed by `d < r`
-would have returned the point and then rejected it for a different reason. Any threshold within one
-ULP of a real distance is exposed: at R §6.2 and R §6.3 the port could drop a neighbour the
-reference keeps.
-
-`PointTree::nearest_below(q, bound)` is the reference's two steps instead — the unbounded nearest,
-then `d < bound` — computed through a bounded traversal, and it carries the proof that the two
-cannot differ:
+provably identical". `PointTree::nearest_below(q, bound)` is that: the unbounded nearest followed by
+the reference's own `d < bound`, computed through a bounded traversal, with the proof at the
+function rather than a comment at each call site claiming it.
 
 * **pruning cannot change the winner.** A node is dropped only when its box is further than the
   search radius, and no such node can hold a point at a minimum that is itself under the radius, so
@@ -200,16 +193,35 @@ cannot differ:
   would accept is ever outside the searched ball, and whatever the widening lets in beyond `bound`
   the strict test drops.
 
+**D13, and the correction.** Writing the first version of that test found that
+`nearest_within(q, r)` returns `None` when `d` is exactly `r`: it tests `d² ≤ fl(r·r)`, the product
+rounds down, and `7² + 11² + 13² = 339` with `√339` squared rounding back to 338.99999999999994 is a
+two-line demonstration. Its documentation claimed "the radius test here is inclusive (`d ≤ r`)",
+which is false, and that is a real defect — in the contract.
+
+**It is not a defect in the answers, and my first draft of this note said it was.** The claim was
+that the port could drop a neighbour the reference keeps. Checked instead of asserted, it cannot:
+`d² > fl(bound·bound)` forces `fl(sqrt(d²)) ≥ bound`, because the window between `fl(bound·bound)`
+and `bound²` is at most `2⁻⁵³·bound²` wide, which after the square root is under half an ULP of
+`bound` — so nothing can land in it and still test below `bound`. Searched over **2.4 M random
+`(bound, d²)` pairs**, walking `d²` up from `fl(bound·bound)`: no counterexample. All three call
+sites use a strict `<`, so the old form and the reference agreed all along, which is also why the
+parity sweep is identical before and after the change.
+
+So the change stands on a different ground than the one I first gave it. The old argument is true
+and *fragile*: it holds only because every call site happens to use `<` rather than `≤`, it is
+invisible at the call site, and it would have to be re-derived by anyone adding a fourth caller.
+`nearest_below` needs no argument at all — it is the reference's two steps, in one call, and the
+widening makes the traversal a hint rather than a semantic.
+
 R §5.2's coarse probe and R §6.2's and R §6.3's queries use it. R §7's correspondence search does
 not need it: it never leaves squared units, so its bound and its test are the same `f64` and
 Open3D's strict `d² < r²` is reproduced exactly.
 
 The new sweep test is on a cloud built to tie — 300 random points and their mirror images, queried
 on the plane `x = 0`, so most queries are equidistant from two points — at five bounds each,
-including the distance itself and the double above it. Nothing measured moves: the parity sweep
-before and after the change is identical comparison for comparison, so no fixture query landed on a
-threshold in a way any gated number could see. That is the point — the defect is invisible until a
-threshold happens to fall on a distance, and then it is a dropped neighbour with no symptom.
+including the distance itself and the double above it: 2 000 assertions, most of them on a tie,
+which is the case none of the fixtures produces.
 
 ---
 

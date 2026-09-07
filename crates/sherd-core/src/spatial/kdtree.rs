@@ -91,15 +91,27 @@ impl PointTree {
     ///
     /// **This is the unbounded query's answer, and the bound is only a traversal hint.** R §5.2,
     /// R §6.2 and R §6.3 all read `d, j = tree.query(...)` — an unbounded search — and then test
-    /// `d < r`; a port that searches within `r` instead has to show that the two cannot differ, and
-    /// the showing has two halves. Pruning cannot change the winner: a node is pruned only when its
-    /// box is further than the search radius, and no such node can hold a point at the minimum
-    /// distance when that minimum is itself under the radius, so every candidate at the minimum —
-    /// ties included — is visited either way. Rounding cannot change it either, but only because
-    /// the square is widened here: `sqrt(x) < bound` implies `x < bound²` exactly, and
-    /// `(bound·bound)·(1 + 4ε)` is above `bound²` for every finite `bound`, so a point the strict
-    /// test would accept is never outside the searched ball. Points the widening lets in beyond
-    /// `bound` are then dropped by that same strict test.
+    /// `d < r`; a port that searches within `r` instead has to show that the two cannot differ.
+    ///
+    /// *Pruning* cannot change the winner: a node is dropped only when its box is further than the
+    /// search radius, and no such node can hold a point at the minimum distance when that minimum
+    /// is itself under the radius, so every candidate at the minimum — ties included — is visited
+    /// either way.
+    ///
+    /// *Rounding* cannot change it either, and here the square is widened so that it cannot for a
+    /// reason that fits on one line: `sqrt(x) < bound` implies `x < bound²` exactly, because `sqrt`
+    /// is correctly rounded and monotone, and `(bound·bound)·(1 + 4ε)` is above `bound²` for every
+    /// finite `bound` — so a point the strict test would accept is never outside the searched ball,
+    /// and whatever the widening lets in beyond `bound` that same strict test drops.
+    ///
+    /// Calling [`PointTree::nearest_within`] and applying `d < bound` afterwards gives the same
+    /// answers, and the phase-1c work checked that rather than assuming it: `d² > fl(bound·bound)`
+    /// forces `fl(sqrt(d²)) ≥ bound`, because the window between `fl(bound·bound)` and `bound²` is
+    /// under half an ULP of `bound` once the square root has been taken, so nothing can land in it
+    /// and still test below `bound` (searched over 2.4 M `(bound, d²)` pairs; no counterexample).
+    /// That argument is true and it is *fragile* — it holds only because every one of the three
+    /// call sites happens to use a **strict** `<`, and it is invisible at the call site. This
+    /// function needs no such argument, which is why the call sites use it.
     ///
     /// The bound is what makes R §5.2 affordable. An unbounded nearest-neighbour search has to find
     /// the true nearest however far away it is, and most of the millions of probe points a pair's
@@ -298,12 +310,13 @@ mod tests {
         assert_eq!(tree.nearest_below(&[0.0, 0.0, 0.0], -1.0), None);
     }
 
-    /// [`PointTree::nearest_within`] tests the *square*, and the boundary is where that shows.
+    /// [`PointTree::nearest_within`]'s radius test is on the *square*, and it is not `d ≤ r`.
     ///
     /// `radius · radius` rounds, so a point at exactly `radius` can have a squared distance above
-    /// the rounded square and come back as a miss. Nothing in R sits on a radius, and the two
-    /// verification queries and the coarse probe all want the reference's strict `d < r` anyway —
-    /// but the difference is written down here rather than left as a surprise in a caller.
+    /// the rounded square and come back as a miss — which its documentation used to deny. No caller
+    /// is wrong because of it: all three want the reference's strict `d < r`, and a distance that
+    /// clears `fl(r·r)` can no longer test below `r` after the square root. The case is written out
+    /// here so that the next caller reads the contract rather than the name.
     #[test]
     fn the_squared_radius_is_not_the_distance_radius_at_the_boundary() {
         let origin = [0.0, 0.0, 0.0];

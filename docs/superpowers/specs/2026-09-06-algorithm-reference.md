@@ -984,13 +984,19 @@ whose ICP diverged).
 
 The third substitution — a radius-bounded nearest-neighbour search where §5.2, §6.2 and §6.3 read
 an unbounded `cKDTree.query` and then test `d < r` — needs no row, because it is provably the same
-answer and the proof is now in `spatial/kdtree.rs::nearest_below`: pruning cannot change the
-winner, since a node is dropped only when its box is further than the radius and no such node can
-hold a point at a minimum that is itself under the radius. Writing that proof out found a real
-defect in the old form. `nearest_within` compares `d² ≤ radius · radius`, the product rounds, and a
-point at exactly `radius` came back as a **miss** — so the port could drop a neighbour the
-reference's strict test would have kept. `nearest_below` widens the square by its own rounding and
-applies `d < bound` itself. No fixture had a query on the boundary; the new sweep test does.
+answer and the proof is now in `spatial/kdtree.rs::nearest_below` rather than in three call-site
+comments: pruning cannot change the winner, since a node is dropped only when its box is further
+than the radius and no such node can hold a point at a minimum that is itself under the radius, and
+the square is widened by its own rounding so that the traversal is a hint and not a semantic.
+
+Writing that proof out found a false claim in the old form's documentation — `nearest_within` says
+its radius test is inclusive (`d ≤ r`) and it is not, because `radius · radius` rounds and a point
+at exactly `radius` comes back as a miss. It is **not** a difference in the answers, and the first
+draft of this addendum said it was: `d² > fl(r·r)` forces `fl(sqrt(d²)) ≥ r`, the window between
+the two being under half an ULP of `r` after the square root, so a distance the old form dropped
+could not have tested below `r` either (searched over 2.4 M `(r, d²)` pairs, no counterexample).
+The old argument was true and fragile — it depended on all three call sites using a strict `<` and
+was invisible at each of them; the new one depends on nothing.
 
 **2026-09-07, task X — PMC-2 gets a number, and two of D §10.2's rows are calibrated to it.**
 PMC-2's re-verify column says "`res` within 10 %, pair gates" and says nothing about how far a

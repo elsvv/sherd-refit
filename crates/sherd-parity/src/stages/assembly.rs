@@ -72,12 +72,18 @@ pub const POSE_T: f64 = 1e-9;
 
 /// One fragment as R §8 reads it, out of the dump: the two numbers R §1.2 resolves `pen` from,
 /// R §3.3.2's verdict, the working mesh and the assembly-stage surface samples.
-struct RefPiece {
-    thick: f64,
-    res: f64,
-    watertight: bool,
-    geometry: Option<RefGeometry>,
-    s_pen: Vec<[f64; 3]>,
+#[derive(Debug)]
+pub struct RefPiece {
+    /// R §3.2's wall thickness.
+    pub thick: f64,
+    /// R §3.3's `res`.
+    pub res: f64,
+    /// R §3.3.2's verdict.
+    pub watertight: bool,
+    /// The working mesh and its scenes, when the dump carries them.
+    pub geometry: Option<RefGeometry>,
+    /// `md.S` at `t_med` — PMC-8's own sample set.
+    pub s_pen: Vec<[f64; 3]>,
 }
 
 /// `mesh.stats.json`: the fragment-level numbers R §8 needs and the sample arrays do not carry.
@@ -89,19 +95,24 @@ struct RefStats {
 }
 
 /// `assembly/md_t_median.json`: the `(t, surface_points)` the reference rebuilt every fragment at.
-#[derive(serde::Deserialize)]
-struct MdTMedian {
-    t: f64,
-    surface_points: u64,
+#[derive(Debug, serde::Deserialize)]
+pub struct MdTMedian {
+    /// The collection's median wall thickness.
+    pub t: f64,
+    /// How many surface points R §8's own `MatchData` was drawn with.
+    pub surface_points: u64,
 }
 
 /// One entry of `assembly/used.json` or `assembly/rejected.json`.
-#[derive(serde::Deserialize)]
-struct RefJoin {
-    a: String,
-    b: String,
+#[derive(Debug, serde::Deserialize)]
+pub struct RefJoin {
+    /// The fragment the pose maps into.
+    pub a: String,
+    /// The fragment the pose moves.
+    pub b: String,
+    /// R §8's sentence, on a rejection.
     #[serde(default)]
-    reason: Option<String>,
+    pub reason: Option<String>,
 }
 
 /// Runs R §8 on the dump's own candidates (injected) or on the port's (native).
@@ -500,10 +511,12 @@ fn parse_pen(join: &RefJoin) -> Option<f64> {
 
 /// The largest displacement the two pose sets give any of a fragment's own surface samples, in `t`.
 ///
+/// Shared with the `refine` and `outputs` rows, which measure a pose the same way.
+///
 /// Every tenth sample, which is R §8.2's own stride and enough of a lever arm: a fragment 450 units
 /// from the origin whose two poses differ by 1e-12 in a rotation entry moves its points by 4.5e-10,
 /// and this measure sees that where a comparison of the translation column alone would not.
-fn worst_move(
+pub fn worst_move(
     ours: &[Matrix4<f64>],
     theirs: &[Matrix4<f64>],
     pieces: &[Piece<'_>],
@@ -523,13 +536,13 @@ fn worst_move(
 }
 
 /// `{name: 4x4}` out of a JSON file, in collection order.
-fn read_poses(path: &Path, names: &[String]) -> Result<Vec<Matrix4<f64>>> {
+pub fn read_poses(path: &Path, names: &[String]) -> Result<Vec<Matrix4<f64>>> {
     let raw: BTreeMap<String, [[f64; 4]; 4]> = npy::read_json_as(path)?;
     Ok(names.iter().map(|n| raw.get(n).map_or_else(Matrix4::identity, matrix)).collect())
 }
 
 /// The same out of `transforms.json`, whose poses sit under `fragments.<name>.matrix`.
-fn read_transforms(path: &Path, names: &[String]) -> Result<Vec<Matrix4<f64>>> {
+pub fn read_transforms(path: &Path, names: &[String]) -> Result<Vec<Matrix4<f64>>> {
     #[derive(serde::Deserialize)]
     struct Entry {
         matrix: [[f64; 4]; 4],
@@ -545,7 +558,8 @@ fn read_transforms(path: &Path, names: &[String]) -> Result<Vec<Matrix4<f64>>> {
         .collect())
 }
 
-fn matrix(rows: &[[f64; 4]; 4]) -> Matrix4<f64> {
+/// A 4x4 out of the nested lists both JSON files carry.
+pub fn matrix(rows: &[[f64; 4]; 4]) -> Matrix4<f64> {
     let mut out = Matrix4::zeros();
     for (i, r) in rows.iter().enumerate() {
         for (j, v) in r.iter().enumerate() {
@@ -556,7 +570,7 @@ fn matrix(rows: &[[f64; 4]; 4]) -> Matrix4<f64> {
 }
 
 /// `assembly/md_t_median.json`, or `None` when the dump does not carry the assembly at all.
-fn md_t_median(collection: &Collection) -> Result<Option<MdTMedian>> {
+pub fn md_t_median(collection: &Collection) -> Result<Option<MdTMedian>> {
     let path = collection.dir.assembly_dir().join("md_t_median.json");
     if !path.is_file() {
         return Ok(None);
@@ -565,12 +579,12 @@ fn md_t_median(collection: &Collection) -> Result<Option<MdTMedian>> {
 }
 
 /// Position of a fragment in collection order.
-fn index_of(collection: &Collection, name: &str) -> Option<usize> {
+pub fn index_of(collection: &Collection, name: &str) -> Option<usize> {
     collection.fragments.iter().position(|f| f.name == name)
 }
 
 /// Every fragment as the dump holds it, or `None` with the skip recorded.
-fn reference_pieces(
+pub fn reference_pieces(
     collection: &Collection,
     report: &mut StageReport,
 ) -> Result<Option<Vec<RefPiece>>> {
@@ -613,7 +627,7 @@ fn reference_pieces(
 }
 
 /// The borrowed view R §8 takes of [`reference_pieces`]'s owned arrays.
-fn piece_views(pieces: &[RefPiece]) -> Vec<Piece<'_>> {
+pub fn piece_views(pieces: &[RefPiece]) -> Vec<Piece<'_>> {
     pieces
         .iter()
         .map(|p| Piece {
@@ -631,7 +645,7 @@ fn piece_views(pieces: &[RefPiece]) -> Vec<Piece<'_>> {
 /// R §8 reads only the accepted ones and only the best of each pair, but the *order* of the list
 /// is what breaks a tie between two pairs of equal score, so the whole list is rebuilt rather than
 /// filtered here.
-fn reference_candidates(
+pub fn reference_candidates(
     collection: &Collection,
     report: &mut StageReport,
 ) -> Result<Option<Vec<Candidate>>> {
@@ -693,7 +707,7 @@ fn empty_array(path: &Path) -> Result<bool> {
 }
 
 /// Every fragment preprocessed by the port, in collection order and with its [`FragId`] set.
-fn native_fragments(
+pub fn native_fragments(
     collection: &Collection,
     report: &mut StageReport,
 ) -> Result<Option<Vec<Fragment>>> {

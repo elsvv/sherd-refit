@@ -114,7 +114,7 @@ struct ParityArgs {
     input: Option<PathBuf>,
     /// Stage to compare: `load`, `thickness`, `working-mesh`, `segmentation`, `breakline`,
     /// `samples`, `hypotheses`, `coarse`, `nms`, `stage1`, `stage2`, `verify`, `candidates`,
-    /// `assembly`, or `all`. Repeatable.
+    /// `assembly`, `refine`, `outputs`, or `all`. Repeatable.
     #[arg(long, default_value = "all")]
     stage: Vec<String>,
     /// Feed each stage the Python stage's own inputs instead of the port's upstream results
@@ -413,8 +413,7 @@ fn requested_stages(requested: &[String]) -> Result<Vec<Stage>> {
         }
         let stage = Stage::parse(name).ok_or_else(|| {
             anyhow::anyhow!(
-                "unknown stage `{name}`; this build compares {} or `all` (the later stages of \
-                 D §10.2 arrive with the stages they judge)",
+                "unknown stage `{name}`; this build compares {} or `all`",
                 Stage::ALL.map(Stage::as_str).join(", ")
             )
         })?;
@@ -481,9 +480,14 @@ mod tests {
             vec![Stage::Candidates, Stage::Assembly],
             "R §8's row comes after the pair it is built from"
         );
-        // A stage this build does not compare yet names the ones it does.
-        let err = requested_stages(&["refine".to_owned()]).unwrap_err().to_string();
-        assert!(err.contains("assembly"), "{err}");
+        assert_eq!(
+            requested_stages(&["outputs".to_owned(), "refine".to_owned()]).unwrap(),
+            vec![Stage::Refine, Stage::Outputs],
+            "and so do the last two rows of D §10.2"
+        );
+        // A stage this build does not have names the ones it does.
+        let err = requested_stages(&["no such stage".to_owned()]).unwrap_err().to_string();
+        assert!(err.contains("assembly") && err.contains("outputs"), "{err}");
     }
 
     #[test]

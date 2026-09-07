@@ -160,9 +160,17 @@ impl Cloud {
 /// which every stage that moves a point through a 4×4 goes through.
 ///
 /// The reference writes it as `P @ T[:3, :3].T + T[:3, 3]`, so the translation is added after the
-/// three-term dot product; `a + b + c + d` associates to the left in Rust exactly as numpy's
-/// matmul-then-add does, and R §6's scores came out bit-identical to the reference's through this
-/// expression on all 2 249 candidates of the eight fixture dumps (step C3).
+/// three-term dot product, and R §6's scores came out bit-identical to the reference's through
+/// this expression on all 2 249 candidates of the eight fixture dumps (step C3).
+///
+/// It is **not** bit-identical to the reference's *coordinates*, and step D2 measured that rather
+/// than leaving the old claim standing: numpy's `@` is a BLAS call and BLAS on this machine fuses,
+/// so the reference accumulates `((c₀x) ⊕ c₁y) ⊕ c₂z` with three roundings instead of five and the
+/// two answers part company in the last bits (3 ULP on a 300-unit coordinate, measured over 900
+/// coordinates in the note of step D2). Where a *coordinate* has to come back the same — a placed
+/// mesh written to PLY, a cloud handed to ICP, a preview pixel — the port calls
+/// [`apply_transform_fused`] instead. This function stays as it is because R §6's numbers were
+/// verified through it and because a score is a threshold on a distance, not a coordinate.
 #[inline]
 pub fn apply_transform(t: &nalgebra::Matrix4<f64>, p: [f64; 3]) -> [f64; 3] {
     [
@@ -170,6 +178,39 @@ pub fn apply_transform(t: &nalgebra::Matrix4<f64>, p: [f64; 3]) -> [f64; 3] {
         t[(1, 0)] * p[0] + t[(1, 1)] * p[1] + t[(1, 2)] * p[2] + t[(1, 3)],
         t[(2, 0)] * p[0] + t[(2, 1)] * p[1] + t[(2, 2)] * p[2] + t[(2, 3)],
     ]
+}
+
+/// `R·p + τ` as **Eigen and OpenBLAS** compute it: three fused multiply-adds, then the
+/// translation.
+///
+/// Open3D's `TriangleMesh::Transform` and `PointCloud::Transform` multiply the homogeneous
+/// 4×4 by `(p, 1)`, which Eigen evaluates as a linear combination of the matrix's *columns* —
+/// `res = c₀x`, `res = pmadd(c₁, y, res)`, `res = pmadd(c₂, z, res)`, `res = pmadd(c₃, 1, res)` —
+/// and `pmadd` on this machine's NEON packets is `vfmaq_f64`, a fused multiply-add. numpy's
+/// `P @ T[:3,:3].T + T[:3,3]` reaches the same three roundings through OpenBLAS's `dgemm`.
+///
+/// **Measured, not assumed** (step D2): over 900 coordinates of a random cloud 300 units from the
+/// origin under a random pose, this expression reproduces Open3D's transformed vertices *and*
+/// numpy's matmul **bit for bit, 900 of 900**, where the unfused [`apply_transform`] misses 291 of
+/// them and the two other plausible FMA associations miss 320 and 440. That is what makes
+/// R §11.4's `placed/<name>.ply` byte-identical to the reference's file rather than merely equal
+/// to within a rounding.
+///
+/// `mul_add` is one instruction on aarch64 and on any x86-64 with FMA; on a target without it,
+/// Rust calls libm's correctly rounded `fma`, so the answer does not change with the machine.
+#[inline]
+pub fn apply_transform_fused(t: &nalgebra::Matrix4<f64>, p: [f64; 3]) -> [f64; 3] {
+    let row =
+        |i: usize| t[(i, 2)].mul_add(p[2], t[(i, 1)].mul_add(p[1], t[(i, 0)] * p[0])) + t[(i, 3)];
+    [row(0), row(1), row(2)]
+}
+
+/// The rotation block of [`apply_transform_fused`] alone — Open3D's `TransformNormals`, whose
+/// homogeneous fourth component is `0` rather than `1`, and the reference's `FN @ T[:3,:3].T`.
+#[inline]
+pub fn rotate_fused(t: &nalgebra::Matrix4<f64>, p: [f64; 3]) -> [f64; 3] {
+    let row = |i: usize| t[(i, 2)].mul_add(p[2], t[(i, 1)].mul_add(p[1], t[(i, 0)] * p[0]));
+    [row(0), row(1), row(2)]
 }
 
 /// A rigid transform: candidate poses, placements, refinements.

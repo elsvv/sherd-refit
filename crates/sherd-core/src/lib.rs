@@ -27,7 +27,9 @@
 //! | [`spatial`] | §3.2, §3.4.1–3.4.3, §6.1, §6.4 | B1 (rays, KD-tree), C3 (bounded distance, inside test) |
 //! | [`matching`] | §1.2, §4–§7 | C1 (scales, hypotheses, coarse, NMS), C2 (ICP and the two ladders), C3 (verification, `match_pair`, screening) |
 //! | [`assembly`] | §8 | D1 |
-//! | [`refine`], [`report`], [`render`], [`pipeline`] | §9, §11, §2 | phase 1d |
+//! | [`refine`] | §9 | D2 |
+//! | [`report`], [`render`] | §11 | D2 |
+//! | [`pipeline`] | §2, D §5 | S4 (preprocessing), phase 1d (the run) |
 //!
 //! # State
 //!
@@ -65,9 +67,13 @@
 //! joins ([`assembly::greedy`]), its two tests ([`assembly::consistency`]), the groups and R §8.2's
 //! recentring ([`assembly::groups`]), and roadmap item 3's constraint format
 //! ([`assembly::constraints`], typed and not yet read) — with the `assembly` row of the parity
-//! table. What is left is R §9's refinement and R §10–§11's outputs; they are documented but empty,
-//! and are filled in step by step, each step gated on the fixtures under `fixtures/` and on
-//! `tools/compare_fixtures.py`.
+//! table. Step D2 closed R §9 and R §11: the full-resolution ladder over each group's spanning tree
+//! ([`refine`]), `transforms.json`, `report.json`, `report.md` and R §11.4's placed and merged
+//! meshes ([`report`]), and R §11.5's software point renderer with its z-buffer, its views and its
+//! caption ([`render`]) — with the `refine` and `outputs` rows of the parity table, the last two of
+//! D §10.2. What is left of phase 1d is the run itself: [`pipeline`] still holds only
+//! preprocessing, and the `run` subcommand that drives all of the above end to end is the step
+//! after this one.
 
 pub mod assembly;
 pub mod collection;

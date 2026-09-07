@@ -14,7 +14,11 @@
 //! [`verify`], which is R §6 at the reference's own stage-2 poses, and [`candidates`], which is
 //! R §5.7's ranking injected and the whole of `match_pair` natively. Step D1 opened phase 1d with
 //! the last row that judges a decision rather than a number: [`assembly`], R §8's greedy growth
-//! over the accepted joins, which reads `DIR/assembly/` and `DIR/outputs/transforms.json`.
+//! over the accepted joins, which reads `DIR/assembly/` and `DIR/outputs/transforms.json`. Step D2
+//! closed the table with the last two rows: [`refine`], R §9's full-resolution ladder over
+//! `DIR/refine/`, and [`outputs`], which compares `transforms.json` and `report.json` against the
+//! dump's own and the meshes and previews of R §11.4–11.5 against what
+//! `tools/dump_outputs.py` writes beside them.
 
 pub mod assembly;
 pub mod breakline;
@@ -23,7 +27,9 @@ pub mod coarse;
 pub mod hypotheses;
 pub mod load;
 pub mod nms;
+pub mod outputs;
 pub mod pairs;
+pub mod refine;
 pub mod samples;
 pub mod segmentation;
 pub mod stage1;
@@ -77,11 +83,15 @@ pub enum Stage {
     Candidates,
     /// R §8 — the groups, the joins used, the rejections and R §8.2's recentring.
     Assembly,
+    /// R §9 — the full-resolution ladder over the joins the assembly used.
+    Refine,
+    /// R §11 — `transforms.json`, `report.json`, the placed meshes and the previews.
+    Outputs,
 }
 
 impl Stage {
     /// Every stage this build can run, in pipeline order.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 16] = [
         Self::Load,
         Self::Thickness,
         Self::WorkingMesh,
@@ -96,6 +106,8 @@ impl Stage {
         Self::Verify,
         Self::Candidates,
         Self::Assembly,
+        Self::Refine,
+        Self::Outputs,
     ];
 
     /// The name the command line and the table use.
@@ -115,6 +127,8 @@ impl Stage {
             Self::Verify => "verify",
             Self::Candidates => "candidates",
             Self::Assembly => "assembly",
+            Self::Refine => "refine",
+            Self::Outputs => "outputs",
         }
     }
 
@@ -366,6 +380,8 @@ impl Collection {
             Stage::Verify => verify::run(self, mode),
             Stage::Candidates => candidates::run(self, mode),
             Stage::Assembly => assembly::run(self, mode),
+            Stage::Refine => refine::run(self, mode),
+            Stage::Outputs => outputs::run(self, mode),
         }
     }
 

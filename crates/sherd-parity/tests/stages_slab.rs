@@ -268,20 +268,144 @@ fn an_assembly_without_its_own_samples_skips() {
 #[test]
 fn without_the_input_directory_native_mode_skips_and_injected_mode_does_not() {
     let collection = Collection::open(FixtureDir::new(slab_dump()), None).expect("the dump");
+    // Every native column starts from the file, with one exception: `outputs` natively compares
+    // the port's own renderer and JSON writer against themselves and against the dump's own
+    // views, and needs no mesh at all.
     let native = collection.run_all(&Stage::ALL, Mode::Native).unwrap();
-    assert_eq!(
-        native.iter().map(sherd_parity::StageReport::status).collect::<Vec<_>>(),
-        ["SKIP"; Stage::ALL.len()]
-    );
+    for report in &native {
+        let expected = if report.stage == "outputs" { "PASS" } else { "SKIP" };
+        assert_eq!(report.status(), expected, "{}", report.stage);
+    }
     let injected = collection.run_all(&Stage::ALL, Mode::Injected).unwrap();
-    // `load` needs the file in both modes — its input *is* the file. The others run off the dump
-    // alone.
-    assert_eq!(injected[0].status(), "SKIP");
-    assert!(
-        injected[1..].iter().all(|r| r.status() == "PASS"),
-        "{:?}",
-        injected.iter().map(|r| (r.stage, r.status())).collect::<Vec<_>>()
-    );
+    // Two stages need the file in *both* modes, because the file is their input: `load`, whose
+    // subject it is, and `refine`, whose fracture cloud is built on the original mesh's own
+    // vertices and which no dump carries (R §9). The rest run off the dump alone.
+    let needs_the_file = ["load", "refine"];
+    for report in &injected {
+        let expected = if needs_the_file.contains(&report.stage) { "SKIP" } else { "PASS" };
+        assert_eq!(report.status(), expected, "{}", report.stage);
+    }
+}
+
+/// R §9's row, made to fail by exactly the thing it measures: a refined pose the reference did not
+/// produce, and a vertex selection that is not the reference's.
+#[test]
+fn a_perturbed_refine_fails_the_stage_that_measures_it() {
+    let dump = scratch("refine-perturbed");
+    copy_dump(&dump);
+    let open = |dir: &Path, name: &str| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(dir.join(name)).unwrap()).unwrap()
+    };
+
+    // A pose 0.4 t out of place: the row's tolerance is 0.02 t.
+    let mut poses = open(&dump, "refine/poses_final.json");
+    let thickness = 30.154_368_401_f64;
+    poses["pieceB"][0][3] =
+        serde_json::json!(poses["pieceB"][0][3].as_f64().unwrap() + 0.4 * thickness);
+    std::fs::write(dump.join("refine/poses_final.json"), serde_json::to_vec(&poses).unwrap())
+        .unwrap();
+
+    let collection = Collection::open(FixtureDir::new(&dump), Some(&slab_input())).unwrap();
+    let report = collection.run(Stage::Refine, Mode::Injected).unwrap();
+    let failed: Vec<&str> = report.failures().map(|c| c.quantity).collect();
+    assert!(failed.contains(&"pose trans"), "{failed:?}");
+    assert!(!failed.contains(&"idx"), "the selection is untouched: {failed:?}");
+
+    // And a selection that is one vertex short of the reference's.
+    let dump = scratch("refine-idx");
+    copy_dump(&dump);
+    let idx = sherd_parity::npy::read_indices(dump.join("refine/pieceA.idx.npy")).unwrap();
+    let shortened: Vec<u8> = idx[1..].iter().flat_map(|&i| i64::from(i).to_le_bytes()).collect();
+    write_npy(&dump.join("refine/pieceA.idx.npy"), "<i8", idx.len() - 1, &shortened);
+    let collection = Collection::open(FixtureDir::new(&dump), Some(&slab_input())).unwrap();
+    let report = collection.run(Stage::Refine, Mode::Injected).unwrap();
+    let failed: Vec<&str> = report.failures().map(|c| c.quantity).collect();
+    assert!(failed.contains(&"idx"), "{failed:?}");
+}
+
+/// R §11's row, made to fail by each of the three things it measures: a pose, a mesh and a pixel.
+#[test]
+fn a_perturbed_output_fails_the_row_that_measures_it() {
+    // A `transforms.json` pose the recentring does not produce.
+    let dump = scratch("outputs-pose");
+    copy_dump(&dump);
+    let mut transforms: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dump.join("outputs/transforms.json")).unwrap())
+            .unwrap();
+    let before = transforms["fragments"]["pieceB"]["matrix"][2][3].as_f64().unwrap();
+    transforms["fragments"]["pieceB"]["matrix"][2][3] = serde_json::json!(before + 1e-3);
+    std::fs::write(dump.join("outputs/transforms.json"), serde_json::to_vec(&transforms).unwrap())
+        .unwrap();
+    let collection = Collection::open(FixtureDir::new(&dump), Some(&slab_input())).unwrap();
+    let failed: Vec<&str> = collection
+        .run(Stage::Outputs, Mode::Injected)
+        .unwrap()
+        .failures()
+        .map(|c| c.quantity)
+        .collect();
+    assert!(failed.contains(&"transforms pose"), "{failed:?}");
+
+    // A placed mesh whose hash is not the one the port produces.
+    let dump = scratch("outputs-ply");
+    copy_dump(&dump);
+    let mut index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dump.join("outputs/placed.sha256.json")).unwrap())
+            .unwrap();
+    index["files"]["placed/pieceA.ply"]["sha256"] = serde_json::json!("0".repeat(64));
+    std::fs::write(dump.join("outputs/placed.sha256.json"), serde_json::to_vec(&index).unwrap())
+        .unwrap();
+    let collection = Collection::open(FixtureDir::new(&dump), Some(&slab_input())).unwrap();
+    let failed: Vec<&str> = collection
+        .run(Stage::Outputs, Mode::Injected)
+        .unwrap()
+        .failures()
+        .map(|c| c.quantity)
+        .collect();
+    assert!(failed.contains(&"placed ply"), "{failed:?}");
+    assert!(!failed.contains(&"placed shape"), "the size and counts are untouched: {failed:?}");
+
+    // A preview the port did not render: the *labelled* image put where the unlabelled one goes,
+    // which differs from the port's render by exactly the caption.
+    let dump = scratch("outputs-preview");
+    copy_dump(&dump);
+    std::fs::copy(dump.join("outputs/preview_0.png"), dump.join("outputs/preview_0.nolabel.png"))
+        .unwrap();
+    let collection = Collection::open(FixtureDir::new(&dump), Some(&slab_input())).unwrap();
+    let failed: Vec<&str> = collection
+        .run(Stage::Outputs, Mode::Injected)
+        .unwrap()
+        .failures()
+        .map(|c| c.quantity)
+        .collect();
+    assert!(failed.contains(&"preview px"), "{failed:?}");
+}
+
+/// A dump with no R §9 boundary and no R §11.4/11.5 files is skipped, not compared against
+/// nothing.
+#[test]
+fn outputs_and_refine_skip_what_the_dump_does_not_carry() {
+    let dump = scratch("refine-min");
+    copy_dump(&dump);
+    std::fs::remove_dir_all(dump.join("refine")).unwrap();
+    let collection = Collection::open(FixtureDir::new(&dump), Some(&slab_input())).unwrap();
+    let report = collection.run(Stage::Refine, Mode::Injected).unwrap();
+    assert_eq!(report.status(), "SKIP");
+    assert!(report.checks.is_empty());
+    assert!(report.skips[0].reason.contains("no refine/"), "{}", report.skips[0].reason);
+
+    // The outputs stage still compares the two JSON files, and says what it could not compare.
+    let dump = scratch("outputs-min");
+    copy_dump(&dump);
+    std::fs::remove_file(dump.join("outputs/preview_index.json")).unwrap();
+    std::fs::remove_file(dump.join("outputs/placed.sha256.json")).unwrap();
+    let collection = Collection::open(FixtureDir::new(&dump), Some(&slab_input())).unwrap();
+    let report = collection.run(Stage::Outputs, Mode::Injected).unwrap();
+    assert_eq!(report.status(), "PASS");
+    let reasons: Vec<&str> = report.skips.iter().map(|s| s.reason.as_str()).collect();
+    assert_eq!(reasons.len(), 2, "{reasons:?}");
+    assert!(reasons.iter().any(|r| r.contains("placed.sha256.json")), "{reasons:?}");
+    assert!(reasons.iter().any(|r| r.contains("preview_index.json")), "{reasons:?}");
+    assert!(report.checks.iter().any(|c| c.quantity == "report candidates"));
 }
 
 /// The three pair stages, each made to fail by exactly the thing it measures — the same standard

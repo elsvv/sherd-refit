@@ -1,0 +1,39 @@
+{
+ "files": {
+  "assembly_0.ply": {
+   "colors": false,
+   "faces": 81000,
+   "members": [
+    "pieceA",
+    "pieceB"
+   ],
+   "sha256": "3e7b192ce0dc20b3dc243a571c5318ac993c1c53b5935b5650c97dd9d0f11507",
+   "size": 2025303,
+   "vertices": 40504
+  },
+  "placed/pieceA.ply": {
+   "colors": false,
+   "faces": 45100,
+   "members": [
+    "pieceA"
+   ],
+   "sha256": "0611a3be32e93c36f02e6a7f3a79de5e41b2f0f7b30dc9cb3e5897959141e0b4",
+   "size": 1127755,
+   "vertices": 22552
+  },
+  "placed/pieceB.ply": {
+   "colors": false,
+   "faces": 35900,
+   "members": [
+    "pieceB"
+   ],
+   "sha256": "87849ce16eed2f30d7fe8238e833a6205460a0a31cccff6d8f356c0bed0bdfc2",
+   "size": 897755,
+   "vertices": 17952
+  }
+ },
+ "sources": {
+  "pieceA": "6f9102f97b2b408a32914bec64abfc0fa48b98c6d7727f12e469ded608a2b048",
+  "pieceB": "344de7516440fe54221a7c3309a0425c4a8bf298e8f4ef8d1487a401729d18e4"
+ }
+}

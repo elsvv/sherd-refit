@@ -1552,6 +1552,7 @@ dependencies = [
 name = "sherd-parity"
 version = "0.1.0"
 dependencies = [
+ "image",
  "nalgebra",
  "npyz",
  "rayon",

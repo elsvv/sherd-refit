@@ -1065,6 +1065,54 @@ groups, and the branch cannot fire. That matches the dumps: **none of the eight*
 of that kind. The port keeps the branch — it is R §8's text and R §8.1's second pass reruns the
 loop on another candidate list — and its own test exercises the sentence rather than the path.
 
+**2026-09-07, step D2 — PMC-20 (the preview caption), a new row of §12's table.**
+
+| id | what the reference does | why | what the port may do | re-verify with |
+|---|---|---|---|---|
+| PMC-20 | §11.5's caption is drawn by PIL's `ImageDraw.text` with `ImageFont.load_default()`, which in Pillow 12 is an anti-aliased FreeType face | library, and a font file | the same text in the port's own 5×7 bitmap font (`render.rs`'s `FONT`), upper case only | the pixels **outside** the caption compared exactly, and the caption's own area reported as a row: `preview label px`, measured 566–4 943 pixels per image over the eight dumps against a cap of 8 000 |
+
+The rest of §11.5 is *not* a PMC and is not approximated: fed the reference's own samples and the
+reference's own views, the port reproduces the splat pixel for pixel — **0 differing pixels of
+4 200 000** on every preview of every set (D §10.2's `outputs` row). What that costs is four
+arithmetic details, and each of them was measured rather than assumed:
+
+* `(V − centre) @ R` and `N @ R` are numpy `(n,3) @ (3,3)` products and reach OpenBLAS's `dgemm`,
+  which **fuses**: the port evaluates them as `fma(p₂, m₂ⱼ, fma(p₁, m₁ⱼ, p₀·m₀ⱼ))`. `Nn · light` is
+  a `(n,3) @ (3,)` product and does **not** fuse; the port evaluates it left to right. Measured on
+  400–1 200 random coordinates: the fused form matches numpy on 1 200 of 1 200 for the matrix
+  product and misses 156 of 400 for the vector one, and the unfused form is the other way round.
+* `np.round` is round-half-to-**even** (`f64::round_ties_even`), not half away from zero.
+* the z-buffer is `float32` while the depth compared against it is `float64`.
+* `np.lexsort` is stable and the reference takes the **last** entry of each pixel's run, so a tie
+  in depth inside one of the nine offsets goes to the later point in concatenation order.
+
+**2026-09-07, step D2 — `apply_transform` is not bit-identical to the reference's *coordinates*,
+and R §11.4 needs one that is.** The port's `types::apply_transform` was documented as reproducing
+`P @ T[:3,:3].T + T[:3,3]` because "`a + b + c + d` associates to the left in Rust exactly as
+numpy's matmul-then-add does". Measured, that is false on this machine: numpy's `@` is a BLAS call
+and Eigen's `Matrix4d * Vector4d` is a column combination, and both fuse, so the reference
+accumulates three roundings where the scalar expression takes five. Over 900 coordinates of a
+random cloud 300 units from the origin under a random pose, the fused form
+`fma(t₂, z, fma(t₁, y, t₀·x)) + τ` reproduces **Open3D's transformed vertices and numpy's matmul,
+900 of 900**, while the unfused one misses 291 and the two other plausible FMA associations miss
+320 and 440. The port therefore has both: `apply_transform` unchanged, because §6's scores were
+verified through it on all 2 249 candidates, and `apply_transform_fused` wherever a *coordinate*
+has to come back the same — §9's clouds, §11.4's placed meshes and §11.5's samples. That is what
+makes `placed/<name>.ply` byte-identical to the reference's file on every collection the two
+implementations read the same way (the four PLY sets; on the five OBJ sets D §10.2's `load` row
+already measures Assimp's `fast_atof` one `f32` ULP away, and a placed mesh cannot be
+byte-identical when its input is not).
+
+**2026-09-07, step D2 — §9's cap is the only draw in the refinement, and it is the only thing
+between the two implementations there.** Under 150 000 candidates both sides compute
+`np.where(sel)[0]` and the port reproduces the reference's selection **exactly**: 0 differing
+entries of 9 952 (slab), 14 776 (pot_C), 18 720 (pot_H), 93 923 (pot_A), 40 565+ (pot_B) and
+389 000 (synthetic_20). Above it, PMC-9 decides the order and the port draws its own 150 000; what
+is still exact there is that **every index the reference kept is one the port's own predicate
+accepted** (450 000 of 450 000 on terracotta's three capped fragments), and the overlap of the two
+draws sits within 0.0013 of `150000/|candidates|`, the ratio two independent draws share in
+expectation.
+
 ## 13. Reference results and parity gates
 
 Numbers the port must reproduce on the benchmark sets, with the defaults above (from the notes

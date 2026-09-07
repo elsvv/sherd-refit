@@ -568,6 +568,9 @@ DIR/pairs/<a>__<b>/
 DIR/assembly/  md_t_median samples (S per fragment, 15000), poses.json, groups.json, used.json, rejected.json
 DIR/refine/    <name>.idx (fracture cloud indices), per-join T after each rung, poses_final.json
 DIR/outputs/   transforms.json report.json
+DIR/outputs/   (added by tools/dump_outputs.py, step D2) placed.sha256.json, preview_index.json,
+               preview_<k>.png, preview_<k>.nolabel.png, preview_<k>.meta.json,
+               preview_<k>.<name>.{pick,u,v}.npy, and the same for preview_segmentation
 ```
 
 Sizes: terracotta ≈ 240 MB, pot A ≈ 250 MB, synthetic 20 ≈ 850 MB at level `slim`; the p0 note's
@@ -579,6 +582,19 @@ reference changes; the committed `fixtures/slab/dump` comes from
 the sample uniforms of §10.2's D6 columns with it — and the seven `output/fixtures` sets from
 **`895a948`**, the last commit of that step; each `manifest.json` records which, and all eight say
 `dirty: false`.
+
+**R §11.4's meshes and R §11.5's previews come from a second tool, because the dump does not run
+them** (step D2). `dump_fixtures.py` calls the pipeline with `preview=False` and
+`write_meshes=False`: neither output is on the algorithm's critical path and both are large.
+`tools/dump_outputs.py DUMP INPUT` fills the gap without re-running anything — it rebuilds the
+fragments from the dump's own `mesh.V`, `mesh.F` and `seg.frac_final`, takes the poses and the
+groups from the dump's own `outputs/transforms.json`, and calls the reference's own
+`report.write_placed_meshes` and the body of `pipeline.write_previews`, transcribed only so that
+each sample's `pick`, `u` and `v` can be written out on the way past. The generator is consumed in
+the pipeline's order, so the samples are the ones the pipeline would have drawn. The placed meshes
+are hundreds of megabytes and are hashed and dropped rather than kept (`--keep-ply DIR` keeps
+them); the previews are written twice, once as the pipeline writes them and once with the caption
+left off, because the caption is PMC-20. §10.2's `outputs` row reads all of it.
 
 **`nms1.order` and `nms2.order` are inputs, not outputs, and step C1 added them for that reason.**
 R §5.3's suppression is a greedy walk over `np.argsort(score)[::-1]`, and numpy's `argsort` is an
@@ -643,10 +659,38 @@ Two more places where the table is narrower than it sounds:
 | stage 1, stage 2 — `chaotic` (an alarm, not a parity requirement) | share of candidates whose own ladder moves further than the row's tolerance when the initial pose moves by one ULP; and, exactly, how many of those the reference itself kept | ≤ 0.002 / ≤ 0.06 per dump and ≤ 0.06 / ≤ 0.4 per pair; zero kept | — |
 | pair result | (the `candidates` row above) | — | **a regression alarm, not a parity claim** (see below): share of pairs returning a different candidate count ≤ 0.4; share accepted by one side only ≤ 0.25 each; share of both-accepted pairs placed more than a wall apart ≤ 0.25; on the rest, median rotation ≤ 1° and median displacement of the moving fragment ≤ 0.3 t |
 | assembly (R §8) | groups; joins used; rejections **with the reference's own reason string**; poses, before and after R §8.2; R §8.2's recentring against `transforms.json` | identical; identical; identical; 1e-9 t; 1e-9 t | **PMC-8 alone** — the reference's candidates on the port's own samples: identical, identical, identical, 1e-9 t. Then, from the port's own candidates, **a regression alarm**: share of the used-join union belonging to one side ≤ 0.5 each; largest group within 4 fragments; every used join inside a group |
-| refine | relative poses within a group | 0.2° / 0.02 t | 0.2° / 0.02 t |
-| outputs | `transforms.json` poses; `report.json` keys | as refine; schema | as refine; schema |
+| refine (R §9) | the vertex selection `refine/<name>.idx`; the walk's order; the two correspondence radii; the pose after **each** rung; `fitness` and `inlier_rmse`; relative poses within a group | exact; exact; exact; 0.2° / 0.02 t; 1e-4 and 0.02 t; 0.2° / 0.02 t | the same, with one row split: above R §9's 150 000-vertex cap PMC-9 gives the two sides different draws, so the selection is compared as "every index the reference kept is one the port's predicate accepted" (exact) plus an overlap within 0.05 of `150000/|candidates|`, and `fitness` — a Bernoulli fraction *of the cloud* — is gated at 0.008, about 5.6 σ of that sampling noise |
+| outputs (R §11) | `transforms.json` — `thickness`, the groups, every `group` and `placed` flag, `params`, the poses; `report.json` — the whole file through the port's own type, and the candidate list through the port's own serialiser; `placed/<name>.ply` and `assembly_<k>.ply`; `preview_*.png` | exact; exact; **SHA-256 identical**, with size, both counts and the colour flag compared on every set; **pixel for pixel** | the port's own principal axis against the reference's (PMC-10, 1°); two renders of one input identical; a `transforms.json` written and read back |
 
 The tool exits non-zero on any violation and prints a per-stage table.
+
+**The last two rows read the outputs the dump does not carry, and a second Python tool writes
+them** (step D2). `tools/dump_fixtures.py` runs the pipeline with `preview=False` and
+`write_meshes=False`, so a dump holds the poses that produce R §11.4's meshes and R §11.5's
+previews and not the files. `tools/dump_outputs.py DUMP INPUT` produces them from the dump that
+already exists — the fragments rebuilt out of `mesh.V`, `mesh.F` and `seg.frac_final`, the poses
+out of `outputs/transforms.json`, and the two writers called being the reference's own — and
+leaves behind `outputs/placed.sha256.json` (a SHA-256, a size and the two counts per file, plus
+the hash of every fragment's mesh *as `load_mesh` leaves it*), `outputs/preview_<k>.png`, the same
+render with the caption left off, `outputs/preview_<k>.meta.json` (the views, which PMC-10 makes
+library-defined) and the `pick`/`u`/`v` of every sample it drew. The port renders from those and
+compares pixels; a dump without them makes the row skip, with the command to run in the message.
+The committed `fixtures/slab/dump` carries them at 20 000 samples per fragment so that the
+renderer and the PLY writer have a regression fixture in the repository.
+
+**`placed ply` is byte-for-byte on four of the eight sets and cannot be on the other five, and the
+row says which** (step D2). A placed mesh is the input file transformed, so it can only be
+byte-identical when the input file *reads back* byte-identically, and on the five OBJ collections
+it does not: the `load` row above already measures Open3D's reader (Assimp's `fast_atof`) exactly
+one `f32` ULP from the port's. The stage therefore hashes both sides' cleaned source meshes first
+and compares the placed files only where those agree — the slab, terracotta, synthetic_20 and any
+other PLY set, where **every file matches to the byte** — while `placed shape` (size, vertex count,
+face count, colour flag) is compared on *every* set and gates the header, the merge and the colour
+rule of R §11.4 there too. What the OBJ sets' difference actually looks like was measured rather
+than assumed: on pot_C's smallest fragment 178 of 10 737 coordinates differ, every one of them by
+exactly one `f32` ULP of the source coordinate, the colour bytes and the face block are identical,
+and the file sizes are equal. `SHERD_PARITY_KEEP_PLACED=DIR` keeps the port's own files so that
+the next such difference can be looked at the same way.
 
 **The `load` row's coordinate column is a boundary gate by construction, and it is stated here so
 that the next OBJ set failing it is read as a parser change rather than as a port regression**

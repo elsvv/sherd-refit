@@ -18,6 +18,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use sherd_core::fragment::cache;
 use sherd_core::matching::icp::{Assembly, Numerics, Precision};
+use sherd_core::memory::Budget;
 use sherd_core::{ALGO_REF, Backend, CACHE_VERSION, CORE_VERSION, Params, collection, pipeline};
 use sherd_parity::FixtureDir;
 use sherd_parity::report::{Mode, StageReport};
@@ -164,6 +165,10 @@ struct RunArgs {
     /// Recompute every fragment and overwrite its cache, even when the cache is valid.
     #[arg(long)]
     force: bool,
+    /// Gigabytes concurrent scans may hold during preprocessing (D §5, D §9); 0 removes the
+    /// bound, and the default is half of the machine's physical memory.
+    #[arg(long, value_name = "GB")]
+    memory_budget: Option<f64>,
     /// Write the Rust-side fixture dump of D §10.1 (not built yet).
     #[arg(long, value_name = "DIR")]
     dump_fixtures: Option<PathBuf>,
@@ -226,6 +231,18 @@ struct SegmentArgs {
     /// Neither read nor write the fragment cache.
     #[arg(long)]
     no_cache: bool,
+    /// Gigabytes concurrent scans may hold (D §5, D §9); 0 removes the bound, and the default is
+    /// half of the machine's physical memory.
+    #[arg(long, value_name = "GB")]
+    memory_budget: Option<f64>,
+}
+
+/// D §9's `--memory-budget GB`: the flag when it is given, half of physical memory when it is not.
+///
+/// `0` (or a negative number) is the escape hatch that removes the bound entirely, which is what
+/// a machine with a known-good amount of memory and a very large scan wants.
+fn budget(gb: Option<f64>) -> Budget {
+    gb.map_or_else(Budget::default_for_machine, Budget::gigabytes)
 }
 
 /// Arguments of `parity`.
@@ -390,7 +407,8 @@ fn segment(args: &SegmentArgs) -> Result<()> {
     let out = if args.no_cache { None } else { Some(args.out.as_path()) };
 
     let started = std::time::Instant::now();
-    let results = pipeline::preprocess(&entries, args.target_faces as usize, out);
+    let results =
+        pipeline::preprocess(&entries, args.target_faces as usize, out, budget(args.memory_budget));
     let wall = started.elapsed().as_secs_f64();
 
     println!(
@@ -488,6 +506,7 @@ fn run(args: &RunArgs) -> Result<()> {
         cache: !args.no_cache,
         workers: args.workers.unwrap_or_else(pipeline::default_workers),
         backend,
+        memory: budget(args.memory_budget),
     };
     if args.force && !args.no_cache {
         clear_caches(&args.input, &args.out)?;

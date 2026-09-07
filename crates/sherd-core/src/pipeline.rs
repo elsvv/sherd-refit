@@ -1,17 +1,18 @@
 //! The run: discovery, preprocessing, matching, assembly, refinement, outputs (D §5).
 //!
 //! One process, one rayon pool. Preprocessing is a `par_iter` over fragments bounded by a
-//! memory-aware semaphore (a scan of `f` faces reserves `60 MB + 110 B·f` from `--memory-budget`,
-//! default half of physical RAM). Matching walks the same 3×3 blocks of the collection order the
+//! memory-aware semaphore ([`memory`](crate::memory)): a scan of `f` faces reserves E1's measured
+//! `361 B·f` from `--memory-budget`, whose default is half of physical RAM. Matching walks the same 3×3 blocks of the collection order the
 //! reference walks, so the pair order — and with it every seeded draw — is the reference's;
 //! candidates inside a pair run in parallel and are collected by index, so nothing depends on the
 //! schedule. Cancellation is an `AtomicBool` checked between units of work; progress is a
 //! callback.
 //!
 //! Step S4 filled in the first stage: [`preprocess`], which is what `sherd-refit-rs segment`
-//! drives — R §3.1–3.3 then, R §3.1–3.4 since step B1. The memory-aware semaphore is not part of it yet — that needs the per-fragment
-//! high-water mark measured rather than guessed, which belongs with the memory work of phase 1e —
-//! so the fan-out is a plain `par_iter` over the collection, with `--threads` sizing the pool.
+//! drives — R §3.1–3.3 then, R §3.1–3.4 since step B1. Step E2 put the semaphore in front of it,
+//! once E1 had measured the per-fragment high-water mark rather than guessing it: the fan-out is
+//! still a `par_iter` over the collection with `--threads` sizing the pool, and the semaphore only
+//! decides when a job may start.
 //!
 //! Step D3 filled in the rest: [`run`] is the reference's `sherd_refit.pipeline.run`, stage for
 //! stage, and the schedule below it is the reference's too — [`pair_blocks`] is `_pair_blocks` and
@@ -39,6 +40,7 @@ use crate::matching::hypotheses::Frames;
 use crate::matching::icp::Numerics;
 use crate::matching::pair::{self, Candidate};
 use crate::matching::screen::{Screened, screen_pair, top_partners};
+use crate::memory::{self, Budget, MemorySemaphore, reservation};
 use crate::mesh::geometry;
 use crate::params::Params;
 use crate::refine::{self, FractureCloud, RefinePiece, fracture_cloud, refine_joins};
@@ -78,11 +80,17 @@ pub fn preprocess(
     entries: &[Entry],
     target_faces: usize,
     out_dir: Option<&Path>,
+    budget: Budget,
 ) -> Vec<Result<Preprocessed>> {
-    entries
+    let semaphore = MemorySemaphore::new(budget);
+    let out: Vec<Result<Preprocessed>> = entries
         .par_iter()
         .map(|entry| {
             let started = std::time::Instant::now();
+            // D §5 step 2: reserve what E1's model says this scan will add to the process's peak
+            // RSS, and wait for it. A file whose size cannot be read reserves nothing — the load
+            // below is about to fail with the reader's own error, which is the better one.
+            let permit = semaphore.acquire(memory::scan_faces(&entry.path).map_or(0, reservation));
             let cache_path = out_dir.map(|dir| cache::cache_path(dir, &entry.name));
             let (fragment, cached) = Fragment::load_or_build(
                 &entry.path,
@@ -90,9 +98,21 @@ pub fn preprocess(
                 &entry.name,
                 cache_path.as_deref(),
             )?;
+            drop(permit);
             Ok(Preprocessed { fragment, cached, seconds: started.elapsed().as_secs_f64() })
         })
-        .collect()
+        .collect();
+    if budget.is_bounded() {
+        let stats = semaphore.stats();
+        tracing::info!(
+            budget_mib = budget.available() / (1024 * 1024),
+            peak_mib = stats.peak / (1024 * 1024),
+            peak_concurrent = stats.peak_running,
+            waited = stats.waited,
+            "preprocessing memory"
+        );
+    }
+    out
 }
 
 /// Sizes the process-wide rayon pool (D §5's `--threads`); `0` leaves it at one per core.
@@ -148,6 +168,8 @@ pub struct RunOptions {
     pub workers: usize,
     /// Which executor ran, for `report.json`'s `engine` (D §4.3).
     pub backend: Backend,
+    /// D §5 step 2's preprocessing memory budget (D §9's `--memory-budget`).
+    pub memory: Budget,
 }
 
 impl Default for RunOptions {
@@ -162,6 +184,7 @@ impl Default for RunOptions {
             cache: true,
             workers: 0,
             backend: Backend::Cpu,
+            memory: Budget::default_for_machine(),
         }
     }
 }
@@ -256,7 +279,12 @@ pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSumm
     // 1. preprocessing (R §3, through the cache of R §3.7)
     let started = Instant::now();
     let cache_dir = options.cache.then(|| out_dir.to_path_buf());
-    let fragments = preprocess_collection(&entries, options.target_faces, cache_dir.as_deref())?;
+    let fragments = preprocess_collection(
+        &entries,
+        options.target_faces,
+        cache_dir.as_deref(),
+        options.memory,
+    )?;
     timings.insert("preprocess", started.elapsed().as_secs_f64());
     let names: Vec<String> = fragments.iter().map(|f| f.name.clone()).collect();
     let thickness = geometry::median(&fragments.iter().map(|f| f.thick).collect::<Vec<f64>>());
@@ -472,8 +500,9 @@ fn preprocess_collection(
     entries: &[Entry],
     target_faces: usize,
     out_dir: Option<&Path>,
+    budget: Budget,
 ) -> Result<Vec<Fragment>> {
-    let results = preprocess(entries, target_faces, out_dir);
+    let results = preprocess(entries, target_faces, out_dir, budget);
     let mut fragments = Vec::with_capacity(results.len());
     for (i, result) in results.into_iter().enumerate() {
         let mut fragment = result?.fragment;
@@ -864,7 +893,8 @@ pub fn write_previews(
 #[cfg(test)]
 mod tests {
     use super::{
-        BLOCK, RunOptions, block_size, pair_blocks, preprocess, run, second_pass_pairs, set_threads,
+        BLOCK, Budget, RunOptions, block_size, pair_blocks, preprocess, run, second_pass_pairs,
+        set_threads,
     };
     use crate::collection::Entry;
     use crate::matching::pair::Candidate;
@@ -880,9 +910,13 @@ mod tests {
         let broken = dir.join("broken.ply");
         std::fs::write(&broken, b"ply\nformat ascii 1.0\nend_header\n").unwrap();
         let entries = vec![Entry { path: broken, name: "broken".to_owned() }];
-        let results = preprocess(&entries, 200_000, None);
+        let results = preprocess(&entries, 200_000, None, Budget::unbounded());
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err(), "a mesh with no triangles is R §3.1's error case");
+        // The same file under a budget that admits nothing: the semaphore lets it through anyway
+        // (nothing else is running) and it fails with the reader's error, not by waiting.
+        let bounded = preprocess(&entries, 200_000, None, Budget::bytes(1));
+        assert!(bounded[0].is_err(), "the semaphore never turns a read error into a hang");
         std::fs::remove_dir_all(&dir).ok();
     }
 

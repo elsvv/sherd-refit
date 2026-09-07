@@ -85,6 +85,7 @@ pub mod fixture;
 pub mod fragment;
 pub mod io;
 pub mod matching;
+pub mod memory;
 pub mod mesh;
 pub mod params;
 pub mod pipeline;

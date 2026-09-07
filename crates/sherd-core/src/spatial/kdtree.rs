@@ -31,6 +31,9 @@ use kiddo::{ImmutableKdTree, SquaredEuclidean};
 pub struct PointTree {
     tree: ImmutableKdTree<f64, 3>,
     len: usize,
+    /// The cloud's axis-aligned bounding box, for [`PointTree::beyond_the_box`].
+    lo: [f64; 3],
+    hi: [f64; 3],
 }
 
 impl PointTree {
@@ -39,7 +42,63 @@ impl PointTree {
         if points.is_empty() {
             return None;
         }
-        ImmutableKdTree::new_from_slice(points).ok().map(|tree| Self { tree, len: points.len() })
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for point in points {
+            for ((low, high), &c) in lo.iter_mut().zip(&mut hi).zip(point) {
+                *low = low.min(c);
+                *high = high.max(c);
+            }
+        }
+        ImmutableKdTree::new_from_slice(points).ok().map(|tree| Self {
+            tree,
+            len: points.len(),
+            lo,
+            hi,
+        })
+    }
+
+    /// The squared distance from `query` to the cloud's bounding box — zero inside it.
+    #[inline]
+    fn box_distance_squared(&self, query: &[f64; 3]) -> f64 {
+        let mut d2 = 0.0;
+        for ((&q, &low), &high) in query.iter().zip(&self.lo).zip(&self.hi) {
+            let gap = if q < low {
+                low - q
+            } else if q > high {
+                q - high
+            } else {
+                0.0
+            };
+            d2 += gap * gap;
+        }
+        d2
+    }
+
+    /// True when **no** point of the cloud can be within `radius_squared` of `query`, so that the
+    /// traversal need not start.
+    ///
+    /// Every point is inside the box, so the distance from `query` to the box is a lower bound on
+    /// the distance to any of them: if the box is further than the radius, the answer is nothing.
+    /// That is the whole argument, and it holds whatever the tie rules are — which is why this is a
+    /// *filter* in front of `kiddo` rather than a second implementation of the query.
+    ///
+    /// The rounding is taken the safe way round. `box_distance_squared` is three subtractions,
+    /// three squares and two additions, so what it returns is within about five ulps of the true
+    /// value; requiring the computed distance to clear `radius_squared · (1 + 16 ε)` means the
+    /// *true* one clears `radius_squared` even if every one of those roundings went against us.
+    /// The filter therefore rejects slightly less often than it could, and never once too often.
+    ///
+    /// **Why it pays.** R §5.2 throws sixty probe points of B at A's breakline for each of tens of
+    /// thousands of hypotheses, and a hypothesis is an alignment of *one* frame of each: most of
+    /// those poses put most of the probe nowhere near A. Measured over the coarse stage
+    /// (`notes/2026-09-07-e2-tuning.md` §4): **75 % of synthetic 20's** and 65 % of pot H's probe
+    /// queries are outside A's breakline box widened by `0.15 t`, against 2.9 % and 14.4 % that
+    /// land on a neighbour at all. Six comparisons answer those instead of a tree descent that
+    /// E1 measured at 99 ns.
+    #[inline]
+    fn beyond_the_box(&self, query: &[f64; 3], radius_squared: f64) -> bool {
+        self.box_distance_squared(query) > radius_squared * (1.0 + 16.0 * f64::EPSILON)
     }
 
     /// Index of the point nearest to `query`, ties going to the lowest index.
@@ -145,7 +204,7 @@ impl PointTree {
         query: &[f64; 3],
         radius_squared: f64,
     ) -> Option<(u32, f64)> {
-        if radius_squared < 0.0 {
+        if radius_squared < 0.0 || self.beyond_the_box(query, radius_squared) {
             return None;
         }
         let hit = self
@@ -173,8 +232,14 @@ impl PointTree {
         if radius < 0.0 {
             return;
         }
+        // The same squared radius the traversal is given, so the filter can never be stricter
+        // than the query it stands in front of.
+        let radius_squared = radius * radius;
+        if self.beyond_the_box(query, radius_squared) {
+            return;
+        }
         let found =
-            self.tree.query(query).within::<SquaredEuclidean<f64>>(radius * radius).execute();
+            self.tree.query(query).within::<SquaredEuclidean<f64>>(radius_squared).execute();
         out.extend(found.iter().map(|hit| hit.item));
         out.sort_unstable();
     }
@@ -333,6 +398,81 @@ mod tests {
         // and `nearest_below` gives both answers without the square's rounding in the way.
         assert_eq!(tree.nearest_below(&origin, d), None);
         assert_eq!(tree.nearest_below(&origin, above), Some((0, d)));
+    }
+
+    /// The bounding-box filter in front of the bounded queries answers exactly what the traversal
+    /// answers, on queries placed to sit *on* the boundary it tests.
+    ///
+    /// The filter's argument is that the box is a lower bound on the distance to any point, so the
+    /// only way it can be wrong is arithmetically — a rounding that makes the computed box
+    /// distance clear a radius the true one does not. The sweep below puts a single point at the
+    /// origin and asks at radii either side of the exact distance, on coordinates chosen so that
+    /// none of the three squares is exact, and then repeats the whole comparison on a random cloud
+    /// against brute force.
+    #[test]
+    fn the_box_filter_never_rejects_a_neighbour_the_traversal_would_have_found() {
+        let tree = PointTree::build(&[[7.0, 11.0, 13.0], [7.5, 11.5, 13.5]]).expect("two points");
+        for k in 0..400 {
+            // A query well outside the box on every axis, walking towards it.
+            let q = [7.0 - 0.017 * f64::from(k), 11.0 - 0.013 * f64::from(k), 13.0];
+            let (i, d) = tree.nearest_distance(&q);
+            for bound in [d * 0.5, d, f64::from_bits(d.to_bits() + 1), d * 2.0] {
+                let want = if d < bound { Some((i, d)) } else { None };
+                assert_eq!(tree.nearest_below(&q, bound), want, "query {k} at bound {bound}");
+            }
+            // `within` is compared away from the boundary: its test is `d² ≤ fl(r·r)` and a brute
+            // force written here would accumulate `Σ(a−b)²` in its own order, so the two are only
+            // guaranteed to agree where no point sits within a rounding of the radius.
+            for bound in [d * 0.5, d * 0.99, d * 1.01, d * 2.0] {
+                let ball = tree.within(&q, bound);
+                let brute: Vec<u32> = [[7.0, 11.0, 13.0], [7.5, 11.5, 13.5]]
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| dist(p, &q) <= bound * 0.999)
+                    .map(|(j, _)| u32::try_from(j).expect("two points"))
+                    .collect();
+                assert!(brute.iter().all(|j| ball.contains(j)), "query {k} at radius {bound}");
+            }
+        }
+
+        // A random cloud, random queries, radii that straddle each query's own answer.
+        let mut state = 0x1234_5678_9abc_def1_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            #[allow(clippy::cast_precision_loss, reason = "a 53-bit mantissa from a 64-bit word")]
+            let unit = (state >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0);
+            unit * 6.0 - 3.0
+        };
+        let points: Vec<[f64; 3]> = (0..400).map(|_| [next(), next(), next()]).collect();
+        let tree = PointTree::build(&points).expect("400 points");
+        let mut answered = 0_usize;
+        for _ in 0..2000 {
+            // Half the queries inside the cloud, half far outside it on one or more axes.
+            let q = [next() * 3.0, next() * 3.0, next() * 3.0];
+            let (i, d) = tree.nearest_distance(&q);
+            for bound in [d * 0.5, d, f64::from_bits(d.to_bits() + 1), d + 0.5] {
+                let want = if d < bound { Some((i, d)) } else { None };
+                assert_eq!(tree.nearest_below(&q, bound), want, "query {q:?} at bound {bound}");
+                answered += usize::from(want.is_some());
+            }
+            for bound in [d * 0.5, d * 0.99, d * 1.01, d + 0.5] {
+                let ball = tree.within(&q, bound);
+                let brute: Vec<u32> = points
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| dist(p, &q) <= bound * 0.999)
+                    .map(|(j, _)| u32::try_from(j).expect("400 points"))
+                    .collect();
+                assert!(brute.iter().all(|j| ball.contains(j)), "query {q:?} at radius {bound}");
+                assert!(
+                    ball.iter().all(|&j| dist(&points[j as usize], &q) <= bound * 1.001),
+                    "query {q:?} at radius {bound}"
+                );
+            }
+        }
+        assert!(answered > 3000, "the sweep should mostly answer, not {answered}");
     }
 
     fn dist(a: &[f64; 3], b: &[f64; 3]) -> f64 {

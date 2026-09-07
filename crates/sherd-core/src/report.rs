@@ -886,6 +886,49 @@ mod tests {
         );
     }
 
+    /// R §11.2's `timings` keeps the order the stages finished in, in both files.
+    ///
+    /// The reference's is a Python dict and `json.dump` writes it in insertion order; a port that
+    /// sorted it by name wrote `assembly, matching, preprocess, refine` where the reference wrote
+    /// `preprocess, matching, assembly, refine` (V4-D4). The order is deliberately not
+    /// alphabetical here, so that sorting anywhere fails this.
+    #[test]
+    fn timings_keep_the_order_the_stages_finished_in() {
+        let outcome = Outcome {
+            names: &names(),
+            candidates: &[],
+            used: &[],
+            rejected: &[],
+            groups: &[vec![0], vec![1], vec![2]],
+        };
+        let timings = super::Timings::from_iter([
+            ("preprocess".to_owned(), 16.3),
+            ("matching".to_owned(), 12.0),
+            ("assembly".to_owned(), 1.8),
+            ("refine".to_owned(), 20.3),
+        ]);
+        let stats = Vec::new();
+        let params = Params::default();
+
+        let md = report_markdown(&stats, 3.75, &outcome, &timings, &params);
+        let tail: Vec<&str> =
+            md.lines().skip_while(|l| *l != "## Timing").skip(2).collect::<Vec<&str>>();
+        assert_eq!(
+            tail,
+            ["- preprocess: 16.3 s", "- matching: 12.0 s", "- assembly: 1.8 s", "- refine: 20.3 s"]
+        );
+
+        let stages = ["preprocess", "matching", "assembly", "refine"];
+        let json = report_json(&stats, 3.75, &outcome, &timings, &params, "cpu");
+        assert_eq!(json.timings.keys().collect::<Vec<&str>>(), stages);
+
+        // And serde writes the object in that order rather than the type merely holding it.
+        let text = serde_json::to_string(&json).expect("report serialises");
+        let at = text.find("\"timings\"").expect("a timings object");
+        let at = stages.map(|k| text[at..].find(k).expect("the stage"));
+        assert!(at.windows(2).all(|w| w[0] < w[1]), "{text}");
+    }
+
     /// A candidate flattens into `report.json` exactly as `Candidate.to_json()` does: the five
     /// named keys plus every score at the top level, and `reason` only on a rejection.
     #[test]

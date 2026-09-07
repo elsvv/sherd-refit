@@ -658,11 +658,38 @@ Two more places where the table is narrower than it sounds:
 | stage 1, stage 2 — distribution (a measurement beside the worst case) | `p50`, `p90`, `p99` and `max` of the same pose deviations over every candidate of the dump | the row's own tolerance | — |
 | stage 1, stage 2 — `chaotic` (an alarm, not a parity requirement) | share of candidates whose own ladder moves further than the row's tolerance when the initial pose moves by one ULP; and, exactly, how many of those the reference itself kept | ≤ 0.002 / ≤ 0.06 per dump and ≤ 0.06 / ≤ 0.4 per pair; zero kept | — |
 | pair result | (the `candidates` row above) | — | **a regression alarm, not a parity claim** (see below): share of pairs returning a different candidate count ≤ 0.4; share accepted by one side only ≤ 0.25 each; share of both-accepted pairs placed more than a wall apart ≤ 0.25; on the rest, median rotation ≤ 1° and median displacement of the moving fragment ≤ 0.3 t |
-| assembly (R §8) | groups; joins used; rejections **with the reference's own reason string**; poses, before and after R §8.2; R §8.2's recentring against `transforms.json` | identical; identical; identical; 1e-9 t; 1e-9 t | **PMC-8 alone** — the reference's candidates on the port's own samples: identical, identical, identical, 1e-9 t. Then, from the port's own candidates, **a regression alarm**: share of the used-join union belonging to one side ≤ 0.5 each; largest group within 4 fragments; every used join inside a group |
+| assembly (R §8) | groups; joins used; rejections **with the reference's own reason string**; poses, before and after R §8.2; R §8.2's recentring against `transforms.json` | identical; identical; identical; 1e-9 t; 1e-9 t | **PMC-8 alone** — the reference's candidates on the port's own samples: identical, identical, identical, 1e-9 t. Then, from the port's own candidates, **a regression alarm**: **at most 12 joins** used by one side and not the other; largest group within **8** fragments; every used join inside a group |
 | refine (R §9) | the vertex selection `refine/<name>.idx`; the walk's order; the two correspondence radii; the pose after **each** rung; `fitness` and `inlier_rmse`; relative poses within a group | exact; exact; exact; 0.2° / 0.02 t; 1e-4 and 0.02 t; 0.2° / 0.02 t | the same, with one row split: above R §9's 150 000-vertex cap PMC-9 gives the two sides different draws, so the selection is compared as "every index the reference kept is one the port's predicate accepted" (exact) plus an overlap within 0.05 of `150000/|candidates|`, and `fitness` — a Bernoulli fraction *of the cloud* — is gated at 0.008, about 5.6 σ of that sampling noise |
-| outputs (R §11) | `transforms.json` — `thickness`, the groups, every `group` and `placed` flag, `params`, the poses; `report.json` — the whole file through the port's own type, and the candidate list through the port's own serialiser; `placed/<name>.ply` and `assembly_<k>.ply`; `preview_*.png` | exact; exact; **SHA-256 identical**, with size, both counts and the colour flag compared on every set; **pixel for pixel** | the port's own principal axis against the reference's (PMC-10, 1°); two renders of one input identical; a `transforms.json` written and read back |
+| outputs (R §11) | `transforms.json` — `thickness`, the groups, every `group` and `placed` flag, `params`, the poses; `report.json` — the whole file through the port's own type, and the candidate list through the port's own serialiser; **`report.md` line for line**; `placed/<name>.ply` and `assembly_<k>.ply`; `preview_*.png` | exact; exact; **1e-9 t**; **exact, down to `## Timing`**; **SHA-256 identical**, with size, both counts and the colour flag compared on every set; **pixel for pixel** | the port's own principal axis against the reference's (PMC-10, 1°); two renders of one input identical; a `transforms.json` written and read back |
 
 The tool exits non-zero on any violation and prints a per-stage table.
+
+**Three of those numbers were changed by the steps that measured them, and this is where they are
+written down** (task Y, defect V4-D6 of the phase-1d verification; the rule is step X's — a
+tolerance the harness enforces is a tolerance this section states, with its derivation).
+
+* **`assembly`, native, the used-join alarm is an absolute count and not a share.** The row asked
+  for "share of the used-join union belonging to one side ≤ 0.5 each". A share is degenerate where
+  one side used *nothing*: on pot_G the reference accepts no join at seed 0, so any join of the
+  port's own is 100 % of the union and the alarm fires on a collection where the reference itself
+  has nothing to say. The harness enforces **≤ 12 joins** used by one side alone, twice the
+  measured worst over the eight dumps (6 joins the reference uses and the port does not, on
+  synthetic_20; 2 the other way on pot_G, pot_H and synthetic_20) — the same "twice the measured
+  worst" shape the PMC-6 tie rows above already use.
+* **`assembly`, native, the largest group is within 8 fragments and not 4.** Measured worst: 4, on
+  synthetic_20 (the port's largest group holds 15 where the reference's holds 19); the gate is
+  twice it, as everywhere else in this column.
+* **`outputs`, injected, `transforms.json`'s poses are `1e-9 t` and not "exact".** A pose in that
+  file is a chain of 4×4 products through R §8, R §9 and R §8.2, and no two matrix kernels give
+  bit-identical chains; the row is the same `1e-9 t` the `assembly` row's own pose rows carry, and
+  it is met by seven orders of magnitude (V4-D10 took the worst of the eight dumps from 7.0e-13 t
+  to **0**).
+
+`report.md` joins the injected column with task Y: the port renders R §11.3 from the reference's
+own `report.json` and the two files are diffed **line for line**, which gates every heading, every
+column, every rounding and the legend's Python floats. The comparison stops at `## Timing` — those
+are wall-clock seconds and the dump nulls them — while the *order* of that block is R §11.2's and
+is checked in `sherd-core`'s own tests.
 
 **The last two rows read the outputs the dump does not carry, and a second Python tool writes
 them** (step D2). `tools/dump_fixtures.py` runs the pipeline with `preview=False` and
@@ -673,7 +700,11 @@ out of `outputs/transforms.json`, and the two writers called being the reference
 leaves behind `outputs/placed.sha256.json` (a SHA-256, a size and the two counts per file, plus
 the hash of every fragment's mesh *as `load_mesh` leaves it*), `outputs/preview_<k>.png`, the same
 render with the caption left off, `outputs/preview_<k>.meta.json` (the views, which PMC-10 makes
-library-defined) and the `pick`/`u`/`v` of every sample it drew. The port renders from those and
+library-defined), the `pick`/`u`/`v` of every sample it drew, and `outputs/report.md` — R §11.3
+rendered from the dump's own `report.json` by the reference's own writer, with an empty `## Timing`
+block because the dump carries no wall clock. **It then rewrites `manifest.json`**, so that
+`--verify-checksums` covers what it wrote; until task Y it did not, and the twenty files of the
+committed slab dump went unhashed while the check reported "all 180 files match" (V4-D1). The port renders from those and
 compares pixels; a dump without them makes the row skip, with the command to run in the message.
 The committed `fixtures/slab/dump` carries them at 20 000 samples per fragment so that the
 renderer and the PLY writer have a regression fixture in the repository.

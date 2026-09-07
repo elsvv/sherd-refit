@@ -799,11 +799,24 @@ harness, and (b) statistical tolerances on the natively sampled path (§13).
 
 ```
 { "thickness", "fragments": [stats() per fragment in collection order], "groups", "params",
-  "timings": {"preprocess", ["screen"], "matching", "assembly", ["second_pass"], ["refine"], "output"},
+  "timings": {"preprocess", ["screen"], "matching", "assembly", ["second_pass"], ["refine"]},
   "joins_used": [candidate JSON…], "joins_rejected": [candidate JSON + "reason"], "candidates": [candidate JSON…] }
 candidate JSON = { "a", "b", "T": 4×4 lists, "accepted", "score", <every score key as float> }
 ```
 `candidates` are in pair order, best first within a pair.
+
+**`"output"` is not written, and this line used to say it was.** `write_report` serialises the
+`timings` dict with `json.dump` *before* `pipeline.run` sets `timings["output"]`, so no
+`report.json` and no `report.md` the reference has ever written carries that key. Verified on the
+reference's own runs (`output/fixtures/*/_run/report.json` hold
+`['preprocess', 'matching', 'assembly', 'refine']`), and the port follows the code rather than this
+list (V4's §2.3, task Y).
+
+Both objects are Python dicts written by `json.dump`, so **their key order is insertion order**:
+`timings` comes out in the order the stages finished — `preprocess`, then `screen` when it ran,
+`matching`, `assembly`, `second_pass`, `refine` — and §11.1's `fragments` in the order §8's greedy
+loop filled `poses` (each seed's two fragments, then every placement, then the singletons in
+collection order). A port that sorts either by name writes a different file (V4-D4, V4-D5).
 
 ### 11.3 `report.md`
 

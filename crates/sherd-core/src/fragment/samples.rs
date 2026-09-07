@@ -223,7 +223,11 @@ pub fn build(
     // Measured on the *narrowed* samples, so that `margin_idx` is a function of the arrays the
     // cache holds and of nothing wider (module documentation).
     let surface: Vec<[f64; 3]> = s.iter().map(|p| p.to_f64()).collect();
-    let d_brk = breakline_distance(&surface, brk_points);
+    // [`margin_indices`] reads `d_brk` only as `inner < d < outer`, so a distance at or beyond
+    // `outer` need not be computed exactly: `∞ < outer` is the same `false`. Bounding the sweep
+    // is what R §3.5.6 costs on a 200 000-face mesh — 20 000 samples against a breakline of a few
+    // thousand points, most of them nowhere near it (`notes/2026-09-07-e2-tuning.md` §5).
+    let d_brk = breakline_distance_below(&surface, brk_points, MARGIN_OUTER * params.t);
     let margin = margin_indices(&sp, labels, &d_brk, params);
     let mut rng = rng::seeded_for(params.seed, Draw::Margin);
     let margin_idx = subsample(&margin, params.margin_points as usize, &mut rng);
@@ -384,6 +388,27 @@ pub fn breakline_distance(queries: &[[f64; 3]], brk_points: &[[f64; 3]]) -> Vec<
         return vec![f64::INFINITY; queries.len()];
     };
     queries.par_iter().map(|q| tree.nearest_distance(q).1).collect()
+}
+
+/// [`breakline_distance`] with everything at or beyond `bound` reported as `∞`.
+///
+/// The two agree wherever the answer is below `bound` and differ nowhere a caller can see, as
+/// long as that caller only ever compares the distance against a threshold no larger than
+/// `bound` — which is R §3.5.6's `d_brk < 1.5 t` and the only reader in the port. The parity
+/// harness keeps [`breakline_distance`] because it compares the array itself against the
+/// reference's.
+pub fn breakline_distance_below(
+    queries: &[[f64; 3]],
+    brk_points: &[[f64; 3]],
+    bound: f64,
+) -> Vec<f64> {
+    let Some(tree) = PointTree::build(brk_points) else {
+        return vec![f64::INFINITY; queries.len()];
+    };
+    queries
+        .par_iter()
+        .map(|q| tree.nearest_below(q, bound).map_or(f64::INFINITY, |(_, d)| d))
+        .collect()
 }
 
 /// R §3.5.6's margin: `np.where(¬frac[sp] ∧ 0.12 t < d_brk < 1.5 t)`, ascending.
@@ -595,8 +620,8 @@ fn round_half_even(x: f64) -> f64 {
 mod tests {
     use super::{
         MARGIN_INNER, MARGIN_OUTER, MatchData, REG_POINTS, SampleParams, Samples,
-        breakline_distance, build, fracture_count, margin_indices, masked_area, registration_cloud,
-        round_half_even, sample_on_faces, subsample,
+        breakline_distance, breakline_distance_below, build, fracture_count, margin_indices,
+        masked_area, registration_cloud, round_half_even, sample_on_faces, subsample,
     };
     use crate::mesh::geometry::face_geometry;
     use crate::rng::{Draw, seeded, seeded_for};
@@ -718,6 +743,46 @@ mod tests {
         assert_eq!(d, vec![f64::INFINITY; 2]);
         let d = breakline_distance(&[[0.0, 0.0, 3.0]], &[[0.0, 0.0, 0.0], [0.0, 4.0, 0.0]]);
         assert!((d[0] - 3.0).abs() < 1e-12);
+        let d = breakline_distance_below(&[[0.0, 0.0, 0.0]], &[], 1.0);
+        assert_eq!(d, vec![f64::INFINITY]);
+    }
+
+    /// The bounded sweep is the exact one wherever the exact one is under the bound, and `∞`
+    /// everywhere else — which is what makes R §3.5.6's `d_brk < 1.5 t` read the same either way.
+    #[test]
+    #[allow(clippy::float_cmp, reason = "the claim is bit equality, which is what is asserted")]
+    fn the_bounded_breakline_distance_is_the_exact_one_under_its_bound() {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            #[allow(clippy::cast_precision_loss, reason = "a 53-bit mantissa from a 64-bit word")]
+            let unit = (state >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0);
+            unit * 10.0 - 5.0
+        };
+        let brk: Vec<[f64; 3]> = (0..200).map(|_| [next(), next(), next()]).collect();
+        let queries: Vec<[f64; 3]> = (0..2000).map(|_| [next() * 2.0, next(), next()]).collect();
+        let exact = breakline_distance(&queries, &brk);
+        let mut inside = 0_usize;
+        for bound in [0.1, 0.5, 1.0, 2.5, 100.0] {
+            let bounded = breakline_distance_below(&queries, &brk, bound);
+            for (k, &d) in exact.iter().enumerate() {
+                if d < bound {
+                    assert_eq!(bounded[k], d, "query {k} at bound {bound}");
+                    inside += 1;
+                } else {
+                    assert_eq!(bounded[k], f64::INFINITY, "query {k} at bound {bound}");
+                }
+                // The predicate R §3.5.6 actually applies is the same on both arrays.
+                assert_eq!(
+                    bounded[k] > 0.05 && bounded[k] < bound,
+                    d > 0.05 && d < bound,
+                    "query {k} at bound {bound}"
+                );
+            }
+        }
+        assert!(inside > 1000, "the sweep should mostly answer, not {inside}");
     }
 
     /// The thinning keeps a sorted subset, draws nothing when it does not have to, and is seeded.

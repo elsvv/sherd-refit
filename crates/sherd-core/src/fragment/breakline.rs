@@ -239,8 +239,23 @@ pub fn build_with(
     // --- R §3.5.4: the macro normals -----------------------------------------------------------
     // The distance from every face centroid to the nearest breakline point, which is what selects
     // the annulus. The reference queries it once per macro normal; it does not depend on the mask.
-    let distance: Vec<f64> =
-        geom.centroids.par_iter().map(|c| tree.nearest_distance(c).1).collect();
+    //
+    // [`macro_normals`] reads this array **only** as `distance[i] >= inner`, and nothing else in
+    // the module reads it at all, so the exact distance is needed only where it is *below* that
+    // threshold: `nearest_below(c, inner)` answers `Some(d)` exactly when `d < inner` and `None`
+    // otherwise, and `∞ >= inner` is the same `true` the exact distance would have given. The
+    // bound is what makes this affordable — a 200 000-face working mesh has 200 000 centroids and
+    // a breakline of a few thousand points, so nearly every centroid is far from it, and an
+    // *unbounded* nearest-neighbour search has to find the true nearest however far away it is.
+    // Task E2 measured the rebuild of one fragment's arrays at a partner's `t` at 22.7 core-s of
+    // synthetic 20's 169, almost all of it this line
+    // (`notes/2026-09-07-e2-tuning.md` §5).
+    let inner = params.macro_inner * params.t;
+    let distance: Vec<f64> = geom
+        .centroids
+        .par_iter()
+        .map(|c| tree.nearest_below(c, inner).map_or(f64::INFINITY, |(_, d)| d))
+        .collect();
     let ns = macro_normals(geom, labels, false, &points, &distance, params);
     let nf = macro_normals(geom, labels, true, &points, &distance, params);
 

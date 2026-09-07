@@ -1,12 +1,15 @@
 # sherd-refit — frozen algorithm reference
 
-**Date:** 2026-09-07. **Reference implementation:** `sherd_refit/*.py` at commit `09fb4d4`
+**Date:** 2026-09-07. **Reference implementation:** `sherd_refit/*.py` at commit `895a948`
 (branch `rust-core`), running on Open3D 0.19.0, numpy 2.5.2, scipy ≥ 1.11, Python 3.12.
 The document was frozen at `9d4b9d3`; the one algorithm change made since is `fbfebca`, §3.2's
-deterministic ray set (task T1, dated addendum at the end of §12), and `9347cfe` added the sample
-uniforms to the fixture dump without touching what the pipeline computes. **The parity fixtures are
-regenerated from `09fb4d4`** — the committed `fixtures/slab/dump` from `f0da041`, the same
-`sherd_refit/` a commit later.
+deterministic ray set (task T1, dated addendum at the end of §12). Two later commits changed the
+fixture sink and not the pipeline: `9347cfe` added the sample uniforms, and `895a948` hoisted the
+two NMS walk orders into the dump (§12.1's C1 addendum). **The parity fixtures are the seven
+`output/fixtures` sets regenerated from `895a948`, and the committed `fixtures/slab/dump` from
+`9cbcbbc`** — `git diff 9cbcbbc 895a948 -- sherd_refit/` is empty, so both carry the same
+reference. Each dump's `manifest.json` records which commit wrote it, and all eight say
+`dirty: false` (D §10.1).
 **Purpose:** the algorithm exactly as the Python computes it, stage by stage, so that the Rust
 port can be implemented and verified from this document alone. Where the design spec
 (`2026-09-05-fracture-reassembly-design.md`) and the code differ, the code is authoritative and
@@ -879,6 +882,8 @@ Not part of the contract. `timings` keys are listed in §11.2.
 | PMC-15 | working mesh, `res` and everything derived from them in float64 (§0) | numpy | store `V` and `res` as **float32** and derive `FN`, `A`, `C` from the *narrowed* vertices, so a cold run and a cache hit are bit-identical (D §4.1, D §7); everything up to the narrowing — Taubin, `face_geometry`, `median_edge`, `ΣA` — stays float64 | working-mesh row of D §10.2 in native mode (`res` ±10 %, area ±0.5 %); the ≈6e-8 relative error enters every §1.2 threshold and every ICP residual, so the pair gates of §13 are the real check |
 | PMC-16 | `near[i]` (§3.4.1) from `scipy.spatial.cKDTree.query`, whose tie rule between two equidistant representatives is unspecified | library | any KD-tree, ties resolved by the lowest index (`kiddo`'s observed behaviour, which it does not document as a guarantee) | injected `rep face` and `near` agreement in D §10.2's segmentation row (measured exactly 0 on all 68 fixture fragments — no fixture has a tie — so the first symmetric synthetic mesh is what will exercise it) |
 | PMC-17 | first-hit ray casts (§3.2, §3.4.3) through Open3D's `RaycastingScene`, i.e. Embree in `float32` | library | any `f32` BVH ray cast (`parry3d` 0.30 `CompositeShapeRef::cast_local_ray`), which disagrees with Embree on hit/miss or on the primitive id for a ray that grazes an edge | injected `votes/face` in D §10.2's segmentation row and the injected thickness row; measured at 2 hit/miss disagreements and 5 differing primitive ids over 7.87 M cone rays (experiment E4), absorbed completely by §3.4's cleanup (`raw mask` agreement 1.0) |
+| PMC-18 | §7's pose update is composed as **quaternions**: `utility::TransformationMatrixFromPoseVector` writes `(AngleAxisd(x₂,Z) · AngleAxisd(x₁,Y) · AngleAxisd(x₀,X)).matrix()`, and Eigen's `operator*` on two `AngleAxis` converts both to quaternions, multiplies, and converts once at the end | library | §7's matrix product `Rz(x₂)·Ry(x₁)·Rx(x₀)`, which is the same rotation and not the same arithmetic | the two compositions swept over the angles an ICP update produces (1e-1 down to 1e-12 rad, both signs): worst entry **3.3e-16, 1.5 ULP of 1**, which moves a sample 885 units from the origin by 4.4e-13 units = **1.9e-13 t** on the thinnest benchmark wall (`matching/icp.rs`'s own test). The accumulated effect over a whole ladder is the injected `stage 1` and `stage 2` pose rows of D §10.2, and the `chaotic` rows are where an ULP is not bounded at all |
+| PMC-19 | `np.linalg.inv(T)` (§6.1, §6.4) is LAPACK's `dgetrf` + `dgetri` through numpy | library | the same factorisation — partial pivoting on the largest remaining column, first index on a tie, then two triangular solves per column — written out in `matching/verify.rs::pose_inverse` so that it is the same arithmetic on every machine (D §7) | the two inverses applied to the fixtures' own clouds at the fixtures' own 2 239 stage-2 poses: **2.7e-14 t at the median, 1.5e-13 t at p99, 1.2e-11 t at the worst**, the tail belonging to candidates whose ICP diverged to `‖τ‖ = 1.8e5` where `cond(T)` reaches 3.3e10. A test pins one real stage-2 pose against numpy's own answer at 4 ULP |
 
 ### 12.1 Addenda (changes made after the freeze at `9d4b9d3`)
 
@@ -959,6 +964,40 @@ own order on every pair. PMC-11's and PMC-12's "equivalent formulation" clauses 
 implements (an AABB reject and a parity test before any distance; a bounded closest point with
 `r_max = sc.facing`), and both come out identical rather than merely close. PMC-7 is the one row
 with a residual, and §6.4 above now says where it lives.
+
+**2026-09-07, task X — closing the phase-1c verification: three corrections, two new rows, and
+one boundary bug.** `notes/2026-09-06-phase1c-verification.md` listed twelve defects and
+`notes/2026-09-07-x-phase1c-findings.md` records what each became. Three were transcriptions of
+loops this document freezes, and the port now reads them as written: §5.4's `int(np.argmax(s1))`
+takes the **first** maximum as numpy does (the port took the last, and `s1` is a mean of booleans
+so ties are ordinary); §5.3's loop appends before it tests `len(kept) ≥ topk`, so the reference
+keeps **one** pose at `topk = 0` and the port kept none; and §5.4's floor branch precedes any use
+of a BVH, as the reference's lazy `frac_scene` does. None is reachable with the shipped parameters.
+
+Two substitutions the port had made without a row are now measured, and the team rule was to
+record anything at or under 1e-12 t and to match the reference above it. §7's Euler composition
+came in at 1.9e-13 t and is **PMC-18**. §6's inverse did not: `[Rᵀ | −Rᵀτ]` sat 6.2e-11 t from
+`np.linalg.inv` at the worst, because a pose that has climbed two ICP ladders is orthonormal only
+to 2.6e-14 and a sample is up to 885 units from the origin, so the port now runs the reference's
+own factorisation and **PMC-19** carries what is left of it (1.2e-11 t at the worst, on candidates
+whose ICP diverged).
+
+The third substitution — a radius-bounded nearest-neighbour search where §5.2, §6.2 and §6.3 read
+an unbounded `cKDTree.query` and then test `d < r` — needs no row, because it is provably the same
+answer and the proof is now in `spatial/kdtree.rs::nearest_below`: pruning cannot change the
+winner, since a node is dropped only when its box is further than the radius and no such node can
+hold a point at a minimum that is itself under the radius. Writing that proof out found a real
+defect in the old form. `nearest_within` compares `d² ≤ radius · radius`, the product rounds, and a
+point at exactly `radius` came back as a **miss** — so the port could drop a neighbour the
+reference's strict test would have kept. `nearest_below` widens the square by its own rounding and
+applies `d < bound` itself. No fixture had a query on the boundary; the new sweep test does.
+
+Also corrected: this document's header named the wrong fixture commits (see it), and R §7's
+`solve_ldlt` claimed Eigen's pivot permutation was a *stable* descending sort. It is a selection
+sort by transpositions, which agrees with a stable sort on distinct diagonal entries and not on a
+tie; the port runs Eigen's loop now. What was right about the claim is kept and now says why: the
+left-looking factorisation decrements `mat(k, k)` only at step `k`, after `k` has been chosen, so
+the values compared are the original diagonal's.
 
 ## 13. Reference results and parity gates
 

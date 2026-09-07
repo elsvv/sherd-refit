@@ -750,8 +750,19 @@ fn solve_ldlt(a: &[[f64; 6]; 6], b: &[f64; 6]) -> Option<[f64; 6]> {
 
 /// R §7's `Rz(γ)·Ry(β)·Rx(α)`.
 ///
-/// Eigen composes the three `AngleAxis` factors as quaternions and converts once; the matrix
-/// product below is the same rotation to about an ulp, and it is the form R §7 states.
+/// **This is not the expression Open3D evaluates, and R §12.1 carries the row that licenses it.**
+/// `utility::TransformationMatrixFromPoseVector` writes
+/// `(AngleAxisd(x₂, UnitZ()) * AngleAxisd(x₁, UnitY()) * AngleAxisd(x₀, UnitX())).matrix()`, and
+/// Eigen's `operator*` on two `AngleAxis` converts both to quaternions, multiplies those, and
+/// converts the product to a matrix once at the end. The two are the same rotation and they are
+/// not the same arithmetic: measured over a sweep of the angles an ICP update produces, the worst
+/// entry differs by 3.3e-16 — **1.5 ULP of 1** — which moves the furthest sample of these scans
+/// (885 units from the origin) by 4.4e-13 units, **1.9e-13 t** on the thinnest wall of the
+/// benchmark (`notes/2026-09-07-x-phase1c-findings.md` §4, and the test below).
+///
+/// The matrix product is kept because it is the form R §7 states and because the difference is an
+/// ULP either way; what changed is that R §12.1 now says so instead of R §7 implying the two are
+/// the same expression.
 fn euler_zyx(alpha: f64, beta: f64, gamma: f64) -> Matrix3<f64> {
     let (sa, ca) = alpha.sin_cos();
     let (sb, cb) = beta.sin_cos();
@@ -1014,6 +1025,101 @@ mod tests {
             assert!(angle < 0.05, "{numerics:?}: {angle:e} degrees");
             assert!(distance < 0.01, "{numerics:?}: {distance:e}");
         }
+    }
+
+    /// Eigen's own composition, written out: three `AngleAxis` as quaternions, one Hamilton
+    /// product each, and `Quaternion::toRotationMatrix` at the end.
+    ///
+    /// This is what `utility::TransformationMatrixFromPoseVector` evaluates, and it is transcribed
+    /// here — the half-angle sines, Eigen's `quat_product` term order, and its `1 − (tyy + tzz)`
+    /// matrix formulas — so that the deviation R §12.1 licenses can be measured rather than
+    /// asserted.
+    #[allow(clippy::many_single_char_names, reason = "a quaternion's components are w, x, y, z")]
+    fn eigen_quaternion_zyx(alpha: f64, beta: f64, gamma: f64) -> Matrix3<f64> {
+        // `Quaternion(AngleAxis)`: w = cos(θ/2), vec = sin(θ/2)·axis.
+        let axis_angle = |half: f64, axis: usize| {
+            let (s, c) = half.sin_cos();
+            let mut q = [c, 0.0, 0.0, 0.0];
+            q[axis + 1] = s;
+            q
+        };
+        // Eigen's `quat_product`, term for term.
+        let product = |a: [f64; 4], b: [f64; 4]| {
+            [
+                a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+                a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+                a[0] * b[2] + a[2] * b[0] + a[3] * b[1] - a[1] * b[3],
+                a[0] * b[3] + a[3] * b[0] + a[1] * b[2] - a[2] * b[1],
+            ]
+        };
+        let qz = axis_angle(0.5 * gamma, 2);
+        let qy = axis_angle(0.5 * beta, 1);
+        let qx = axis_angle(0.5 * alpha, 0);
+        let q = product(product(qz, qy), qx);
+        let (w, x, y, z) = (q[0], q[1], q[2], q[3]);
+        let (tx, ty, tz) = (2.0 * x, 2.0 * y, 2.0 * z);
+        let (twx, twy, twz) = (tx * w, ty * w, tz * w);
+        let (txx, txy, txz) = (tx * x, ty * x, tz * x);
+        let (tyy, tyz, tzz) = (ty * y, tz * y, tz * z);
+        Matrix3::new(
+            1.0 - (tyy + tzz),
+            txy - twz,
+            txz + twy,
+            txy + twz,
+            1.0 - (txx + tzz),
+            tyz - twx,
+            txz - twy,
+            tyz + twx,
+            1.0 - (txx + tyy),
+        )
+    }
+
+    /// R §7's matrix product against Open3D's quaternion composition (defect D8, PMC-18).
+    ///
+    /// The angles an ICP update produces run from a few tenths of a radian on the first iteration
+    /// of a coarse rung down to 1e-12 on the last, so the sweep covers eleven decades and both
+    /// signs, and the worst is reported in the units the parity rows use: a displacement of the
+    /// furthest sample of these scans, 885 units from the origin, in wall thicknesses of the
+    /// thinnest benchmark wall (2.36 on `pot_G`).
+    #[test]
+    fn the_quaternion_composition_and_the_matrix_product_agree_to_a_few_ulp() {
+        const RADIUS: f64 = 885.0;
+        const THINNEST_WALL: f64 = 2.36;
+        let mut worst_entry = 0.0_f64;
+        let mut worst_move = 0.0_f64;
+        for k in 0..11 {
+            let scale = 10.0_f64.powi(-k);
+            for (i, j, l) in
+                [(1, 2, 3), (7, -3, 11), (-5, 9, -2), (13, 17, -19), (1, -1, 1), (31, -7, 23)]
+            {
+                let (a, b, g) = (
+                    f64::from(i) * 0.1 * scale,
+                    f64::from(j) * 0.1 * scale,
+                    f64::from(l) * 0.1 * scale,
+                );
+                let matrix = euler_zyx(a, b, g);
+                let quaternion = eigen_quaternion_zyx(a, b, g);
+                let delta = matrix - quaternion;
+                worst_entry = worst_entry.max(delta.abs().max());
+                // The furthest a point at `RADIUS` can be moved by the difference of the two
+                // rotations is the largest singular value of the difference; its Frobenius norm
+                // bounds that and needs no decomposition.
+                worst_move = worst_move.max(delta.norm() * RADIUS);
+            }
+        }
+        println!(
+            "D8: worst entry {:e} ({:.1} ULP of 1), worst move {:e} units = {:e} t",
+            worst_entry,
+            worst_entry / f64::EPSILON,
+            worst_move,
+            worst_move / THINNEST_WALL
+        );
+        assert!(worst_entry < 4.0 * f64::EPSILON, "worst entry {worst_entry:e}");
+        assert!(
+            worst_move / THINNEST_WALL < 1e-12,
+            "worst displacement {:e} t",
+            worst_move / THINNEST_WALL
+        );
     }
 
     /// The Euler composition is `Rz·Ry·Rx` and not any other order, and the 6×6 solve is a solve.

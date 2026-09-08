@@ -238,10 +238,22 @@ impl GpuExecutor {
     /// memory bandwidth with the cores it is supposed to be running alongside, and no scheduler
     /// fixes it.
     ///
+    /// **Task G4 tuned the two thresholds that decide how much of that envelope the device is
+    /// given** — `coarse::MAX_QUERIES` and the cap on `device_slack` below — and re-measured the
+    /// same seven collections the same way:
+    ///
+    /// | terracotta | pot_A | pot_B | pot_C | pot_G | pot_H | synthetic_20 |
+    /// |---|---|---|---|---|---|---|
+    /// | 1.07× | 1.26× | **1.43×** | 1.13× | 1.09× | 1.10× | **1.28×** |
+    ///
+    /// `synthetic_20`, the collection where the device has real work to do, moves 1.08 → 1.28×;
+    /// the range is 1.07–1.43× against G3's 1.04–1.40×. That is [`selftest::STAGE_SPEEDUP`], and
+    /// it is what `info` and this constant quote.
+    ///
     /// So `Auto` keeps the CPU and says why, `--backend gpu` runs the kernels for anyone measuring
     /// them, and this constant flips when a *measured* 1.5× exists — which on this machine would
     /// take a kernel for R §6 that does not have to share, or a discrete GPU that does not share
-    /// at all. D §6.8's bar is 1.5×; the honest measurement is 1.04–1.40×.
+    /// at all. D §6.8's bar is 1.5×; the honest measurement is 1.07–1.43×.
     pub const AUTO_ELIGIBLE: bool = false;
 
     /// How many worker threads the matching stage runs beyond `--threads`: **half as many again**
@@ -265,6 +277,30 @@ impl GpuExecutor {
     /// A fraction rather than a constant, because what it covers scales with the number of
     /// workers. Half is the measured shape: at `--threads 9` the pool then holds 14, and the
     /// profile that motivated it showed 4.9 of ten cores working with 18.
+    ///
+    /// **Task G4 measured the other end of the same curve and put a cap on it.** G3 measured the
+    /// slack at `--threads` 1, 4 and 9 — the rows above — and read "1.00× at nine" as *free*. It
+    /// is not free; it is the top of a hill. Sweeping the slack alone at the default
+    /// `--threads 9`, three warm runs each on `synthetic_20`, matching-stage medians:
+    ///
+    /// | slack | 0 | 1 | 2 | 3 | **5 (G3's)** | 8 |
+    /// |---|---|---|---|---|---|---|
+    /// | pool | 9 | **10** | 11 | 12 | 14 | 17 |
+    /// | matching | 12.84 s | **12.43 s** | 12.03 s | 12.87 s | **13.80 s** | 14.05 s |
+    /// | device outstanding | 8.3 s | 8.2 s | 8.4 s | 9.3 s | 9.7 s | 10.0 s |
+    ///
+    /// The minimum is broad — anything from 10 to 12 workers is inside the run-to-run spread —
+    /// and 14 is outside it, by 11 %. The reason is task G3 §5's envelope read from the pool's
+    /// side: a worker waiting on the device is not using a core, so a *few* extra workers cost
+    /// nothing and cover the wait; but once the pool is deeper than the machine, the extra ones
+    /// are not covering a wait at all, they are adding a concurrent batch to a device that gets
+    /// slower the busier the cores beside it are.
+    ///
+    /// So the fraction stays and [`Executor::device_slack`] caps its result at one worker per core
+    /// plus one waiting on the device: `min(⌈threads/2⌉, cores + 1 − threads)`, never below one.
+    /// That reproduces every row G3 measured — `--threads 1` still gets a pool of 2 and
+    /// `--threads 4` a pool of 6 on this ten-core machine — and takes the default from 14 workers
+    /// to 11, which is where the table above has its minimum.
     pub const SLACK_NUMERATOR: usize = 1;
     /// The denominator of [`GpuExecutor::SLACK_NUMERATOR`]'s fraction.
     pub const SLACK_DENOMINATOR: usize = 2;
@@ -329,7 +365,14 @@ impl GpuExecutor {
 impl Executor for GpuExecutor {
     fn device_slack(&self) -> usize {
         let threads = rayon::current_num_threads();
-        (threads * Self::SLACK_NUMERATOR).div_ceil(Self::SLACK_DENOMINATOR).max(1)
+        let wanted = (threads * Self::SLACK_NUMERATOR).div_ceil(Self::SLACK_DENOMINATOR);
+        // The slack covers a wait, and one worker per core plus one waiting on the device is as
+        // far as that goes; past it the extra workers are not covering a wait, they are adding a
+        // concurrent batch to a device that gets slower the busier the cores are (see
+        // `SLACK_NUMERATOR`).
+        let cores =
+            std::thread::available_parallelism().map_or(threads, std::num::NonZero::get).max(1);
+        wanted.min((cores + 1).saturating_sub(threads)).max(1)
     }
 
     fn name(&self) -> &'static str {
@@ -402,9 +445,32 @@ mod tests {
         const {
             assert!(
                 !GpuExecutor::AUTO_ELIGIBLE,
-                "measured: matching is 1.04-1.40x, under D §6.8's 1.5x bar"
+                "measured: matching is 1.07-1.43x, under D §6.8's 1.5x bar"
             );
         }
+    }
+
+    /// The slack is capped at the cores the pool has not already claimed (task G4).
+    ///
+    /// A unit test of the arithmetic rather than of `device_slack` itself, because that reads
+    /// rayon's current pool and this machine's core count; the rule is the same expression.
+    #[test]
+    fn the_slack_covers_a_wait_and_never_oversubscribes_the_machine() {
+        fn slack(threads: usize, cores: usize) -> usize {
+            let wanted =
+                (threads * GpuExecutor::SLACK_NUMERATOR).div_ceil(GpuExecutor::SLACK_DENOMINATOR);
+            wanted.min((cores + 1).saturating_sub(threads)).max(1)
+        }
+        // Task G3's three measured rows on this ten-core machine are reproduced exactly.
+        assert_eq!(1 + slack(1, 10), 2, "--threads 1: G3 measured 1.93x from a pool of 2");
+        assert_eq!(4 + slack(4, 10), 6, "--threads 4: G3 measured 1.36x from a pool of 6");
+        // ... and the default, which G3 left at 14 and G4 measured as 11 % past the minimum.
+        assert_eq!(9 + slack(9, 10), 11, "--threads 9: ten cores busy and one worker waiting");
+        // A pool already at or past the machine gets one waiter and no more.
+        assert_eq!(10 + slack(10, 10), 11);
+        assert_eq!(16 + slack(16, 10), 17, "--threads over the core count is the caller's choice");
+        // A machine whose core count cannot be read is not a reason to return zero.
+        assert_eq!(slack(1, 1), 1);
     }
 
     /// The counters are per method, and a device error counts as a delegation as well as an

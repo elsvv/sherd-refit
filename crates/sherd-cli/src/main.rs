@@ -108,11 +108,18 @@ struct GpuCheckArgs {
     /// cross-check of D §10.4 layer 3 wants more, because a tie that flips is rare per pair.
     #[arg(long, default_value_t = 1, value_name = "N")]
     pairs: usize,
-    /// Separate a kernel deviation from a chaotic ladder (D §10.2's `chaotic` row, task C2 §5).
+    /// Also probe the twelve one-ULP neighbours of each candidate's own initial pose (D §10.2's
+    /// `chaotic` row, task C2 §5).
     ///
     /// Every candidate's ladder is re-climbed on the CPU from the twelve initial poses one ULP
     /// from its own; a candidate whose own answer moves further than the row's tolerance under
-    /// one of them is excluded from the worst case and counted. It costs thirteen CPU ladders.
+    /// one of them is excluded from the pose rows and counted. It costs thirteen CPU ladders.
+    ///
+    /// The **other** half of the same test needs no flag and is always applied: a candidate whose
+    /// `f64` control — the same rungs, on the CPU, from the pose the device itself starts from —
+    /// is already outside the pose rows has a ladder that amplifies any `f32` input, and a
+    /// worst case over it measures the ladder rather than the kernel. So `--chaos` can only
+    /// *widen* the excused set: the run without it is the stricter of the two.
     #[arg(long)]
     chaos: bool,
     /// Apply the executor's own size thresholds instead of forcing every batch to the device.

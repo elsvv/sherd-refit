@@ -363,6 +363,16 @@ mod tolerance {
     pub(super) const DISTANCE: f64 = 0.002;
     /// `pen`, a fraction of the surface samples.
     pub(super) const INSIDE: f64 = 0.0005;
+    /// D §10.2's `chaotic` alarm for stage 1, **per pair**: the share of a pair's candidates whose
+    /// ladder is not a function of its input, so that a pose row cannot be applied to them.
+    ///
+    /// A `gpu-check` set is four pairs and not a dump, so the per-pair bound is the one that fits;
+    /// D §10.2's per-dump bounds (0.002 and 0.06) are stated over tens of thousands of candidates.
+    /// Neither number is task W's: both are C2 §5's, unchanged.
+    pub(super) const CHAOTIC_S1: f64 = 0.06;
+    /// D §10.2's `chaotic` alarm for stage 2, per pair. C2 §5 measured 3 of 10 on the worst pair
+    /// of pot_B and set the bound at 0.4.
+    pub(super) const CHAOTIC_S2: f64 = 0.4;
 }
 
 /// A deviation column: the worst, the count that moved at all, and the percentiles beside it.
@@ -374,9 +384,21 @@ mod tolerance {
 /// entry of `T0` by one ULP moves Open3D's own answer for three of `Pot_B_Piece_01__06`'s ten
 /// stage-2 candidates by 24.8°, 65.5° and 101.7°. A worst-case row over such a candidate measures
 /// the chaos and not the kernel, so this column keeps the two apart: [`Column::determined`] holds
-/// the deviations of the candidates whose own CPU ladder survives all twelve one-ULP
-/// perturbations, and it is those the tolerance is applied to. Without `--chaos` every candidate
-/// counts as determined and the row is the plain worst case.
+/// the deviations of the candidates whose ladder *is* a function of its input, and it is those the
+/// tolerance is applied to.
+///
+/// **Two things make a candidate chaotic here, and both are measured** (task W, V6-D2):
+///
+/// * **the control** — the same rungs, in `f64`, on the CPU, from the pose the device itself
+///   starts from. When *that* answer is further from the CPU's own than the row allows, the ladder
+///   has amplified an `f32` input all by itself and the kernel is only the messenger. This one
+///   costs one extra ladder per stage, so it is always measured and always applied.
+/// * **the twelve one-ULP neighbours** of the candidate's own initial pose, C2's probe, under
+///   `--chaos`. Thirteen extra climbs, so it is opt-in; without the flag the exclusion set is
+///   smaller and the criterion therefore stricter.
+///
+/// Excluded is not ignored: [`Column::chaotic`] is counted, printed in every row's tail with the
+/// worst deviation over *all* candidates beside it, and gated in its own row.
 #[cfg(feature = "gpu")]
 #[derive(Debug, Default)]
 struct Column {
@@ -624,6 +646,9 @@ pub(crate) fn check(
     let mut s2_rmse = Column::default();
     let mut s1_ctrl = Column::default();
     let mut s2_ctrl = Column::default();
+    // `(chaotic, candidates)` per pair, for D §10.2's own `chaotic` alarm row.
+    let mut s1_chaos: Vec<(usize, usize)> = Vec::new();
+    let mut s2_chaos: Vec<(usize, usize)> = Vec::new();
     let mut s1_iter = Column::default();
     let mut s2_iter = Column::default();
     let mut s1_cloud = Column::default();
@@ -688,28 +713,52 @@ pub(crate) fn check(
                             report.stage2_centre,
                         )
                     };
+                    // Which candidates a pose row may be applied to at all (V6-D2). Two things
+                    // disqualify one, and both are C2 §5's `chaotic` case: the twelve one-ULP
+                    // neighbours of its own initial pose move its own CPU answer further than the
+                    // row allows (`determined`, measured only under `--chaos`), or the **control**
+                    // does — the same rungs, in `f64`, on the CPU, from the pose the device itself
+                    // starts from. When the control alone is outside the row, the ladder has
+                    // amplified an `f32` starting pose by itself and the kernel is the messenger.
+                    let sound: Vec<bool> = cpu
+                        .iter()
+                        .zip(poses)
+                        .enumerate()
+                        .map(|(k, (c, ctrl))| {
+                            let (deg, units) = pose_deviation(&c.transform, ctrl, t);
+                            determined.get(k).copied().unwrap_or(true)
+                                && deg <= tolerance::POSE_DEG
+                                && units <= tolerance::POSE_T
+                        })
+                        .collect();
+                    let excused = sound.iter().filter(|ok| !**ok).count();
+                    if which == 1 {
+                        s1_chaos.push((excused, sound.len()));
+                    } else {
+                        s2_chaos.push((excused, sound.len()));
+                    }
+                    let sound_at = |k: usize| sound.get(k).copied().unwrap_or(true);
                     for (k, (c, g)) in cpu.iter().zip(gpu).enumerate() {
-                        let sound = determined.get(k).copied().unwrap_or(true);
                         let moved = cloud_deviation(&c.transform, &g.transform, &centre, t);
-                        cloud.push(moved, moved > 0.0, sound);
+                        cloud.push(moved, moved > 0.0, sound_at(k));
                     }
                     for (k, (c, g)) in cpu.iter().zip(gpu).enumerate() {
-                        let sound = determined.get(k).copied().unwrap_or(true);
                         #[allow(clippy::cast_precision_loss, reason = "iteration caps are small")]
                         let delta = (c.iterations as f64 - g.iterations as f64).abs();
                         iters.push(
                             delta,
                             c.iterations != g.iterations || c.converged != g.converged,
-                            sound,
+                            sound_at(k),
                         );
                     }
-                    for (k, (c, ctrl)) in cpu.iter().zip(poses).enumerate() {
-                        let sound = determined.get(k).copied().unwrap_or(true);
+                    // The control is the row that *defines* the exclusion, so it is reported over
+                    // every candidate and gates nothing: an alarm, in D §10.2's own sense.
+                    for (c, ctrl) in cpu.iter().zip(poses) {
                         let (deg, _) = pose_deviation(&c.transform, ctrl, t);
-                        control.push(deg, deg > 0.0, sound);
+                        control.push(deg, deg > 0.0, true);
                     }
                     for (k, (c, g)) in cpu.iter().zip(gpu).enumerate() {
-                        let sound = determined.get(k).copied().unwrap_or(true);
+                        let sound = sound_at(k);
                         let moved = c.transform != g.transform;
                         let (deg, units) = pose_deviation(&c.transform, &g.transform, t);
                         rot.push(deg, moved, sound);
@@ -776,14 +825,14 @@ pub(crate) fn check(
     let icp_rows = rows.len();
     if wanted("icp") {
         rows.push(s1_rot.row("icp s1 deg", tolerance::POSE_DEG));
-        rows.push(s1_ctrl.row("icp s1 ctrl", tolerance::POSE_DEG));
+        rows.push(control_row(&s1_ctrl, "icp s1 ctrl", &s1_chaos));
         rows.push(s1_iter.row("icp s1 iter", f64::INFINITY));
         rows.push(s1_disp.row("icp s1 t", tolerance::POSE_T));
         rows.push(s1_cloud.row("icp s1 t@cloud", tolerance::POSE_T));
         rows.push(s1_fit.row("icp s1 fit", tolerance::ICP));
         rows.push(s1_rmse.row("icp s1 rmse", tolerance::ICP));
         rows.push(s2_rot.row("icp s2 deg", tolerance::POSE_DEG));
-        rows.push(s2_ctrl.row("icp s2 ctrl", tolerance::POSE_DEG));
+        rows.push(control_row(&s2_ctrl, "icp s2 ctrl", &s2_chaos));
         rows.push(s2_iter.row("icp s2 iter", f64::INFINITY));
         rows.push(s2_disp.row("icp s2 t", tolerance::POSE_T));
         rows.push(s2_cloud.row("icp s2 t@cloud", tolerance::POSE_T));
@@ -791,6 +840,12 @@ pub(crate) fn check(
         rows.push(s2_rmse.row("icp s2 rmse", tolerance::ICP));
     }
     let icp_end = rows.len();
+    if wanted("icp") {
+        // Not a kernel comparison, so it stays outside the span `annotate` labels `[device]`:
+        // which candidates the pose rows had to excuse is decided entirely on the CPU.
+        rows.push(chaotic_row("icp s1 chaotic", &s1_chaos, tolerance::CHAOTIC_S1));
+        rows.push(chaotic_row("icp s2 chaotic", &s2_chaos, tolerance::CHAOTIC_S2));
+    }
     if wanted("distance") {
         rows.push(CheckRow {
             items: distance.all.len(),
@@ -846,6 +901,57 @@ pub(crate) fn check(
         ),
     });
     Ok(rows)
+}
+
+/// D §10.2's `chaotic` alarm as a `gpu-check` row: how many candidates the pose rows had to excuse.
+///
+/// D §10.2 states the shape of this row as well as its bound — *"an alarm, not a parity
+/// requirement"*, whose job (C2 §5) is "to fail if a future change makes the port chaotic where the
+/// reference is not". The bound applied is D §10.2's own **per-pair** share, because a `gpu-check`
+/// set is four pairs and its per-dump bound is stated over tens of thousands of candidates; the
+/// set-wide share is printed beside it and gates nothing.
+#[cfg(feature = "gpu")]
+fn chaotic_row(stage: &str, per_pair: &[(usize, usize)], tolerance: f64) -> CheckRow {
+    let chaotic: usize = per_pair.iter().map(|&(c, _)| c).sum();
+    let total: usize = per_pair.iter().map(|&(_, n)| n).sum();
+    #[allow(clippy::cast_precision_loss, reason = "candidate counts are far below 2^53")]
+    let share = |c: usize, n: usize| if n == 0 { 0.0 } else { c as f64 / n as f64 };
+    let worst = per_pair.iter().map(|&(c, n)| share(c, n)).fold(0.0_f64, f64::max);
+    let detail = format!(
+        "{chaotic} of {total} candidates excused over {} pair(s) ({:.3e} of the set), worst pair \
+         {worst:.3e}",
+        per_pair.len(),
+        share(chaotic, total),
+    );
+    let status = if total == 0 {
+        "skipped — nothing to compare".to_owned()
+    } else if worst <= tolerance {
+        format!("ok — {detail}")
+    } else {
+        format!("FAIL — {detail}")
+    };
+    CheckRow { stage: stage.to_owned(), items: total, worst, tolerance, differing: chaotic, status }
+}
+
+/// The `ctrl` row: the same rungs, in `f64`, on the CPU, from the pose the device itself starts
+/// from — an alarm over **every** candidate, with no tolerance of its own.
+///
+/// It is the row that decides which candidates the pose rows may be applied to (a control outside
+/// D §10.2's pose tolerances is C2's chaotic case), so gating it as well would be gating the same
+/// fact twice and would guarantee its own verdict. What it reports instead is the size of the
+/// effect: the worst the ladder alone moved, and how many candidates it moved out of the rows.
+#[cfg(feature = "gpu")]
+fn control_row(column: &Column, stage: &str, per_pair: &[(usize, usize)]) -> CheckRow {
+    let excused: usize = per_pair.iter().map(|&(c, _)| c).sum();
+    let mut row = column.row(stage, f64::INFINITY);
+    if !column.all.is_empty() {
+        row.status = format!(
+            "{} ({excused} candidate(s) outside D §10.2's pose rows on the control alone, and \
+             excused there)",
+            row.status,
+        );
+    }
+    row
 }
 
 /// The rotation (degrees) and the displacement (wall thicknesses) between two poses, in the units

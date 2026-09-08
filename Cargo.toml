@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/sherd-core", "crates/sherd-cli", "crates/sherd-parity"]
+members = ["crates/sherd-core", "crates/sherd-gpu", "crates/sherd-cli", "crates/sherd-parity"]
 
-# `sherd-gpu` (wgpu executor) and `sherd-py` (pyo3 module) join the workspace in phases 2a and 3a;
-# their dependencies are deliberately absent here until then.
+# `sherd-py` (pyo3 module) joins the workspace in phase 3a; its dependencies are deliberately
+# absent here until then. `sherd-gpu` joined in phase 2a (task G1).
 
 [workspace.package]
 version = "0.1.0"
@@ -60,12 +60,25 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 anyhow = "1.0.104"
 thiserror = "2.0.20"
 
+# --- GPU: experiment E7 (…-e7-wgpu.md) --------------------------------------------------------
+# `=30.0.1` is a hard pin, not a floor: E7 read the shader-compile path of this exact `wgpu-hal`
+# (`src/metal/device.rs:272`, which never touches `fastMathEnabled`) and measured the arithmetic
+# that follows from it. A minor bump can change the generated MSL and with it the parity table.
+wgpu = { version = "=30.0.1", default-features = false, features = [
+    "metal",
+    "vulkan",
+    "dx12",
+    "wgsl",
+] } # no GL: D §6.8 lists Metal | Vulkan | DX12
+pollster = "0.4.0"                        # one blocking executor for `request_device` and `poll`
+
 # --- test-only --------------------------------------------------------------------------------
 approx = "0.5.1"
 proptest = "1.11.0"
 
 # --- workspace members ------------------------------------------------------------------------
 sherd-core = { path = "crates/sherd-core" }
+sherd-gpu = { path = "crates/sherd-gpu" }
 sherd-parity = { path = "crates/sherd-parity" }
 
 # Lint baseline for every crate; each member opts in with `[lints] workspace = true`.

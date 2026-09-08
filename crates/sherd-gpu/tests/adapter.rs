@@ -482,7 +482,22 @@ fn the_icp_kernel_matches_the_cpu_executor_on_synthetic_batches() {
 /// `sherd_gpu::icp::MIN_CANDIDATES`'s own documentation.
 #[test]
 fn the_icp_rung_crossover_is_a_candidate_count() {
+    // Not in a debug build. The GPU side is a compiled kernel in every profile while the CPU side
+    // is `sherd-core`, a workspace member and therefore `-O0` here (G1 §3's caveat: the same batch
+    // took 22.8 ms release and 131.2 ms debug), so the ratio would be the optimiser's and not the
+    // device's — and the 256 × 12 000 cell would spend minutes saying so.
+    if cfg!(debug_assertions) {
+        println!("SKIP icp crossover: a debug build measures the optimiser, not the device");
+        return;
+    }
     let Some(gpu) = device("icp crossover") else { return };
+    // 256 candidates × 12 000 points × 30 iterations is 92 M bounded queries. That is a second on
+    // this Metal part and minutes on lavapipe or WARP, and the answer would be about the software
+    // rasteriser rather than about a GPU either way (D §6.8: `Auto` never prefers one to the CPU).
+    if gpu.is_software() {
+        println!("SKIP icp crossover: {} is a software adapter", gpu.entry());
+        return;
+    }
     let Some(test) = selftest("icp crossover", &gpu) else { return };
     let executor = GpuExecutor::new(std::sync::Arc::new(gpu), test);
     println!("  candidates  points  cpu ms   gpu ms   ratio");
@@ -529,7 +544,17 @@ fn the_icp_rung_crossover_is_a_candidate_count() {
 /// because the executor sent them to the CPU.
 #[test]
 fn the_coarse_crossover_is_a_query_count() {
+    // Not in a debug build, for the reason the ICP crossover gives.
+    if cfg!(debug_assertions) {
+        println!("SKIP coarse crossover: a debug build measures the optimiser, not the device");
+        return;
+    }
     let Some(gpu) = device("coarse crossover") else { return };
+    // 40 000 poses × 800 points is 32 M queries — the same reason as the ICP crossover above.
+    if gpu.is_software() {
+        println!("SKIP coarse crossover: {} is a software adapter", gpu.entry());
+        return;
+    }
     let Some(test) = selftest("coarse crossover", &gpu) else { return };
     let executor = GpuExecutor::new(std::sync::Arc::new(gpu), test);
 

@@ -39,21 +39,22 @@ pub const MAX_POINT_QUERIES: usize = 20_000_000;
 ///
 /// A dispatch costs a submission, a grid build, an upload and a readback whatever it computes, and
 /// the grid and the target cloud are rebuilt for every call. `crates/sherd-gpu/tests/adapter.rs`
-/// prints the table this comes from, over a 6 000-point breakline:
+/// prints the table this comes from, over a 6 000-point breakline. It was first taken **before**
+/// the bounding-box reject of `kernels/coarse.wgsl` existed, and the threshold was set from that:
 ///
-/// | poses × points | queries | ratio |
-/// |---|---|---|
-/// | 1 × 60 | 60 | 2.5× (both sides microseconds) |
-/// | 64 × 60 | 3 840 | 1.4× |
-/// | 64 × 800 | 51 200 | 0.61× |
-/// | 1 000 × 60 | 60 000 | 0.41× |
-/// | 1 000 × 800 | 800 000 | 2.53× |
-/// | 40 000 × 60 | 2 400 000 | 1.80× |
-/// | 40 000 × 800 | 32 000 000 | 3.36× |
+/// | poses × points | queries | before the box | after it |
+/// |---|---|---|---|
+/// | 64 × 60 | 3 840 | 1.4× | 3.4× |
+/// | 64 × 800 | 51 200 | 0.61× | 1.2× |
+/// | 1 000 × 60 | 60 000 | **0.41×** | 1.07× |
+/// | 1 000 × 800 | 800 000 | 2.53× | 2.8× |
+/// | 40 000 × 60 | 2 400 000 | 1.80× | 2.1× |
+/// | 40 000 × 800 | 32 000 000 | 3.36× | 3.6× |
 ///
-/// R §5.2's own batch is tens of thousands of hypotheses on sixty points — 1.5 to 2.4 M queries,
-/// far above the line. R §5.4's re-score is a few hundred poses on `brk_sub`, which lands near it
-/// and goes either way by collection.
+/// The reject moved the deciding cell from 0.41× to 1.07× and the threshold stayed where it was,
+/// which is now the conservative side of it. R §5.2's own batch is tens of thousands of hypotheses
+/// on sixty points — 1.5 to 2.4 M queries, far above the line; R §5.4's re-score is a few hundred
+/// poses on `brk_sub`, which lands near it and goes either way by collection.
 pub const MIN_QUERIES: usize = 200_000;
 
 /// The WGSL source: D §6.2's grid, then the kernel that queries it.

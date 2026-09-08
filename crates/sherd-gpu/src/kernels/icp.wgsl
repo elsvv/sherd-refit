@@ -507,6 +507,28 @@ fn search(lane: u32, candidate: u32) -> vec2<f32> {
     let base = candidate * params.n_src;
     var count = 0.0;
     var err2 = 0.0;
+    // Kahan compensation, and it is here for one measured reason: R §7's convergence test is
+    // `|Δrmse| < 1e-6`, and a plain `f32` sum of forty-odd positive terms per lane carries about
+    // `1.6e-6` of relative error — *above* the threshold. The rung then stops as soon as the pose
+    // moves less than the summation noise, which is earlier than the `f64` rung stops, and it ends
+    // somewhere else. Measured on pot_A's stage 2 before this: 30 of 40 candidates differed in
+    // their iteration count, by 16 of 30 at p90.
+    //
+    // **On Metal this compensation is folded away, and the code stays for the other backends.**
+    // `(next - err2) - term` is algebraically zero, and fast math is entitled to say so. E7 §3
+    // measured this compiler leaving a fixed-order addition *tree* bit-identical to its Rust
+    // mirror — it does not reassociate — but that is a different licence from an algebraic
+    // identity, and this one it takes: every row of `gpu-check --set input/sfspp/pot_A --stage icp`
+    // came back identical to the last printed digit with the compensation added, including
+    // `icp s1 rmse`'s `p50` of 9.758e-8, which is exactly the quantity it would have moved.
+    //
+    // It is kept because it is correct WGSL and costs three flops, and a Vulkan or DX12 backend
+    // that compiles without fast math gets the tighter sum. What it does *not* do is fix the
+    // convergence test on this device — and, measured, that was not what needed fixing: pot_A's
+    // stage 2 differs from the CPU rung by 1.1e-2 degrees at the worst while 30 of its 40
+    // candidates stop at a different iteration, so stopping early costs almost nothing on a rung
+    // that has already converged.
+    var comp = 0.0;
     var i = lane;
     loop {
         if (i >= params.n_src) {
@@ -516,7 +538,10 @@ fn search(lane: u32, candidate: u32) -> vec2<f32> {
         corres[base + i] = hit.x;
         if (hit.x != MISS) {
             count = count + 1.0;
-            err2 = err2 + bitcast<f32>(hit.y);
+            let term = bitcast<f32>(hit.y) - comp;
+            let next = err2 + term;
+            comp = (next - err2) - term;
+            err2 = next;
         }
         i = i + LANES;
     }

@@ -499,6 +499,8 @@ pub(crate) fn check(
     let mut s2_ctrl = Column::default();
     let mut s1_iter = Column::default();
     let mut s2_iter = Column::default();
+    let mut s1_cloud = Column::default();
+    let mut s2_cloud = Column::default();
     let mut distance = Column::default();
     let mut inside_depth = Column::default();
     let mut inside_flag = 0_usize;
@@ -542,11 +544,28 @@ pub(crate) fn check(
                     } else {
                         (&mut s2_rot, &mut s2_disp, &mut s2_fit, &mut s2_rmse)
                     };
-                    let (control, poses, iters) = if which == 1 {
-                        (&mut s1_ctrl, &report.stage1_control, &mut s1_iter)
+                    let (control, poses, iters, cloud, centre) = if which == 1 {
+                        (
+                            &mut s1_ctrl,
+                            &report.stage1_control,
+                            &mut s1_iter,
+                            &mut s1_cloud,
+                            report.stage1_centre,
+                        )
                     } else {
-                        (&mut s2_ctrl, &report.stage2_control, &mut s2_iter)
+                        (
+                            &mut s2_ctrl,
+                            &report.stage2_control,
+                            &mut s2_iter,
+                            &mut s2_cloud,
+                            report.stage2_centre,
+                        )
                     };
+                    for (k, (c, g)) in cpu.iter().zip(gpu).enumerate() {
+                        let sound = determined.get(k).copied().unwrap_or(true);
+                        let moved = cloud_deviation(&c.transform, &g.transform, &centre, t);
+                        cloud.push(moved, moved > 0.0, sound);
+                    }
                     for (k, (c, g)) in cpu.iter().zip(gpu).enumerate() {
                         let sound = determined.get(k).copied().unwrap_or(true);
                         #[allow(clippy::cast_precision_loss, reason = "iteration caps are small")]
@@ -633,12 +652,14 @@ pub(crate) fn check(
         rows.push(s1_ctrl.row("icp s1 ctrl", tolerance::POSE_DEG));
         rows.push(s1_iter.row("icp s1 iter", f64::INFINITY));
         rows.push(s1_disp.row("icp s1 t", tolerance::POSE_T));
+        rows.push(s1_cloud.row("icp s1 t@cloud", tolerance::POSE_T));
         rows.push(s1_fit.row("icp s1 fit", tolerance::ICP));
         rows.push(s1_rmse.row("icp s1 rmse", tolerance::ICP));
         rows.push(s2_rot.row("icp s2 deg", tolerance::POSE_DEG));
         rows.push(s2_ctrl.row("icp s2 ctrl", tolerance::POSE_DEG));
         rows.push(s2_iter.row("icp s2 iter", f64::INFINITY));
         rows.push(s2_disp.row("icp s2 t", tolerance::POSE_T));
+        rows.push(s2_cloud.row("icp s2 t@cloud", tolerance::POSE_T));
         rows.push(s2_fit.row("icp s2 fit", tolerance::ICP));
         rows.push(s2_rmse.row("icp s2 rmse", tolerance::ICP));
     }
@@ -732,6 +753,54 @@ fn pose_deviation(
     (2.0 * half.asin().to_degrees(), displacement.sqrt() / t)
 }
 
+/// How far a point of the moving cloud travels between two poses, in wall thicknesses.
+///
+/// D §10.2's translation column is the displacement of the **origin**, and its own note says why:
+/// "a pure rotation difference shows up in both rows — which is the conservative way round". These
+/// scans sit 100–150 units from the origin, so that conservatism is not a rounding — it is the
+/// whole number. On pot_A's stage-1 rungs the worst rotation is 2.6e-2 degrees, inside the row's
+/// 0.05, and the origin-referenced displacement of the same poses is 4.3e-2 t, four times outside
+/// the row's 0.01 — the same disagreement, read at a point 130 units away from where the fragment
+/// is.
+///
+/// This row is the same disagreement read **at the cloud**: the centroid of the moving points,
+/// which is where a reader asking "did the fragment move" is looking. Both are reported, and the
+/// D §10.2 row is the one the tolerance is applied to.
+#[cfg(feature = "gpu")]
+fn cloud_deviation(
+    a: &sherd_core::matching::icp::Pose,
+    b: &sherd_core::matching::icp::Pose,
+    centre: &[f64; 3],
+    t: f64,
+) -> f64 {
+    let mut moved = 0.0;
+    for i in 0..3 {
+        let mut delta = a[(i, 3)] - b[(i, 3)];
+        for (j, &c) in centre.iter().enumerate() {
+            delta += (a[(i, j)] - b[(i, j)]) * c;
+        }
+        moved += delta * delta;
+    }
+    moved.sqrt() / t
+}
+
+/// The mean of a point set, for [`cloud_deviation`].
+#[cfg(feature = "gpu")]
+fn centroid(points: &[[f64; 3]]) -> [f64; 3] {
+    if points.is_empty() {
+        return [0.0; 3];
+    }
+    let mut sum = [0.0; 3];
+    for p in points {
+        for (out, value) in sum.iter_mut().zip(p) {
+            *out += value;
+        }
+    }
+    #[allow(clippy::cast_precision_loss, reason = "cloud sizes are far below 2^53")]
+    let n = points.len() as f64;
+    [sum[0] / n, sum[1] / n, sum[2] / n]
+}
+
 /// Everything one pair contributes to the table: the same batches, answered twice.
 #[cfg(feature = "gpu")]
 struct PairReport {
@@ -751,6 +820,9 @@ struct PairReport {
     /// arithmetic from the ladder's own amplification of an `f32` starting pose.
     stage1_control: Vec<sherd_core::matching::icp::Pose>,
     stage2_control: Vec<sherd_core::matching::icp::Pose>,
+    /// The centroid of each stage's moving cloud, for the displacement read at the fragment.
+    stage1_centre: [f64; 3],
+    stage2_centre: [f64; 3],
     pose: sherd_core::matching::icp::Pose,
 }
 
@@ -825,6 +897,7 @@ fn compare_pair(
         control = CPU.icp_rung(&batch).iter().map(|r| r.transform).collect();
     }
     let stage1_control = control;
+    let stage1_centre = centroid(&source);
 
     // R §5.4's re-score, over the poses stage 1 actually produced: `Pair::stage1`'s own batch,
     // over B's whole breakline subset at `sc.stage1` rather than sixty points at `sc.coarse`.
@@ -874,6 +947,7 @@ fn compare_pair(
         control2 = CPU.icp_rung(&batch).iter().map(|r| r.transform).collect();
     }
     let stage2_control = control2;
+    let stage2_centre = rungs2.last().map_or([0.0; 3], |rung| centroid(rung.source));
     let pose = poses2
         .first()
         .copied()
@@ -892,6 +966,8 @@ fn compare_pair(
         stage2_ok,
         stage1_control,
         stage2_control,
+        stage1_centre,
+        stage2_centre,
         pose,
     }
 }

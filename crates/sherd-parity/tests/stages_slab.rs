@@ -119,11 +119,19 @@ fn every_stage_passes_on_the_slab_in_both_modes() {
                 report.stage,
                 report.failures().map(sherd_parity::Check::line).collect::<Vec<_>>()
             );
+            // The one other skip the committed dump is allowed: task Z's key-order row reads
+            // `_run/transforms.json`, the file the *pipeline* wrote, and the committed slab dump
+            // carries no `_run` (V5-D6). Every other skip is a hole in the gate.
+            let key_order_only = report.stage == "outputs"
+                && mode == Mode::Injected
+                && report.skips.len() == 1
+                && report.skips[0].reason.contains("_run/transforms.json");
             assert_eq!(
-                report.skips.is_empty(),
+                report.skips.is_empty() || key_order_only,
                 !no_native_column,
-                "{} {mode} skipped something",
-                report.stage
+                "{} {mode} skipped something: {:?}",
+                report.stage,
+                report.skips.iter().map(|s| s.reason.as_str()).collect::<Vec<&str>>()
             );
         }
     }
@@ -402,9 +410,12 @@ fn outputs_and_refine_skip_what_the_dump_does_not_carry() {
     let report = collection.run(Stage::Outputs, Mode::Injected).unwrap();
     assert_eq!(report.status(), "PASS");
     let reasons: Vec<&str> = report.skips.iter().map(|s| s.reason.as_str()).collect();
-    assert_eq!(reasons.len(), 2, "{reasons:?}");
+    // The third is task Z's key-order row (V5-D6): the committed slab dump carries no `_run`, the
+    // directory the *pipeline* wrote, which is the only place R §11.1's key order survives.
+    assert_eq!(reasons.len(), 3, "{reasons:?}");
     assert!(reasons.iter().any(|r| r.contains("placed.sha256.json")), "{reasons:?}");
     assert!(reasons.iter().any(|r| r.contains("preview_index.json")), "{reasons:?}");
+    assert!(reasons.iter().any(|r| r.contains("_run/transforms.json")), "{reasons:?}");
     assert!(report.checks.iter().any(|c| c.quantity == "report candidates"));
 }
 

@@ -713,12 +713,21 @@ mod tests {
         let r = run(&c, Mode::Injected).unwrap();
         assert_eq!(r.status(), "PASS", "{:?}", r.failures().map(Check::line).collect::<Vec<_>>());
         assert!(r.skips.is_empty());
-        // Two fragments × (n_surface, n_frac, two `on face`, fracture faces, margin count,
-        // margin members, two normals, sliver samples, two face picks), plus four more per
-        // fragment when the dump carries the sample uniforms of D6 (`md.S_u` and friends): the
-        // rebuilt-point count and the rebuilt-point distance, for each of the two draws.
+        // Two fragments × (n_surface, n_frac, two `on face`, fracture faces, margin bound,
+        // margin count, margin members, two normals, sliver samples, two face picks), plus four
+        // more per fragment when the dump carries the sample uniforms of D6 (`md.S_u` and
+        // friends): the rebuilt-point count and the rebuilt-point distance, for each of the two
+        // draws. `margin bound` is task Z's row (V5-D5): the bounded `d_brk` the pipeline computes
+        // against the unbounded array it stands for.
         let with_uniforms = c.fragments.iter().filter(|f| f.has("md.S_u.npy")).count();
-        assert_eq!(r.checks.len(), 24 + 4 * with_uniforms);
+        assert_eq!(r.checks.len(), 26 + 4 * with_uniforms);
+        for check in r.checks.iter().filter(|c| c.quantity == "margin bound") {
+            assert!(
+                (check.measured - 0.0).abs() < f64::EPSILON,
+                "the bounded sweep must be the exact one under its bound: {}",
+                check.line()
+            );
+        }
         for quantity in ["surface pick", "fracture pick"] {
             let picks: Vec<&Check> = r.checks.iter().filter(|c| c.quantity == quantity).collect();
             assert_eq!(picks.len(), 2, "{quantity}");
@@ -744,7 +753,13 @@ mod tests {
         let c = Collection::open(FixtureDir::new(slab_dump()), Some(&slab_input())).unwrap();
         let r = run(&c, Mode::Native).unwrap();
         assert_eq!(r.status(), "PASS", "{:?}", r.failures().map(Check::line).collect::<Vec<_>>());
-        assert_eq!(r.checks.len(), 12, "six comparisons for two fragments");
+        // Seven comparisons for two fragments: the two counts, the fracture fraction, the margin
+        // fraction, the two spacings — and task Z's `margin bound`, which runs in both modes
+        // because both modes now take the band from the pipeline's own bounded sweep.
+        assert_eq!(r.checks.len(), 14, "seven comparisons for two fragments");
+        for check in r.checks.iter().filter(|c| c.quantity == "margin bound") {
+            assert!((check.measured - 0.0).abs() < f64::EPSILON, "{}", check.line());
+        }
     }
 
     /// The distance to a triangle, in all three of its regions.

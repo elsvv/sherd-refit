@@ -51,13 +51,15 @@
 //! development sets**, which is what `gpu-check` measures.
 
 pub mod buffers;
+pub mod coarse;
 pub mod device;
 pub mod executor;
 pub mod selftest;
+pub mod shader;
 pub mod slots;
 
 pub use device::{AdapterChoice, AdapterEntry, Gpu};
-pub use executor::GpuExecutor;
+pub use executor::{GpuExecutor, MethodSnapshot, Stats};
 pub use selftest::{Selection, SelfTest};
 
 /// Everything that can stop the GPU path, with the message the CLI prints.

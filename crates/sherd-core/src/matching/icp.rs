@@ -780,6 +780,10 @@ pub type Rotation = Matrix3<f64>;
 /// The translation of a pose, named for the same reason.
 pub type Translation = Vector3<f64>;
 
+/// A pose: the 4×4 every stage after R §5.1 carries, named so that a crate without a `nalgebra`
+/// dependency of its own can hold one (the CLI's `gpu-check`).
+pub type Pose = Matrix4<f64>;
+
 /// A 4×4 from a rotation and a translation.
 pub fn homogeneous(rotation: &Matrix3<f64>, translation: &Vector3<f64>) -> Matrix4<f64> {
     let mut m = Matrix4::identity();

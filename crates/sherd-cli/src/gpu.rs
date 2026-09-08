@@ -4,18 +4,18 @@
 //! `--no-default-features` — no `sherd-gpu`, no wgpu, no `naga` — differs from the default build
 //! in this file alone. That is D §2's "`sherd-gpu` is an optional feature of `sherd-cli`".
 //!
-//! # What `--backend` means in phase 2a
+//! # What `--backend` means
 //!
 //! | flag | with an adapter | without one |
 //! |---|---|---|
-//! | `auto` (default) | the device is opened, the self-test runs, and the CPU is used anyway — because phase 2a's executor has no kernels (D §12) — with the measured speedup logged | the CPU, silently |
+//! | `auto` (default) | the device is opened, the self-test runs, and `Selection::decide` applies D §6.8's rule — an adapter that is not a software one, a passing self-test, ≥ 1.5×, **and** an executor with its matching kernels | the CPU, silently |
 //! | `cpu` | the CPU; no device is opened at all | the CPU |
-//! | `gpu` | the device is opened and the self-test must pass, or the run **fails**; every `Executor` call is then counted as delegated | the run **fails**, naming what was tried |
+//! | `gpu` | the device is opened and the self-test must pass, or the run **fails**; every method without a kernel is then counted as delegated | the run **fails**, naming what was tried |
 //!
 //! The one thing this file must never do is let a run believe it used the GPU when it did not.
-//! `--backend gpu` therefore prints, once, that the executor has no kernels yet and that the
-//! numbers are the CPU's; `report.json` still records the backend the *run asked for*, which is
-//! what D §4.3 says it records.
+//! `--backend gpu` therefore prints, once, which of the four `Executor` methods are the device's
+//! and which are the CPU's; `report.json` records the backend the *run asked for*, which is what
+//! D §4.3 says it records.
 
 use anyhow::{Result, bail};
 use sherd_core::executor::{Backend, Engine};
@@ -100,8 +100,9 @@ pub(crate) fn resolve(backend: Backend, adapter: Option<&str>) -> Result<Resolve
             }
             let reason = format!(
                 "--backend gpu on {}: the self-test passed ({:.1} ns/query, {:.2}x the CPU on its \
-                 batch). Phase 2a's GPU executor has no kernels yet (D §12: 2b and 2c), so every \
-                 batch is computed by the CPU implementation and the results are the CPU's.",
+                 batch). R §5.2's coarse score runs on the device; R §7's ICP rung, R §6.1's \
+                 bounded distance and R §6.4's inside test are still the CPU implementation's \
+                 (D §12: 2b and 2c), and `gpu-check` says which is which.",
                 test.adapter.name,
                 test.ns_per_query(),
                 test.speedup,
@@ -161,33 +162,37 @@ pub(crate) fn resolve(backend: Backend, _adapter: Option<&str>) -> Result<Resolv
 /// One row of the `gpu-check` table (D §10.4 layer 3, E7 §5.1's form).
 #[derive(Debug)]
 pub(crate) struct CheckRow {
-    /// The batch that was compared.
-    pub(crate) stage: &'static str,
+    /// The batch and the quantity that was compared.
+    pub(crate) stage: String,
     /// How many values the row compares.
     pub(crate) items: usize,
     /// The largest absolute deviation between the two executors.
     pub(crate) worst: f64,
     /// D §10.2's tolerance for that quantity.
     pub(crate) tolerance: f64,
-    /// How many nearest-neighbour choices differ (E7 §5.1's column that matters).
+    /// How many values differ at all (E7 §5.1's column that matters).
     pub(crate) differing: usize,
     /// `ok`, `FAIL`, `delegated` or `skipped`, with its reason.
     pub(crate) status: String,
 }
 
 impl CheckRow {
-    /// Whether the row is a failure — a deviation over the tolerance, or a differing choice.
+    /// Whether the row is a failure — a deviation over the tolerance.
     #[must_use]
     pub(crate) fn failed(&self) -> bool {
         self.status.starts_with("FAIL")
     }
 }
 
-/// D §10.2's tolerances, for the four rows the kernels will fill in.
+/// D §10.2's tolerances, for the rows the kernels fill in.
 #[cfg(feature = "gpu")]
 mod tolerance {
-    /// `cs` per hypothesis: one probe point of sixty, plus rounding.
+    /// `cs` per hypothesis: one probe point of sixty, plus rounding (D §10.2's `coarse` row).
     pub(super) const COARSE: f64 = 1.0 / 60.0 + 1e-6;
+    /// A rung's pose, in degrees (D §10.2's `stage 1` and `stage 2` rows).
+    pub(super) const POSE_DEG: f64 = 0.05;
+    /// A rung's pose, in wall thicknesses.
+    pub(super) const POSE_T: f64 = 0.01;
     /// A rung's `fitness` and `inlier_rmse`.
     pub(super) const ICP: f64 = 1e-4;
     /// `gap`, in `t`; the tightest distance tolerance of the verification rows.
@@ -196,24 +201,97 @@ mod tolerance {
     pub(super) const INSIDE: f64 = 0.0005;
 }
 
+/// A deviation column: the worst, the count that moved at all, and the percentiles beside it.
+///
+/// D §10.2 asks for both — a tolerance on the worst case and a distribution beside it ("stage 1,
+/// stage 2 — distribution (a measurement beside the worst case)") — because on a stage whose
+/// ladders are chaotic (D §10.2's `chaotic` row, task C2 §5) the maximum is one candidate and the
+/// median is the answer to "did the kernel reproduce the rung".
+#[cfg(feature = "gpu")]
+#[derive(Debug, Default)]
+struct Column {
+    values: Vec<f64>,
+    differing: usize,
+}
+
+#[cfg(feature = "gpu")]
+impl Column {
+    fn push(&mut self, deviation: f64, differs: bool) {
+        self.values.push(deviation);
+        self.differing += usize::from(differs);
+    }
+
+    fn worst(&self) -> f64 {
+        self.values.iter().copied().fold(0.0_f64, f64::max)
+    }
+
+    /// `p50`, `p90`, `p99` by nearest rank over the sorted deviations.
+    fn percentiles(&self) -> [f64; 3] {
+        if self.values.is_empty() {
+            return [0.0; 3];
+        }
+        let mut sorted = self.values.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let at = |q: f64| {
+            #[allow(clippy::cast_precision_loss, reason = "candidate counts are small")]
+            let n = sorted.len() as f64;
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "the index is clamped into the vector"
+            )]
+            let i = ((q * n).ceil() as usize).clamp(1, sorted.len()) - 1;
+            sorted[i]
+        };
+        [at(0.5), at(0.9), at(0.99)]
+    }
+
+    fn row(&self, stage: &str, tolerance: f64) -> CheckRow {
+        let worst = self.worst();
+        let [p50, p90, p99] = self.percentiles();
+        let status = if self.values.is_empty() {
+            "skipped — nothing to compare".to_owned()
+        } else if worst <= tolerance {
+            format!("ok — p50 {p50:.3e} p90 {p90:.3e} p99 {p99:.3e}")
+        } else {
+            format!("FAIL — p50 {p50:.3e} p90 {p90:.3e} p99 {p99:.3e}")
+        };
+        CheckRow {
+            stage: stage.to_owned(),
+            items: self.values.len(),
+            worst,
+            tolerance,
+            differing: self.differing,
+            status,
+        }
+    }
+}
+
 /// `sherd-refit-rs gpu-check`: feed identical batches to both executors and report the deviations.
+///
+/// The harness preprocesses the collection once and then walks R §4.1's pair order, taking the
+/// first `pairs` matchable pairs and forming, from each, exactly the batches the pipeline forms:
+/// R §5.2's coarse batch over every hypothesis, R §5.4's re-score over the kept list, the two
+/// stage-1 rungs and the four stage-2 rungs. Both executors see the **same batch value**, so a
+/// deviation is the kernel's and not the caller's.
 #[cfg(feature = "gpu")]
 #[allow(clippy::too_many_lines, reason = "one block per Executor method, each self-contained")]
+#[allow(
+    clippy::float_cmp,
+    reason = "a cross-check asks whether two executors returned the same bits, not whether they \
+              are close: the tolerance is the row's, and the `differ` column is exact equality"
+)]
 pub(crate) fn check(
     stage: &str,
     set: Option<&std::path::Path>,
     fixture: Option<&std::path::Path>,
     adapter: Option<&str>,
+    pairs: usize,
 ) -> Result<Vec<CheckRow>> {
     use std::sync::Arc;
 
-    use sherd_core::executor::batch::{
-        CoarseBatch, DistBatch, DistReduce, IcpBatch, InsideBatch, Poses,
-    };
+    use sherd_core::executor::batch::{DistBatch, DistReduce, InsideBatch};
     use sherd_core::executor::{CPU, Executor};
-    use sherd_core::matching::coarse::{NORMAL_AGREE, Target};
-    use sherd_core::matching::icp::{IcpTarget, cloud_points, homogeneous};
-    use sherd_core::matching::ladder;
     use sherd_core::matching::pair::Pair;
     use sherd_core::{Params, collection, pipeline};
     use sherd_gpu::{AdapterChoice, Gpu, GpuExecutor, SelfTest};
@@ -225,7 +303,7 @@ pub(crate) fn check(
         .checks
         .iter()
         .map(|c| CheckRow {
-            stage: c.name,
+            stage: c.name.to_owned(),
             items: 0,
             worst: 0.0,
             tolerance: 0.0,
@@ -236,28 +314,27 @@ pub(crate) fn check(
     let executor = GpuExecutor::new(Arc::new(gpu), selftest);
 
     let wanted = |name: &str| stage == "all" || stage == name;
-    let delegated = |name: &'static str, tolerance: f64, items: usize| CheckRow {
-        stage: name,
+    let delegated = |name: &str, tolerance: f64, items: usize| CheckRow {
+        stage: name.to_owned(),
         items,
         worst: 0.0,
         tolerance,
         differing: 0,
-        status: "delegated — phase 2a's GPU executor routes this method to the CPU (D §12: 2b, 2c)"
-            .to_owned(),
+        status: "delegated — phase 2c's kernels; this method is the CPU's".to_owned(),
     };
 
-    // Without a collection there is nothing to form batches from, and the four rows say so rather
-    // than reporting a zero nobody measured.
+    // Without a collection there is nothing to form batches from, and the rows say so rather than
+    // reporting a zero nobody measured.
     let Some(input) = set.or(fixture) else {
         for (name, tol) in [
             ("coarse", tolerance::COARSE),
-            ("icp", tolerance::ICP),
+            ("icp", tolerance::POSE_DEG),
             ("distance", tolerance::DISTANCE),
             ("inside", tolerance::INSIDE),
         ] {
             if wanted(name) {
                 rows.push(CheckRow {
-                    stage: name,
+                    stage: name.to_owned(),
                     items: 0,
                     worst: 0.0,
                     tolerance: tol,
@@ -269,140 +346,348 @@ pub(crate) fn check(
         return Ok(rows);
     };
     if fixture.is_some() && set.is_none() {
-        // A fixture dump's own `_run` tree holds the collection the dump came from; pointing
-        // `--fixture` at one is D §10.1's shape and it is not read here yet.
         bail!(
-            "--fixture is not read by `gpu-check` yet: the batches it would form are the parity \
-             harness's, and the four Executor rows have no kernels to compare in phase 2a. Use \
-             `--set DIR` to exercise the batch formation on a real collection."
+            "--fixture is not read by `gpu-check`: the batches it would form are the parity \
+             harness's, and D §10.2's own rows already compare those against the reference. Use \
+             `--set DIR` to cross-check the two executors on a real collection."
         );
     }
 
-    // The first pair of the collection that R §4.1 does not skip: enough to form one batch of
-    // every kind, and cheap enough to run at a console.
     let params = Params::default();
     let entries = collection::discover(input)?;
     if entries.len() < 2 {
         bail!("{}: need at least two mesh files", input.display());
     }
     let fragments: Vec<_> = pipeline::preprocess(
-        &entries[..2],
+        &entries,
         200_000,
         None,
         sherd_core::memory::Budget::default_for_machine(),
     )
     .into_iter()
     .collect::<std::result::Result<Vec<_>, _>>()?;
-    let (a, b) = (&fragments[0].fragment, &fragments[1].fragment);
-    let pair = Pair::build(a, b, &params);
-    if !pair.matchable() {
-        bail!("{}: the first two fragments have no breakline to match", input.display());
-    }
-    let hyp = pair.hypotheses(&params);
-    let probe = pair.probe(&params);
-    let tree = pair.a.kd_brk.as_ref().expect("a matchable pair has a breakline tree");
-    let target = Target { points: &pair.frames_a.p, normals: &pair.frames_a.ns, tree };
 
-    // --- R §5.2's coarse score -----------------------------------------------------------------
-    if wanted("coarse") && !hyp.is_empty() {
-        let batch = CoarseBatch {
-            target,
-            mask: None,
-            points: &probe.q,
-            normals: &probe.qn,
-            poses: Poses::Split { r: &hyp.r, tau: &hyp.tau },
-            radius: pair.scales.coarse,
-            normal_agree: NORMAL_AGREE,
-        };
-        let (cpu, gpu) = (CPU.coarse_scores(&batch), executor.coarse_scores(&batch));
-        let worst = worst_deviation(&cpu, &gpu);
-        rows.push(CheckRow { worst, ..delegated("coarse", tolerance::COARSE, cpu.len()) });
-    } else if wanted("coarse") {
-        rows.push(delegated("coarse", tolerance::COARSE, 0));
-    }
+    let mut coarse = Column::default();
+    let mut rescore = Column::default();
+    let mut s1_rot = Column::default();
+    let mut s1_disp = Column::default();
+    let mut s1_fit = Column::default();
+    let mut s1_rmse = Column::default();
+    let mut s2_rot = Column::default();
+    let mut s2_disp = Column::default();
+    let mut s2_fit = Column::default();
+    let mut s2_rmse = Column::default();
+    let mut distance = Column::default();
+    let mut inside_depth = Column::default();
+    let mut inside_flag = 0_usize;
+    let mut inside_items = 0_usize;
+    let mut used = 0_usize;
+    let mut over_one_probe = 0_usize;
 
-    // --- one rung of R §7's ICP ----------------------------------------------------------------
-    let cs = pair.coarse(sherd_core::executor::Engine::REFERENCE, &hyp, &probe);
-    let kept = pair.suppress(&hyp, &cs, &params);
-    let icp_target = IcpTarget::from_cloud(&pair.a.pc_brk_full);
-    let source = cloud_points(&pair.b.pc_brk);
-    let inits: Vec<_> = kept
-        .iter()
-        .take(32)
-        .map(|&h| homogeneous(&hyp.r[h as usize], &hyp.tau[h as usize]))
-        .collect();
-    if wanted("icp") && !inits.is_empty() {
-        let rung = ladder::stage1_rungs(&source, &icp_target)[0];
-        let batch = IcpBatch {
-            source: rung.source,
-            target: rung.target,
-            inits: &inits,
-            options: sherd_core::matching::icp::Options::point_to_point(
-                pair.scales.icp_dist(rung.k),
-                rung.iterations,
-            ),
-        };
-        let (cpu, gpu) = (CPU.icp_rung(&batch), executor.icp_rung(&batch));
-        let worst = cpu
-            .iter()
-            .zip(&gpu)
-            .map(|(c, g)| (c.fitness - g.fitness).abs().max((c.inlier_rmse - g.inlier_rmse).abs()))
-            .fold(0.0_f64, f64::max);
-        let differing =
-            cpu.iter().zip(&gpu).filter(|(c, g)| c.correspondences != g.correspondences).count();
-        rows.push(CheckRow { worst, differing, ..delegated("icp", tolerance::ICP, cpu.len()) });
-    } else if wanted("icp") {
-        rows.push(delegated("icp", tolerance::ICP, 0));
-    }
+    'outer: for i in 0..fragments.len() {
+        for j in i + 1..fragments.len() {
+            if used >= pairs {
+                break 'outer;
+            }
+            let (a, b) = (&fragments[i].fragment, &fragments[j].fragment);
+            if Pair::skipped(a, b, &params) {
+                continue;
+            }
+            let pair = Pair::build(a, b, &params);
+            if !pair.matchable() {
+                continue;
+            }
+            used += 1;
+            let t = pair.scales.t;
+            let report = compare_pair(&pair, &params, &executor);
 
-    // --- R §6.1's bounded distance and R §6.4's inside test ------------------------------------
-    let identity = homogeneous(&nalgebra_identity(), &nalgebra_zero());
-    let pose = inits.first().copied().unwrap_or(identity);
-    if let Some((sa, sb)) = pair.surfaces() {
-        if wanted("distance") {
-            let batch = DistBatch {
-                points: &sb.pf,
-                transform: &pose,
-                scene: sa.fracture,
-                max_dist: pair.scales.facing,
-                reduce: DistReduce::All,
-            };
-            let (cpu, gpu) = (CPU.bounded_distance(&batch), executor.bounded_distance(&batch));
-            let worst = worst_deviation(&cpu, &gpu);
-            let differing =
-                cpu.iter().zip(&gpu).filter(|(c, g)| c.is_finite() != g.is_finite()).count();
-            rows.push(CheckRow {
-                worst: worst / pair.scales.t,
-                differing,
-                ..delegated("distance", tolerance::DISTANCE, cpu.len())
-            });
-        }
-        if wanted("inside") {
-            match sa.mesh {
-                Some(mesh) => {
-                    let batch = InsideBatch { points: &sb.s, transform: &pose, scene: mesh };
-                    let (cpu, gpu) = (CPU.inside(&batch), executor.inside(&batch));
-                    let differing =
-                        cpu.iter().zip(&gpu).filter(|(c, g)| c.inside != g.inside).count();
-                    let worst = cpu
-                        .iter()
-                        .zip(&gpu)
-                        .map(|(c, g)| f64::from((c.depth - g.depth).abs()))
-                        .fold(0.0_f64, f64::max);
-                    rows.push(CheckRow {
-                        worst: worst / pair.scales.t,
-                        differing,
-                        ..delegated("inside", tolerance::INSIDE, cpu.len())
-                    });
+            if wanted("coarse") {
+                for (c, g) in report.coarse_host.iter().zip(&report.coarse_device) {
+                    coarse.push((c - g).abs(), c.to_bits() != g.to_bits());
+                    over_one_probe += usize::from((c - g).abs() > tolerance::COARSE);
                 }
-                None => rows.push(CheckRow {
-                    status: "skipped — the first fragment has no surface mesh (R §6.4)".to_owned(),
-                    ..delegated("inside", tolerance::INSIDE, 0)
-                }),
+                for (c, g) in report.rescore_host.iter().zip(&report.rescore_device) {
+                    rescore.push((c - g).abs(), c.to_bits() != g.to_bits());
+                }
+            }
+            if wanted("icp") {
+                for (which, cpu, gpu) in [
+                    (1_u8, &report.stage1_host, &report.stage1_device),
+                    (2, &report.stage2_host, &report.stage2_device),
+                ] {
+                    let (rot, disp, fit, rmse) = if which == 1 {
+                        (&mut s1_rot, &mut s1_disp, &mut s1_fit, &mut s1_rmse)
+                    } else {
+                        (&mut s2_rot, &mut s2_disp, &mut s2_fit, &mut s2_rmse)
+                    };
+                    for (c, g) in cpu.iter().zip(gpu) {
+                        let moved = c.transform != g.transform;
+                        let (deg, units) = pose_deviation(&c.transform, &g.transform, t);
+                        rot.push(deg, moved);
+                        disp.push(units, moved);
+                        let df = (c.fitness - g.fitness).abs();
+                        let dr = (c.inlier_rmse - g.inlier_rmse).abs() / t;
+                        fit.push(df, c.correspondences != g.correspondences);
+                        rmse.push(dr, dr > 0.0);
+                    }
+                }
+            }
+            if let Some((sa, sb)) = pair.surfaces() {
+                let pose = report.pose;
+                if wanted("distance") {
+                    let batch = DistBatch {
+                        points: &sb.pf,
+                        transform: &pose,
+                        scene: sa.fracture,
+                        max_dist: pair.scales.facing,
+                        reduce: DistReduce::All,
+                    };
+                    let (cpu, gpu) =
+                        (CPU.bounded_distance(&batch), executor.bounded_distance(&batch));
+                    for (c, g) in cpu.iter().zip(&gpu) {
+                        let delta = if c.is_infinite() && g.is_infinite() {
+                            0.0
+                        } else {
+                            (c - g).abs() / t
+                        };
+                        distance.push(delta, c.is_finite() != g.is_finite());
+                    }
+                }
+                if wanted("inside")
+                    && let Some(mesh) = sa.mesh
+                {
+                    {
+                        let batch = InsideBatch { points: &sb.s, transform: &pose, scene: mesh };
+                        let (cpu, gpu) = (CPU.inside(&batch), executor.inside(&batch));
+                        inside_items += cpu.len();
+                        for (c, g) in cpu.iter().zip(&gpu) {
+                            inside_flag += usize::from(c.inside != g.inside);
+                            inside_depth
+                                .push(f64::from((c.depth - g.depth).abs()) / t, c.depth != g.depth);
+                        }
+                    }
+                }
             }
         }
     }
+    if used == 0 {
+        bail!("{}: no matchable pair among {} fragments", input.display(), fragments.len());
+    }
+
+    if wanted("coarse") {
+        let mut row = coarse.row("coarse cs", tolerance::COARSE);
+        row.status = format!("{} ({over_one_probe} over one probe point)", row.status);
+        rows.push(row);
+        rows.push(rescore.row("coarse s1", tolerance::COARSE));
+    }
+    if wanted("icp") {
+        rows.push(s1_rot.row("icp s1 deg", tolerance::POSE_DEG));
+        rows.push(s1_disp.row("icp s1 t", tolerance::POSE_T));
+        rows.push(s1_fit.row("icp s1 fit", tolerance::ICP));
+        rows.push(s1_rmse.row("icp s1 rmse", tolerance::ICP));
+        rows.push(s2_rot.row("icp s2 deg", tolerance::POSE_DEG));
+        rows.push(s2_disp.row("icp s2 t", tolerance::POSE_T));
+        rows.push(s2_fit.row("icp s2 fit", tolerance::ICP));
+        rows.push(s2_rmse.row("icp s2 rmse", tolerance::ICP));
+    }
+    if wanted("distance") {
+        rows.push(CheckRow {
+            items: distance.values.len(),
+            ..delegated("distance", tolerance::DISTANCE, distance.values.len())
+        });
+    }
+    if wanted("inside") {
+        let mut row = delegated("inside", tolerance::INSIDE, inside_items);
+        row.differing = inside_flag + inside_depth.differing;
+        rows.push(row);
+    }
+    let stats = executor.stats();
+    for line in stats.lines() {
+        rows.push(CheckRow {
+            stage: "counters".to_owned(),
+            items: 0,
+            worst: 0.0,
+            tolerance: 0.0,
+            differing: 0,
+            status: line,
+        });
+    }
+    rows.push(CheckRow {
+        stage: "pairs".to_owned(),
+        items: used,
+        worst: 0.0,
+        tolerance: 0.0,
+        differing: 0,
+        status: format!(
+            "{used} pair(s) of {}, gpu busy {:.1} ms",
+            fragments.len(),
+            stats.gpu_busy().as_secs_f64() * 1e3
+        ),
+    });
     Ok(rows)
+}
+
+/// The rotation (degrees) and the displacement (wall thicknesses) between two poses, in the units
+/// every pose row of D §10.2 is stated in — but through the Frobenius form rather than the trace.
+///
+/// `sherd_parity::stages::pose_gap` reads the angle off `trace(Rᵀ R') = 1 + 2cos θ`, which is what
+/// D §10.2's rows were calibrated with and is right for a comparison against the *reference's*
+/// poses. It has a floor this harness cannot live with: `Σ R²ᵢⱼ` is 3 only for an exactly
+/// orthonormal `R`, and R §5.1's hypothesis rotations are built from breakline frames that came
+/// out of an `f32` cloud, so they are orthonormal to about `1e-7` and `pose_gap(T, T)` — a pose
+/// against **itself** — already reports 3.6e-2 degrees. Measured on terracotta: the two executors
+/// returned bit-identical stage-1 poses and the trace form called 223 of 500 of them different.
+///
+/// `‖R − R'‖_F = 2√2·|sin(θ/2)|` for true rotations, so this is the same angle wherever the trace
+/// form is meaningful, and it is **exactly zero** when the two poses are the same bits. The
+/// displacement is `pose_gap`'s own: `|τ − τ'| / t`.
+#[cfg(feature = "gpu")]
+fn pose_deviation(
+    a: &sherd_core::matching::icp::Pose,
+    b: &sherd_core::matching::icp::Pose,
+    t: f64,
+) -> (f64, f64) {
+    let mut frobenius = 0.0;
+    let mut displacement = 0.0;
+    for i in 0..3 {
+        for j in 0..3 {
+            frobenius += (a[(i, j)] - b[(i, j)]).powi(2);
+        }
+        displacement += (a[(i, 3)] - b[(i, 3)]).powi(2);
+    }
+    let half = (frobenius.sqrt() / (2.0 * std::f64::consts::SQRT_2)).clamp(-1.0, 1.0);
+    (2.0 * half.asin().to_degrees(), displacement.sqrt() / t)
+}
+
+/// Everything one pair contributes to the table: the same batches, answered twice.
+#[cfg(feature = "gpu")]
+struct PairReport {
+    coarse_host: Vec<f64>,
+    coarse_device: Vec<f64>,
+    rescore_host: Vec<f64>,
+    rescore_device: Vec<f64>,
+    stage1_host: Vec<sherd_core::matching::icp::Registration>,
+    stage1_device: Vec<sherd_core::matching::icp::Registration>,
+    stage2_host: Vec<sherd_core::matching::icp::Registration>,
+    stage2_device: Vec<sherd_core::matching::icp::Registration>,
+    pose: sherd_core::matching::icp::Pose,
+}
+
+/// Forms the pipeline's own batches for one pair and answers each of them on both executors.
+///
+/// The CPU is always the one that decides what the *next* batch is — the coarse scores that feed
+/// R §5.3's suppression, the stage-1 poses that feed R §5.5's — so that both executors are asked
+/// the same question at every rung. A harness that let each side pick its own candidates would be
+/// comparing two different ladders and calling the difference a kernel deviation.
+#[cfg(feature = "gpu")]
+fn compare_pair(
+    pair: &sherd_core::matching::pair::Pair<'_>,
+    params: &sherd_core::Params,
+    executor: &sherd_gpu::GpuExecutor,
+) -> PairReport {
+    use sherd_core::executor::batch::{CoarseBatch, IcpBatch, Poses};
+    use sherd_core::executor::{CPU, Engine, Executor};
+    use sherd_core::matching::coarse::{NORMAL_AGREE, Target};
+    use sherd_core::matching::icp::{IcpTarget, Options, cloud_points, homogeneous};
+    use sherd_core::matching::ladder;
+    use sherd_core::spatial::grid::NearMask;
+
+    let hyp = pair.hypotheses(params);
+    let probe = pair.probe(params);
+    let tree = pair.a.kd_brk.as_ref().expect("a matchable pair has a breakline tree");
+    let target = Target { points: &pair.frames_a.p, normals: &pair.frames_a.ns, tree };
+
+    // R §5.2's batch, exactly as `coarse::scores` forms it — near mask and all.
+    let mask = NearMask::of(target.points, pair.scales.coarse);
+    let batch = CoarseBatch {
+        target,
+        mask: mask.as_ref(),
+        points: &probe.q,
+        normals: &probe.qn,
+        poses: Poses::Split { r: &hyp.r, tau: &hyp.tau },
+        radius: pair.scales.coarse,
+        normal_agree: NORMAL_AGREE,
+    };
+    let coarse_host = CPU.coarse_scores(&batch);
+    let coarse_device = executor.coarse_scores(&batch);
+
+    // R §5.3's suppression, on the CPU's scores, so both sides climb the same ladder.
+    let kept = pair.suppress(&hyp, &coarse_host, params);
+    let icp_target = IcpTarget::from_cloud(&pair.a.pc_brk_full);
+    let source = cloud_points(&pair.b.pc_brk);
+    let inits: Vec<_> =
+        kept.iter().map(|&h| homogeneous(&hyp.r[h as usize], &hyp.tau[h as usize])).collect();
+    let rungs = ladder::stage1_rungs(&source, &icp_target);
+    let mut stage1_host = Vec::new();
+    let mut stage1_device = Vec::new();
+    let mut poses = inits.clone();
+    for rung in &rungs {
+        let options = Options {
+            estimation: rung.estimation,
+            max_correspondence_distance: pair.scales.icp_dist(rung.k),
+            max_iteration: rung.iterations,
+            numerics: Engine::REFERENCE.numerics,
+        };
+        let batch = IcpBatch { source: rung.source, target: rung.target, inits: &poses, options };
+        stage1_host = CPU.icp_rung(&batch);
+        stage1_device = executor.icp_rung(&batch);
+        poses = stage1_host.iter().map(|r| r.transform).collect();
+    }
+
+    // R §5.4's re-score, over the poses stage 1 actually produced: `Pair::stage1`'s own batch,
+    // over B's whole breakline subset at `sc.stage1` rather than sixty points at `sc.coarse`.
+    let (points, normals) = pair.b_subset();
+    let rescore_batch = CoarseBatch {
+        target,
+        mask: None,
+        points: &points,
+        normals: &normals,
+        poses: Poses::Homogeneous(&poses),
+        radius: pair.scales.stage1,
+        normal_agree: NORMAL_AGREE,
+    };
+    let rescore_host = CPU.coarse_scores(&rescore_batch);
+    let rescore_device = executor.coarse_scores(&rescore_batch);
+
+    // R §5.6's ladder, from the best few stage-1 poses.
+    let ladder2 = sherd_core::matching::pair::SurfaceLadder::of(pair);
+    let rungs2 = ladder2.rungs();
+    let mut order: Vec<usize> = (0..rescore_host.len()).collect();
+    order.sort_by(|&x, &y| {
+        rescore_host[y].partial_cmp(&rescore_host[x]).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let take = order.len().min(usize::try_from(params.stage2).unwrap_or(16));
+    let mut poses2: Vec<_> = order[..take].iter().map(|&k| poses[k]).collect();
+    let mut stage2_host = Vec::new();
+    let mut stage2_device = Vec::new();
+    for rung in &rungs2 {
+        let options = Options {
+            estimation: rung.estimation,
+            max_correspondence_distance: pair.scales.icp_dist(rung.k),
+            max_iteration: rung.iterations,
+            numerics: Engine::REFERENCE.numerics,
+        };
+        let batch = IcpBatch { source: rung.source, target: rung.target, inits: &poses2, options };
+        stage2_host = CPU.icp_rung(&batch);
+        stage2_device = executor.icp_rung(&batch);
+        poses2 = stage2_host.iter().map(|r| r.transform).collect();
+    }
+    let pose = poses2
+        .first()
+        .copied()
+        .or_else(|| poses.first().copied())
+        .unwrap_or_else(sherd_core::matching::icp::Pose::identity);
+    PairReport {
+        coarse_host,
+        coarse_device,
+        rescore_host,
+        rescore_device,
+        stage1_host,
+        stage1_device,
+        stage2_host,
+        stage2_device,
+        pose,
+    }
 }
 
 /// [`check`] for a build without the `gpu` feature.
@@ -412,27 +697,7 @@ pub(crate) fn check(
     _set: Option<&std::path::Path>,
     _fixture: Option<&std::path::Path>,
     _adapter: Option<&str>,
+    _pairs: usize,
 ) -> Result<Vec<CheckRow>> {
     bail!("gpu-check: this binary was built without the `gpu` feature (D §2)")
-}
-
-/// The 3×3 identity, without a `nalgebra` dependency of this crate's own.
-#[cfg(feature = "gpu")]
-fn nalgebra_identity() -> sherd_core::matching::icp::Rotation {
-    sherd_core::matching::icp::Rotation::identity()
-}
-
-/// The zero translation.
-#[cfg(feature = "gpu")]
-fn nalgebra_zero() -> sherd_core::matching::icp::Translation {
-    sherd_core::matching::icp::Translation::zeros()
-}
-
-/// The largest absolute difference between two aligned arrays; `∞` on both sides counts as zero.
-#[cfg(feature = "gpu")]
-fn worst_deviation(a: &[f64], b: &[f64]) -> f64 {
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| if x.is_infinite() && y.is_infinite() { 0.0 } else { (x - y).abs() })
-        .fold(0.0_f64, f64::max)
 }

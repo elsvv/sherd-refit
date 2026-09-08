@@ -86,6 +86,12 @@ struct GpuCheckArgs {
     /// A parity fixture dump to form the batches from, instead of `--set`.
     #[arg(long, value_name = "DIR")]
     fixture: Option<PathBuf>,
+    /// How many of the collection's matchable pairs to sweep, in R §4.1's own pair order.
+    ///
+    /// One pair is enough to exercise every batch shape and cheap enough to run at a console; the
+    /// cross-check of D §10.4 layer 3 wants more, because a tie that flips is rare per pair.
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    pairs: usize,
     /// Which GPU adapter to use, by index or by a substring of its name (D §9).
     #[arg(long, value_name = "NAME|INDEX")]
     gpu_adapter: Option<String>,
@@ -713,6 +719,7 @@ fn gpu_check(args: &GpuCheckArgs) -> Result<()> {
         args.set.as_deref(),
         args.fixture.as_deref(),
         args.gpu_adapter.as_deref(),
+        args.pairs.max(1),
     )?;
     println!(
         "{:<12} {:>10} {:>12} {:>12} {:>10}  status",

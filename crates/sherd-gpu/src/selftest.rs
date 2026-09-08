@@ -291,10 +291,10 @@ pub struct Selection {
 impl Selection {
     /// D §6.8's rule, applied to a self-test that has already run.
     ///
-    /// `has_kernels` is what makes this honest in phase 2a: the GPU executor exists, the device
-    /// works and the self-test passes, but the four `Executor` methods are still the CPU's
-    /// (phases 2b and 2c), so `Auto` must not claim a GPU run. When the kernels land, the flag
-    /// becomes `true` and this rule is unchanged.
+    /// `has_kernels` is what keeps this honest while the crate is being built out: the device
+    /// works and the self-test passes long before every `Executor` method has a kernel, and a
+    /// partial executor cannot clear D §6.8's 1.5× bar however fast its kernels are. `Auto`
+    /// therefore reads `GpuExecutor::HAS_KERNELS` and says which fact decided it.
     #[must_use]
     pub fn decide(selftest: SelfTest, has_kernels: bool) -> Self {
         let adapter = Some(selftest.adapter.clone());
@@ -305,8 +305,9 @@ impl Selection {
         }
         if !has_kernels {
             let reason = format!(
-                "the self-test passed at {:.2}x on {}, but phase 2a's GPU executor has no kernels \
-                 yet (D §12: 2b and 2c) and routes every method to the CPU; using the CPU",
+                "the self-test passed at {:.2}x on {}, but the GPU executor does not yet have \
+                 both matching kernels (D §12: 2b and 2c) and the ones it has cannot clear \
+                 D §6.8's bar by Amdahl's law; using the CPU",
                 selftest.speedup, selftest.adapter.name
             );
             return Self { adapter, selftest: Some(selftest), use_gpu: false, reason };
@@ -793,10 +794,10 @@ mod tests {
     /// D §6.8's `Backend::Auto` rule, every branch, without an adapter.
     #[test]
     fn the_auto_rule_needs_a_pass_a_gpu_and_one_and_a_half_times() {
-        // Phase 2a: everything passes and it still says CPU, because there are no kernels.
-        let phase2a = Selection::decide(selftest(true, 8.0, "IntegratedGpu"), false);
-        assert!(!phase2a.use_gpu);
-        assert!(phase2a.reason.contains("no kernels yet"), "{}", phase2a.reason);
+        // Everything passes and it still says CPU while a matching kernel is missing.
+        let partial = Selection::decide(selftest(true, 8.0, "IntegratedGpu"), false);
+        assert!(!partial.use_gpu);
+        assert!(partial.reason.contains("both matching kernels"), "{}", partial.reason);
 
         // With kernels: a passing self-test above the threshold picks the GPU.
         let picked = Selection::decide(selftest(true, 8.0, "IntegratedGpu"), true);

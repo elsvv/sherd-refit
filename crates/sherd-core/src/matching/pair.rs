@@ -398,7 +398,7 @@ impl<'a> Pair<'a> {
     }
 
     /// B's breakline subset and its shell normals, in `f64` — R §5.4's `P_B[brk_sub]`, `ns_B[brk_sub]`.
-    fn b_subset(&self) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
+    pub fn b_subset(&self) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
         let take = |source: &[[f64; 3]]| -> Vec<[f64; 3]> {
             self.frames_b.sub.iter().map(|&i| source[i as usize]).collect()
         };

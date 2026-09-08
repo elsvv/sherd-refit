@@ -643,7 +643,11 @@ could do* (14 365 pairs × 33.4 ms ≈ 8 minutes of GPU time) rather than as a w
 this section's conclusion a second time.** With §6.4's submitting thread the matching stage is
 **1.04–1.40×** over the seven development collections (terracotta 1.11, pot_A 1.25, pot_B 1.40,
 pot_C 1.13, pot_G 1.04, pot_H 1.06, synthetic_20 1.08; three interleaved runs each) and the
-device's occupancy on `synthetic_20` went from at best 41 % to 68 %. It is not 2× and it will not
+device's occupancy on `synthetic_20` went from at best 41 % to 68 %. **Phase 2e (task G4) tuned the
+two thresholds that decide how much of the envelope the device is given and re-measured the same
+seven the same way: 1.07 / 1.26 / 1.43 / 1.13 / 1.09 / 1.10 / 1.28×, i.e. `1.07–1.43×`, with
+`synthetic_20` — the collection where the device has real work — moving 1.08 → 1.28×.** That range
+is `sherd_gpu::selftest::STAGE_SPEEDUP`, and it is what `info` and `Backend::Auto` quote. It is not 2× and it will not
 become 2× on this machine, for a reason that has nothing to do with scheduling: **the device and
 the ten cores share one power and memory-bandwidth envelope.** The same 330 submissions of the same
 work take
@@ -658,15 +662,39 @@ work, is an 8-second stage" is wrong in its premise: overlapping them makes each
 The collection-level estimate should be read with the same correction — the GPU column of the table
 above is a device that has the machine to itself, and a run does not.
 
-The same effect read from the other side, and the cheapest remaining gain in the GPU path: **giving
-the device less work makes the stage faster.** `--gpu-memory 0.05` refuses the seventeen largest
-batches of `synthetic_20` (5 % of the calls, answered by the CPU, results unchanged) and takes the
-matching stage from 13.07 s to **11.16 s** — **1.37×** the CPU backend against 1.17× uncapped, at
-the default thread count and better than any thread setting (three-way interleaved medians). §6.4's three size thresholds are a **floor**; what this says is
-that there is also a **ceiling**, a batch large enough that running it on the device costs the
-machine more than it saves. Deriving it means retaking `tests/adapter.rs`'s crossover tables with
-the ten cores loaded, which is the condition a run is actually in and not the one they were
-measured under.
+The same effect read from the other side: **giving the device less work makes the stage faster.**
+G3 measured that with `--gpu-memory 0.05`, which refused seventeen of `synthetic_20`'s 326 device
+batches and took the matching stage from 13.07 s to 11.16 s — 1.37× the CPU backend against 1.17×
+uncapped — and read it as *"refusing the seventeen largest batches"*.
+
+**Task G4 traced every reservation and that reading is wrong.** The largest single batch on the
+device is **20.7 MB** against a **100 MB** peak: the peak is five concurrent calls, so a 50 MB
+budget refuses a call not because it is large but because four others were already running. That is
+a property of the schedule, and since the coarse kernel is one probe point away from the CPU on 70
+of 2.93 M hypotheses (task G2), a schedule-dependent split would put a different set of calls on
+the device in every run and §7's byte-identical gate would stop holding. **The 1.37× is not
+available in that form, and `--gpu-memory` must not be used as a work-splitting knob.**
+
+What *is* available is a ceiling that is a function of the batch, and task G4 measured one:
+§6.4's three size thresholds are a **floor**, and `coarse::MAX_QUERIES` = 12 M point-queries is the
+ceiling beside them — past it a batch is answered by the CPU, whose own answer is `into_par_iter`
+over the whole pool. Sweeping it on `synthetic_20` (three interleaved runs each, matching-stage
+medians): 4 M 15.19 s, 6 M 14.11 s, 8 M 13.03 s, **12 M 12.16 s**, 16 M 12.23 s, no ceiling
+12.78 s. It refuses 41 of 190 calls carrying 38 % of the queries and halves the device's occupancy
+(10.2 → 5.8 s outstanding) for a 5 % stage gain, which is this section's envelope stated as an
+equivalence: on this machine the two sides are close to interchangeable on this workload. On
+`pot_H`, whose largest coarse batch is 3.6 M queries, it never fires. It could not have been
+derived from `tests/adapter.rs`'s crossover table, which runs on an **idle** device and finds the
+largest cell in it (32 M queries) the best one at 3.6×.
+
+The pool depth is the same effect a third time. §6.4's `device_slack` covers a worker's wait, and
+G4 swept it at the default `--threads 9`: pool 9 → 12.84 s, 10 → 12.43, **11 → 12.03**, 12 → 12.87,
+14 (G3's) → 13.80, 17 → 14.05, with device occupancy rising 8.3 → 10.0 s over the same range. Past
+one worker per core the extra workers are not covering a wait, they are adding a concurrent batch
+to a device that gets slower the busier the cores are, so the slack is now
+`min(⌈threads/2⌉, cores + 1 − threads)`. The two changes together are worth **1.10×** of the
+matching stage on `synthetic_20` (median of twelve paired rounds) and nothing measurable on the
+collections where neither fires; neither clears a 3 % bar alone.
 
 *Where the CPU time goes in a GPU-backend run*, which this section never had (task G3 §2,
 `synthetic_20`, core-seconds over a 16.9 s wall): R §5.4/5.6's ICP rungs on the CPU 34.75 (the ones
@@ -675,9 +703,25 @@ idle 3.86, refinement 3.32, and **device-side preparation — grids, uploads, bi
 1.7 %**. That last figure is the one to remember before optimising anything on the host side of a
 dispatch.
 
+**The measured GPU column, task G4** (`--threads 1`, so a submission waits for itself and
+`Occupancy` is device execution rather than execution plus queueing):
+
+| quantity | this section's assumption | measured |
+|---|---|---|
+| bounded-NN throughput on R §5.2's own workload | 0.5–1 G queries/s | **0.36 G/s, 2.79 ns/query** |
+| `icp_rung` | — | **3.23 µs per candidate-iteration** |
+| device execution per pair, `synthetic_20` | ≈ 0.08 s for a mid-size pair | **24.8 ms** |
+| device execution per pair, `pot_H` | — | **11.6 ms** |
+| matching stage per pair at `--threads 9`, `synthetic_20` | — | CPU 83.2 ms, **GPU 63.7 ms** |
+| matching stage per pair at `--threads 9`, `pot_H` | — | CPU 127.5 ms, **GPU 115.5 ms** |
+
+so the assumption is 1.4–2.8× optimistic on the workload it is about, and device execution is
+**39 %** of a `synthetic_20` pair's stage time and 10 % of a `pot_H` pair's. The projections of
+§10.3 follow from the last two rows and are labelled there as projections.
+
 Per mid-size pair (R§13 cost structure), single-thread Python core-seconds → estimated Rust CPU
 core-seconds → estimated GPU seconds (M2 Pro 16-core GPU, ≈ 0.5–1 G bounded NN queries/s on the
-hash grid — **not what E7 measured, see above** — ≈ 0.1–0.2 G BVH closest-point queries/s):
+hash grid — **not what E7 or G4 measured, see above** — ≈ 0.1–0.2 G BVH closest-point queries/s):
 
 | stage | Python | Rust CPU | basis (CPU) | GPU | basis (GPU) |
 |---|---|---|---|---|---|
@@ -882,6 +926,13 @@ with the same name, default and meaning (R§1.4), plus:
 | `--review-images` | roadmap item 3: render `review/<a>__<b>.png` for probable joins |
 | `--export-glb` | additionally write `assembly_<k>.glb` for the desktop viewer |
 | subcommands `parity`, `bench`, `info` | harness, timing gates, adapters |
+
+`info` prints the build's versions, the adapters, and — since task G4 — the self-test's four checks
+on the default adapter (or on `--gpu-adapter`), followed by **both** ratios with their names on
+them: the kernel's, on an idle device, and `selftest::STAGE_SPEEDUP`, the matching stage's measured
+range, which is the one §6.8's 1.5× bar applies to. Conflating the two is the mistake task G2's
+note made, so the command that an operator runs first on a new machine states the difference
+rather than leaving it to be inferred. `--no-selftest` skips opening a device.
 
 Outputs are the reference's files (R§11) with identical names, JSON schemas (plus the additive
 `engine` key) and PLY layout. `report.md` follows the same sections and number formats; the
@@ -1441,9 +1492,9 @@ the working-mesh budget and found three of its seven rows moving, pot_G's prohib
 | pot A (28 pairs) | ≤ 35 s | ≤ 15 s | every step |
 | pot H (55 pairs) | ≤ 40 s | ≤ 15 s | every step |
 | synthetic 20 (190 pairs) | ≤ 120 s | ≤ 40 s | every step |
-| synthetic 60 (≈ 1 770 pairs) | ≤ 15 min | ≤ 5 min | **final acceptance only** (decision 2026-09-07); projected **2.4 min** CPU |
-| synthetic 170 (≈ 12 800 pairs) | ≤ 2 h | ≤ 30 min | **final acceptance only** (decision 2026-09-07); projected **17 min** CPU |
-| `mixed_all` (12 589 pairs) | ≤ 2 h | ≤ 30 min | **final acceptance only** (decision 2026-09-07); projected **28 min** CPU |
+| synthetic 60 (≈ 1 770 pairs) | ≤ 15 min | ≤ 5 min | **final acceptance only** (decision 2026-09-07); projected **2.4 min** CPU, **1.9 min** GPU |
+| synthetic 170 (≈ 12 800 pairs) | ≤ 2 h | ≤ 30 min | **final acceptance only** (decision 2026-09-07); projected **17 min** CPU, **13.6 min** GPU |
+| `mixed_all` (12 589 pairs) | ≤ 2 h | ≤ 30 min | **final acceptance only** (decision 2026-09-07); projected **28 min** CPU, **24 min** GPU |
 
 The last three rows are the team's decision of 2026-09-07: the large collections are not run
 during development — the development sets are the terracotta, pots A/B/C/G/H, `mixed_ABG` (a
@@ -1458,13 +1509,36 @@ on this machine. That gives 12 800 × 0.523 / 6.43 = **17 min** for synthetic 17
 6.43 = **28 min** for `mixed_all` and 1 770 × 0.523 / 6.43 = **2.4 min** for synthetic 60 — the
 first two against the 2 h gate with 6.9× and 4.2× to spare, and the synthetic-60 row against
 15 min with 6.3×. Preprocessing adds about 1.5 minutes of wall clock for 170 scans at the
-concurrency §5's semaphore admits. The two synthetic figures are upper bounds in the one way that
+concurrency §5's semaphore admits. The GPU column of those three rows is task G4's, from the same kind of measurement on the same
+day: the matching stage costs 63.7 ms per pair on `synthetic_20` and 115.5 ms on `pot_H` with
+`--backend gpu`, against 83.2 and 127.5 ms on the CPU, so 12 800 × 0.0637 = **13.6 min** for
+synthetic 170, 12 589 × 0.1155 = **24 min** for `mixed_all` (real sherds, hence `pot_H`'s rate) and
+1 770 × 0.0637 = **1.9 min** for synthetic 60. `mixed_all` has under six minutes of margin against
+its 30-minute GPU gate and is the row a projection could plausibly be wrong about. The two
+synthetic figures are upper bounds in the one way that
 matters: the 170-piece and 60-piece sets cut the *same* pot the 20-piece set cuts, so their
 fragments are smaller than the ones the per-pair cost was measured on, and the coarse score is
 still the term that grows with fragment size. **The projection is not a run and does not discharge
 the gate**, and it cannot see anything that is not linear in the pair count — R §8's assembly,
 R §9's refinement over 170 placed fragments, the merged writer — which on synthetic 20 are 0.03 s
 and 1.14 s against 14.64 s of matching.
+
+**Measured on both backends, task G4** (`notes/2026-09-08-g4-tuning.md` §7), `bench`, so previews
+and meshes are off, which is what the gates above ask for. Cold is `--no-cache`; peak RSS from
+`/usr/bin/time -l`, peak device memory from the run's own accounting:
+
+| set | CPU warm | CPU cold | CPU gate | **GPU warm** | GPU cold | GPU gate | peak RSS (gpu) | peak device |
+|---|---:|---:|---|---:|---:|---|---:|---:|
+| terracotta | 1.38 s | 3.61 s | ≤ 25 s | **1.37 s** | 3.80 s | ≤ 15 s | 496 MiB | 3 MB |
+| pot A | 4.41 s | 5.85 s | ≤ 35 s | **3.54 s** | 6.03 s | ≤ 15 s | 617 MiB | 20 MB |
+| pot H | 7.73 s | 8.24 s | ≤ 40 s | **7.29 s** | 6.97 s | ≤ 15 s | 400 MiB | 19 MB |
+| synthetic 20 | 16.28 s | 24.22 s | ≤ 120 s | **13.07 s** | 20.90 s | ≤ 40 s | 1 529 MiB | 67 MB |
+
+**Every row is inside its gate on both backends, warm and cold**; the tightest is synthetic 20's
+GPU row at 13.07 s against 40 s. `bench --backend auto` takes the CPU on all four and prints why:
+the self-test's 3.4–5.0× is a kernel on an idle device, the stage measures 1.07–1.43×, and §6.8's
+bar applies to the stage. The GPU projections of the three large rows above come from §6.6's
+measured per-pair cost the same way the CPU ones do.
 
 **Measured, task E2** (`notes/2026-09-07-e2-tuning.md` §9), CPU, warm cache and with the previews
 **and** the meshes written — i.e. more work than the gate asks for, and on the same quiet machine
@@ -1610,6 +1684,7 @@ shorten phase 1+2 to ≈ 14 weeks because GPU work can start once the CPU ICP is
 | 2d, task G3 | done: §6.4's software pipeline — one submitting thread, four command buffers in flight, `Executor::device_slack`, one submission per `Executor` call — plus `Occupancy` (the union of the outstanding intervals, not the per-thread sum), `--gpu-memory` and §1's reservation, §5's `Cancel`/`Progress` with Ctrl-C, and the TDR/2-D-dispatch tests | | matching **1.04–1.40×** on the seven development collections (was 1.0×), device occupancy 41 % → 68 %, peak device memory 103 MB of 1 GB; parity 23 804 / 0 and **every used join, group and pose bit-identical to G2's on both backends** | the risk this row named — "overlap efficiency" — is the one that bit, in a form no scheduler addresses: on an integrated part the device loses 1.60× of its throughput as the ten cores fill up, so §6.6's overlap arithmetic does not hold and the stage's minimum is at six workers, not nine |
 | 2d | scheduler, pipelining, TDR chunking, memory management | 1.5 | the GPU gates of §10.3 **on the development sets** (`mixed_ABG` included, on the same terms: it is roadmap item 4's baseline, not a quality gate), and §5's memory semaphore holding a projected 170-scan preprocessing budget (E1 §7); "synthetic 170 ≤ 30 min" is the final acceptance after phase 2, not a 2d exit (decision 2026-09-07) | overlap efficiency; a projection carried this long can be wrong in a way only the run shows |
 | 2e | vendor matrix (NVIDIA/AMD/Intel/Apple), tuning | 2 | E8 matrix green | Intel/AMD driver quirks |
+| 2e, task G4 | done, on the one adapter this machine has: `coarse::MAX_QUERIES` (a measured **ceiling** beside §6.4's floors), `device_slack` capped at one worker per core plus one, the §10.3 rows measured on both backends cold and warm, §6.6 re-derived from measured throughput, a `sherd-refit-rs info` that runs the self-test and prints **both** ratios with their names on them, and the README's GPU section | | matching **1.07–1.43×** on the seven development collections (was 1.04–1.40×), `synthetic_20` 1.08 → **1.28×**; every §10.3 row inside its gate on both backends, warm and cold; peak device memory 67 MB of 1 GB; parity 23 804 / 0 and **every used join, group and pose bit-identical to G3's on both backends**, two GPU runs byte-identical | **the vendor matrix itself is not done and cannot be done here** — one Metal adapter, no software fallback (E7 §6). Both new constants are consequences of an *integrated* part sharing power and bandwidth with the CPU; a discrete card shares neither and each row of E8 has to re-measure them rather than inherit them. What CI checks without a GPU: the build on four platforms, the chunking and threshold arithmetic, `Selection::decide`'s rule; adapter tests skip with a printed reason |
 | **phase 2 total** | | **9** | | |
 | 3a | pyo3 module, numpy interop, `SHERD_REFIT_BACKEND=rust` routing in the Python package, A/B on the fixtures | 2 | Python pipeline with Rust kernels reproduces the Rust CLI | packaging on Windows |
 | 3b | Tauri 2 app: collection open, run with progress/cancel, report view, GLB viewer, probable-join review writing `constraints.json`, re-run | 3 | museum walkthrough on the terracotta set | signing/notarisation |

@@ -202,7 +202,14 @@ fn index_of(point: &[f64; 3], lo: &[f64; 3], inv_cell: f64, dims: &[usize; 3]) -
 
 #[cfg(test)]
 mod tests {
-    use super::{CELLS, NearMask};
+    #![allow(
+        clippy::float_cmp,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        reason = "brute force mirrors the grid's own arithmetic, exactly"
+    )]
+
+    use super::{CELLS, HashGrid, NearMask};
 
     fn dist(a: &[f64; 3], b: &[f64; 3]) -> f64 {
         ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
@@ -293,5 +300,468 @@ mod tests {
         let same = NearMask::of(&[[1.0, 2.0, 3.0]; 40], 0.5).expect("forty of the same point");
         assert!(same.may_be_near(&[1.0, 2.0, 3.4]));
         assert!(!same.may_be_near(&[1.0, 2.0, 4.0]));
+    }
+
+    /// Brute force over the same cloud, with the same `f32` arithmetic the grid uses.
+    fn brute(points: &[[f32; 3]], q: &[f32; 3], radius: f32, strict: bool) -> Option<(u32, f32)> {
+        let r2 = radius * radius;
+        let mut best = u32::MAX;
+        let mut best_d2 = f32::INFINITY;
+        for (i, p) in points.iter().enumerate() {
+            let (dx, dy, dz) = (p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+            let d2 = dx * dx + dy * dy + dz * dz;
+            let inside = if strict { d2 < r2 } else { d2 <= r2 };
+            #[allow(clippy::cast_possible_truncation, reason = "clouds of a few thousand points")]
+            let i = i as u32;
+            if inside && (d2 < best_d2 || (d2 == best_d2 && i < best)) {
+                best = i;
+                best_d2 = d2;
+            }
+        }
+        (best != u32::MAX).then(|| (best, best_d2.sqrt()))
+    }
+
+    /// A deterministic stream, so the sweep below is the same sweep on every machine.
+    fn stream() -> impl FnMut() -> f32 {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            #[allow(clippy::cast_precision_loss, reason = "24 bits into an f32 mantissa")]
+            let unit = (state >> 40) as f32 * (1.0 / 16_777_216.0);
+            unit
+        }
+    }
+
+    /// D §6.2's grid answers exactly what brute force does — the index, not only the distance —
+    /// on a random cloud, on a curve and on a plane, at radii from well under a cell to well over
+    /// the cloud, and with both radius conventions.
+    #[test]
+    fn the_hash_grid_finds_what_brute_force_finds() {
+        let mut next = stream();
+        let cloud: Vec<[f32; 3]> =
+            (0..800).map(|_| [next() * 40.0, next() * 10.0, next() * 3.0]).collect();
+        let curve: Vec<[f32; 3]> = (0..1500)
+            .map(|k| {
+                let t = k as f32 * 0.01;
+                [t * 2.0, 5.0 + 4.0 * t.sin(), 1.5 + 1.4 * (t * 0.7).cos()]
+            })
+            .collect();
+        #[allow(clippy::cast_precision_loss, reason = "a 20x20 lattice")]
+        let plane: Vec<[f32; 3]> =
+            (0..400).map(|k| [(k % 20) as f32, (k / 20) as f32, 0.0]).collect();
+
+        let mut hits = 0_usize;
+        for points in [&cloud, &curve, &plane] {
+            for radius in [0.05_f32, 0.2, 1.0, 3.0, 25.0] {
+                let grid = HashGrid::of_f32(points, radius).expect("a non-empty cloud");
+                assert_eq!(grid.points().len(), points.len());
+                assert_eq!(grid.sorted_idx().len(), points.len());
+                assert!(grid.occupied() > 0 && grid.occupied() <= points.len());
+                for _ in 0..3000 {
+                    let q = [next() * 50.0 - 5.0, next() * 14.0 - 2.0, next() * 6.0 - 1.5];
+                    for strict in [false, true] {
+                        let want = brute(points, &q, radius, strict);
+                        let got =
+                            if strict { grid.nearest_below(&q) } else { grid.nearest_within(&q) };
+                        assert_eq!(got, want, "q {q:?} radius {radius} strict {strict}");
+                        hits += usize::from(got.is_some());
+                    }
+                }
+            }
+        }
+        assert!(hits > 1000, "a sweep that never finds a neighbour proves nothing: {hits}");
+    }
+
+    /// The tie rule is the lowest index, and it is the *original* index, not the sorted one.
+    #[test]
+    fn a_tie_goes_to_the_lowest_index() {
+        // Twelve copies of the same point, plus one slightly nearer to a query on the other side.
+        let mut points = vec![[1.0_f32, 2.0, 3.0]; 12];
+        points.push([1.0, 2.0, 3.5]);
+        let grid = HashGrid::of_f32(&points, 1.0).expect("thirteen points");
+        assert_eq!(grid.nearest_within(&[1.0, 2.0, 3.0]), Some((0, 0.0)));
+        assert_eq!(grid.nearest_within(&[1.0, 2.0, 3.6]), Some((12, 0.099_999_905)));
+        // Two cells, equidistant: the lower index wins wherever the traversal meets it.
+        let pair = vec![[1.0_f32, 0.0, 0.0], [-1.0, 0.0, 0.0]];
+        let grid = HashGrid::of_f32(&pair, 2.0).expect("two points");
+        assert_eq!(grid.nearest_within(&[0.0, 0.0, 0.0]).map(|(i, _)| i), Some(0));
+        let flipped = vec![[-1.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let grid = HashGrid::of_f32(&flipped, 2.0).expect("two points");
+        assert_eq!(grid.nearest_within(&[0.0, 0.0, 0.0]).map(|(i, _)| i), Some(0));
+    }
+
+    /// The radius bound: inclusive for `nearest_within`, strict for `nearest_below`.
+    #[test]
+    fn the_radius_bound_is_the_one_the_caller_asked_for() {
+        let points = vec![[0.0_f32, 0.0, 0.0]];
+        let grid = HashGrid::of_f32(&points, 1.0).expect("one point");
+        assert_eq!(grid.nearest_within(&[1.0, 0.0, 0.0]), Some((0, 1.0)));
+        assert_eq!(grid.nearest_below(&[1.0, 0.0, 0.0]), None, "exclusive at the radius");
+        let inside = f32::from_bits(1.0_f32.to_bits() - 1);
+        assert!(grid.nearest_below(&[inside, 0.0, 0.0]).is_some(), "one ulp inside it is a hit");
+        assert_eq!(grid.nearest_within(&[1.001, 0.0, 0.0]), None);
+    }
+
+    /// The device buffers are the shapes D §6.2 names, and the table is a power of two at least
+    /// twice the cloud.
+    #[test]
+    fn the_device_layout_is_the_one_the_kernel_binds() {
+        assert_eq!(std::mem::size_of::<super::GridHeader>(), 32);
+        assert_eq!(std::mem::size_of::<super::GridSlot>(), 16);
+        let mut next = stream();
+        let points: Vec<[f32; 3]> = (0..600).map(|_| [next(), next(), next()]).collect();
+        let grid = HashGrid::of_f32(&points, 0.1).expect("600 points");
+        let header = grid.header();
+        assert_eq!(header.n, 600);
+        assert_eq!(header.cap, 2048, "next_pow2(2n)");
+        assert_eq!(grid.slots().len(), 2048);
+        assert_eq!(grid.counts().len(), 2048);
+        assert!((header.inv_cell - 10.0).abs() < 1e-6);
+        // Every point is filed under exactly one slot, and each slot's run is ascending.
+        let total: u32 = grid.counts().iter().sum();
+        assert_eq!(total, 600);
+        for (slot, &count) in grid.counts().iter().enumerate() {
+            if count == 0 {
+                assert_eq!(grid.slots()[slot].start, -1);
+                continue;
+            }
+            let start = grid.slots()[slot].start as usize;
+            let run = &grid.sorted_idx()[start..start + count as usize];
+            assert!(run.windows(2).all(|w| w[0] < w[1]), "ascending inside a cell");
+        }
+        assert!(grid.device_bytes() > 0);
+        assert!(grid.max_per_cell() >= 1);
+    }
+
+    /// The degenerate inputs answer rather than panic.
+    #[test]
+    fn nothing_to_grid_is_no_grid() {
+        assert!(HashGrid::of_f32(&[], 1.0).is_none());
+        assert!(HashGrid::of_f32(&[[0.0; 3]], 0.0).is_none());
+        assert!(HashGrid::of_f32(&[[0.0; 3]], -1.0).is_none());
+        assert!(HashGrid::of_f32(&[[0.0; 3]], f32::NAN).is_none());
+        assert!(HashGrid::of_f32(&[[f32::NAN, 0.0, 0.0]], 1.0).is_none());
+        assert!(HashGrid::build(&[], 1.0).is_none());
+        let one = HashGrid::build(&[[1.0, 2.0, 3.0]], 0.5).expect("one point");
+        assert_eq!(one.nearest_within(&[1.2, 2.0, 3.0]).map(|(i, _)| i), Some(0));
+        assert!(one.nearest_within(&[9.0, 2.0, 3.0]).is_none());
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// D §6.2's hash grid: the radius-bounded nearest-neighbour structure both executors share.
+// ---------------------------------------------------------------------------------------------
+
+/// One cell of [`HashGrid`], as the WGSL kernels read it (`slots: array<vec4<i32>>`, D §6.2).
+///
+/// `start` is `-1` for an empty slot; a used slot's `start` indexes [`HashGrid::sorted_idx`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GridSlot {
+    /// Cell coordinate along x.
+    pub ix: i32,
+    /// Cell coordinate along y.
+    pub iy: i32,
+    /// Cell coordinate along z.
+    pub iz: i32,
+    /// First entry of this cell in `sorted_idx`, or `-1` when the slot is empty.
+    pub start: i32,
+}
+
+/// The uniform half of a [`HashGrid`] (`GridHeader { origin: vec4<f32> (w = 1/r), cap, n, pad }`,
+/// D §6.2).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GridHeader {
+    /// The grid's origin: the cloud's minimum corner.
+    pub origin: [f32; 3],
+    /// `1/r`, the reciprocal of the cell side — the kernel multiplies rather than divides,
+    /// because Metal's division is 2 ULP (E7 §4.2) and a reciprocal computed once on the host is
+    /// the same number on both sides.
+    pub inv_cell: f32,
+    /// Slots in the table, a power of two.
+    pub cap: u32,
+    /// Points in the cloud.
+    pub n: u32,
+    /// Padding to sixteen bytes.
+    pub pad: [u32; 2],
+}
+
+/// The multipliers of D §6.2's cell hash.
+const HASH: [i64; 3] = [73_856_093, 19_349_663, 83_492_791];
+
+/// D §6.2's hash grid over a point cloud, built on the CPU and uploaded with a batch.
+///
+/// This is the structure the WGSL kernels of phase 2b query, and it is built here so that the two
+/// executors traverse **the same cells in the same order**: cell side `r`, integer cell
+/// coordinates `⌊(p − origin)·(1/r)⌋`, keys hashed into `cap = next_pow2(2n)` slots by
+/// `(ix·73856093) ^ (iy·19349663) ^ (iz·83492791)`, open addressing with linear probing, and one
+/// `sorted_idx` array holding the points of each cell in ascending original index. A query visits
+/// the 27 neighbouring cells in a fixed `(dx, dy, dz)` order and the points of each cell in
+/// ascending index, keeping the nearest inside the radius; ties go to the lowest index.
+///
+/// # Why the CPU path does not search with it
+///
+/// E3 measured this grid at 0.4–2.0× `kiddo` on the CPU — never the ≥ 3× D §3 hoped for — so
+/// [`PointTree`](super::kdtree::PointTree) stayed the CPU's search structure and every parity row
+/// of D §10.2 is measured through it. Nothing in the pipeline queries a `HashGrid`: it is built
+/// from an [`Executor`](crate::executor::Executor) batch by the executor that needs it, which is
+/// the GPU one. [`HashGrid::nearest_below`] and [`HashGrid::nearest_within`] exist so that the
+/// kernel has a CPU mirror to be cross-checked against (D §10.4 layer 3) and so that the
+/// traversal order can be tested against brute force without an adapter.
+///
+/// The coordinates are `f32` because the kernels are (D §6.8: f32 only); the caller narrows once,
+/// here, rather than once per query.
+#[derive(Clone, Debug)]
+pub struct HashGrid {
+    header: GridHeader,
+    slots: Vec<GridSlot>,
+    counts: Vec<u32>,
+    sorted_idx: Vec<u32>,
+    points: Vec<[f32; 3]>,
+    radius: f32,
+}
+
+impl HashGrid {
+    /// Builds the grid of D §6.2 over `points` for queries at `radius`.
+    ///
+    /// `None` when there is nothing to build over: an empty cloud, a non-positive or non-finite
+    /// radius, or a coordinate that is not finite once narrowed to `f32`.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, reason = "the grid is f32, as the kernels are")]
+    pub fn build(points: &[[f64; 3]], radius: f64) -> Option<Self> {
+        let narrowed: Vec<[f32; 3]> =
+            points.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect();
+        Self::of_f32(&narrowed, radius as f32)
+    }
+
+    /// [`HashGrid::build`] over coordinates already narrowed.
+    #[must_use]
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "a claimed slot's `start` is non-negative by the time it is read"
+    )]
+    pub fn of_f32(points: &[[f32; 3]], radius: f32) -> Option<Self> {
+        if points.is_empty() || !(radius.is_finite() && radius > 0.0) {
+            return None;
+        }
+        if points.iter().any(|p| p.iter().any(|c| !c.is_finite())) {
+            return None;
+        }
+        let mut origin = [f32::INFINITY; 3];
+        for p in points {
+            for (o, &c) in origin.iter_mut().zip(p) {
+                *o = o.min(c);
+            }
+        }
+        let n = points.len();
+        let cap = (2 * n).next_power_of_two();
+        let inv_cell = 1.0 / radius;
+        let header = GridHeader {
+            origin,
+            inv_cell,
+            cap: u32::try_from(cap).ok()?,
+            n: u32::try_from(n).ok()?,
+            pad: [0; 2],
+        };
+
+        // Pass one: every point's cell, and the slot it hashes to. Open addressing, linear
+        // probing; `cap = 2n` guarantees a free slot exists.
+        let mut slots = vec![GridSlot { ix: 0, iy: 0, iz: 0, start: -1 }; cap];
+        let mut counts = vec![0_u32; cap];
+        let mut slot_of = vec![0_u32; n];
+        for (i, p) in points.iter().enumerate() {
+            let cell = cell_of(p, &origin, inv_cell);
+            let slot = probe(&mut slots, cap, cell);
+            counts[slot] += 1;
+            slot_of[i] = u32::try_from(slot).unwrap_or(u32::MAX);
+        }
+        // Pass two: a prefix sum over the slots in slot order gives each cell its run of
+        // `sorted_idx`; walking the points in ascending index fills each run in ascending index,
+        // which is the tie rule.
+        let mut cursor = 0_u32;
+        for (slot, &count) in counts.iter().enumerate() {
+            if count > 0 {
+                slots[slot].start = i32::try_from(cursor).ok()?;
+                cursor += count;
+            }
+        }
+        let mut fill = vec![0_u32; cap];
+        let mut sorted_idx = vec![0_u32; n];
+        for (i, &slot) in slot_of.iter().enumerate() {
+            let slot = slot as usize;
+            let at = slots[slot].start as usize + fill[slot] as usize;
+            sorted_idx[at] = u32::try_from(i).unwrap_or(u32::MAX);
+            fill[slot] += 1;
+        }
+        Some(Self { header, slots, counts, sorted_idx, points: points.to_vec(), radius })
+    }
+
+    /// The nearest point within `radius` **inclusive** (`d ≤ r`), as D §6.2 states the rule.
+    #[must_use]
+    pub fn nearest_within(&self, query: &[f32; 3]) -> Option<(u32, f32)> {
+        self.search(query, false)
+    }
+
+    /// The nearest point **strictly** inside `radius` (`d < r`).
+    ///
+    /// R §5.2's bound is scipy's `distance_upper_bound`, which is exclusive, and R §7's is FLANN's
+    /// strict `<` on the squared distance; a kernel that mirrors either of those calls this one.
+    #[must_use]
+    pub fn nearest_below(&self, query: &[f32; 3]) -> Option<(u32, f32)> {
+        self.search(query, true)
+    }
+
+    /// D §6.2's traversal, with the radius test the caller picked.
+    ///
+    /// Written out the way the WGSL must be: the squared distance as `dx*dx + dy*dy + dz*dz`
+    /// rather than a `dot`, because `metal::dot` stays a fused chain even when contraction is
+    /// disabled (E7 §4.2).
+    #[allow(clippy::cast_sign_loss, reason = "a slot the probe returns has a non-negative `start`")]
+    #[allow(clippy::float_cmp, reason = "D §6.2's tie rule is an exact equality on `d2`")]
+    fn search(&self, query: &[f32; 3], strict: bool) -> Option<(u32, f32)> {
+        let r2 = self.radius * self.radius;
+        let base = cell_of(query, &self.header.origin, self.header.inv_cell);
+        let mut best = u32::MAX;
+        let mut best_d2 = f32::INFINITY;
+        for dx in -1..=1_i32 {
+            for dy in -1..=1_i32 {
+                for dz in -1..=1_i32 {
+                    let cell = [base[0] + dx, base[1] + dy, base[2] + dz];
+                    let Some(slot) = self.find(cell) else { continue };
+                    let start = self.slots[slot].start as usize;
+                    let count = self.counts[slot] as usize;
+                    for &i in &self.sorted_idx[start..start + count] {
+                        let p = self.points[i as usize];
+                        let dxq = p[0] - query[0];
+                        let dyq = p[1] - query[1];
+                        let dzq = p[2] - query[2];
+                        let d2 = dxq * dxq + dyq * dyq + dzq * dzq;
+                        let inside = if strict { d2 < r2 } else { d2 <= r2 };
+                        // `<` on the distance and ascending index inside a cell together give
+                        // D §6.2's rule: ties go to the lowest index.
+                        if inside && (d2 < best_d2 || (d2 == best_d2 && i < best)) {
+                            best = i;
+                            best_d2 = d2;
+                        }
+                    }
+                }
+            }
+        }
+        (best != u32::MAX).then(|| (best, best_d2.sqrt()))
+    }
+
+    /// The slot holding `cell`, or `None` when the cell is empty.
+    fn find(&self, cell: [i32; 3]) -> Option<usize> {
+        let cap = self.header.cap as usize;
+        let mut slot = hash_cell(cell) & (cap - 1);
+        for _ in 0..cap {
+            let s = self.slots[slot];
+            if s.start < 0 {
+                return None;
+            }
+            if [s.ix, s.iy, s.iz] == cell {
+                return Some(slot);
+            }
+            slot = (slot + 1) & (cap - 1);
+        }
+        None
+    }
+
+    /// The uniform block a kernel binds.
+    #[must_use]
+    pub fn header(&self) -> GridHeader {
+        self.header
+    }
+
+    /// `slots: array<vec4<i32>>`.
+    #[must_use]
+    pub fn slots(&self) -> &[GridSlot] {
+        &self.slots
+    }
+
+    /// `counts: array<u32>`.
+    #[must_use]
+    pub fn counts(&self) -> &[u32] {
+        &self.counts
+    }
+
+    /// `sorted_idx: array<u32>`.
+    #[must_use]
+    pub fn sorted_idx(&self) -> &[u32] {
+        &self.sorted_idx
+    }
+
+    /// The cloud, narrowed once at build time.
+    #[must_use]
+    pub fn points(&self) -> &[[f32; 3]] {
+        &self.points
+    }
+
+    /// The radius the grid was built for; the cell side is the same number.
+    #[must_use]
+    pub fn radius(&self) -> f32 {
+        self.radius
+    }
+
+    /// How many slots are occupied — the number E7 §5 reports as "occupied cells".
+    #[must_use]
+    pub fn occupied(&self) -> usize {
+        self.counts.iter().filter(|&&c| c > 0).count()
+    }
+
+    /// The largest number of points in one cell.
+    #[must_use]
+    pub fn max_per_cell(&self) -> u32 {
+        self.counts.iter().copied().max().unwrap_or(0)
+    }
+
+    /// Bytes a batch uploads for this grid: header, slots, counts, indices and the cloud.
+    #[must_use]
+    pub fn device_bytes(&self) -> usize {
+        std::mem::size_of::<GridHeader>()
+            + std::mem::size_of_val(self.slots.as_slice())
+            + std::mem::size_of_val(self.counts.as_slice())
+            + std::mem::size_of_val(self.sorted_idx.as_slice())
+            + self.points.len() * 16
+    }
+}
+
+/// `⌊(p − origin)·inv_cell⌋` on each axis, as the kernel computes it.
+#[inline]
+#[allow(clippy::cast_possible_truncation, reason = "cell coordinates are small integers")]
+fn cell_of(p: &[f32; 3], origin: &[f32; 3], inv_cell: f32) -> [i32; 3] {
+    std::array::from_fn(|k| ((p[k] - origin[k]) * inv_cell).floor() as i32)
+}
+
+/// D §6.2's cell hash, in `i64` so that the multiplication cannot overflow before the xor.
+#[inline]
+#[allow(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    reason = "the xor is a bit pattern, and the mask that follows fits every pointer width"
+)]
+fn hash_cell(cell: [i32; 3]) -> usize {
+    let h = (i64::from(cell[0]).wrapping_mul(HASH[0]))
+        ^ (i64::from(cell[1]).wrapping_mul(HASH[1]))
+        ^ (i64::from(cell[2]).wrapping_mul(HASH[2]));
+    (h as u64 as usize) & (usize::MAX >> 1)
+}
+
+/// The slot `cell` belongs in, claiming a free one on the way (linear probing).
+fn probe(slots: &mut [GridSlot], cap: usize, cell: [i32; 3]) -> usize {
+    let mut slot = hash_cell(cell) & (cap - 1);
+    loop {
+        let s = slots[slot];
+        if [s.ix, s.iy, s.iz] == cell && s.start == i32::MIN {
+            return slot;
+        }
+        if s.start == -1 {
+            slots[slot] = GridSlot { ix: cell[0], iy: cell[1], iz: cell[2], start: i32::MIN };
+            return slot;
+        }
+        slot = (slot + 1) & (cap - 1);
     }
 }

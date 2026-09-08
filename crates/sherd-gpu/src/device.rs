@@ -342,6 +342,21 @@ impl Gpu {
             .map(|_| ())
             .map_err(|e| GpuError::Poll(e.to_string()))
     }
+
+    /// Blocks until **this** submission has finished, and no longer.
+    ///
+    /// [`Gpu::wait`] waits for the most recent submission at the time of the poll, whoever made
+    /// it. That is the right thing for a self-test on an idle device and the wrong thing for a
+    /// matching stage: ten rayon threads share one queue, and a thread that waits for "the latest
+    /// submission" waits for nine other pairs' work as well as its own. Measured on
+    /// `synthetic_20`, the per-dispatch times summed over the pool came to 20.6 s against a
+    /// matching stage of 23.1 s — most of it other threads' work counted ten times over.
+    pub fn wait_for(&self, submission: wgpu::SubmissionIndex) -> Result<(), GpuError> {
+        self.device
+            .poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
+            .map(|_| ())
+            .map_err(|e| GpuError::Poll(e.to_string()))
+    }
 }
 
 #[cfg(test)]

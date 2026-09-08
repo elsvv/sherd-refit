@@ -58,6 +58,34 @@ pub(crate) struct Resolved {
     pub(crate) engine: Engine<'static>,
     /// One sentence naming the deciding fact, for the log and for `--verbose`.
     pub(crate) reason: String,
+    /// The GPU executor, when one was built — so that a run can print how much of it was used.
+    #[cfg(feature = "gpu")]
+    pub(crate) executor: Option<&'static sherd_gpu::GpuExecutor>,
+}
+
+impl Resolved {
+    /// One line per `Executor` method: calls, how many reached the device, dispatches, GPU wall
+    /// time and the method's own unit of work. Empty on the CPU path.
+    ///
+    /// This is what makes a timing claim about the GPU checkable. "The matching stage was 15.7 s"
+    /// says nothing about *why*; "the device was busy for 6.1 s of it, over 1 520 dispatches" says
+    /// whether the device was the limit or the queue in front of it was.
+    #[must_use]
+    pub(crate) fn device_lines(&self) -> Vec<String> {
+        #[cfg(feature = "gpu")]
+        {
+            self.executor.map_or_else(Vec::new, |executor| {
+                let stats = executor.stats();
+                let mut lines = stats.lines();
+                lines.push(format!("gpu busy {:.2} s in total", stats.gpu_busy().as_secs_f64()));
+                lines
+            })
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            Vec::new()
+        }
+    }
 }
 
 /// D §6.8's resolution of `--backend` and `--gpu-adapter`.
@@ -76,6 +104,7 @@ pub(crate) fn resolve(backend: Backend, adapter: Option<&str>) -> Result<Resolve
             backend: Backend::Cpu,
             engine: Engine::REFERENCE,
             reason: "--backend cpu".to_owned(),
+            executor: None,
         });
     }
     let choice = adapter.map_or(AdapterChoice::Default, AdapterChoice::parse);
@@ -113,23 +142,26 @@ pub(crate) fn resolve(backend: Backend, adapter: Option<&str>) -> Result<Resolve
                 backend: Backend::Gpu,
                 engine: Engine::new(executor, Numerics::default()),
                 reason,
+                executor: Some(executor),
             })
         }
-        // `auto`: never fails, and in phase 2a never picks the GPU. `Selection` is the rule, and
-        // it is the same rule phase 2b will use with `HAS_KERNELS` flipped.
+        // `auto`: never fails, and today never picks the GPU. `Selection` is the rule, and it is
+        // the same rule that will pick the GPU when `AUTO_ELIGIBLE` flips.
         (_, Err(e)) => Ok(Resolved {
             backend: Backend::Cpu,
             engine: Engine::REFERENCE,
             reason: Selection::no_gpu(&e).reason,
+            executor: None,
         }),
         (_, Ok((gpu, test))) => {
-            let selection = Selection::decide(test, GpuExecutor::HAS_KERNELS);
+            let selection = Selection::decide(test, GpuExecutor::AUTO_ELIGIBLE);
             if !selection.use_gpu {
                 drop(gpu);
                 return Ok(Resolved {
                     backend: Backend::Cpu,
                     engine: Engine::REFERENCE,
                     reason: selection.reason,
+                    executor: None,
                 });
             }
             let test = selection.selftest.expect("a GPU selection carries its self-test");
@@ -139,6 +171,7 @@ pub(crate) fn resolve(backend: Backend, adapter: Option<&str>) -> Result<Resolve
                 backend: Backend::Gpu,
                 engine: Engine::new(executor, Numerics::default()),
                 reason: selection.reason,
+                executor: Some(executor),
             })
         }
     }
@@ -204,33 +237,46 @@ mod tolerance {
 /// A deviation column: the worst, the count that moved at all, and the percentiles beside it.
 ///
 /// D §10.2 asks for both — a tolerance on the worst case and a distribution beside it ("stage 1,
-/// stage 2 — distribution (a measurement beside the worst case)") — because on a stage whose
-/// ladders are chaotic (D §10.2's `chaotic` row, task C2 §5) the maximum is one candidate and the
-/// median is the answer to "did the kernel reproduce the rung".
+/// stage 2 — distribution (a measurement beside the worst case)") — and it asks for a third thing
+/// as well, in the `chaotic` row: *how many of these candidates' ladders are not a function of
+/// their input at double precision at all*. Task C2 §5 measured that on the reference: nudging one
+/// entry of `T0` by one ULP moves Open3D's own answer for three of `Pot_B_Piece_01__06`'s ten
+/// stage-2 candidates by 24.8°, 65.5° and 101.7°. A worst-case row over such a candidate measures
+/// the chaos and not the kernel, so this column keeps the two apart: [`Column::determined`] holds
+/// the deviations of the candidates whose own CPU ladder survives all twelve one-ULP
+/// perturbations, and it is those the tolerance is applied to. Without `--chaos` every candidate
+/// counts as determined and the row is the plain worst case.
 #[cfg(feature = "gpu")]
 #[derive(Debug, Default)]
 struct Column {
-    values: Vec<f64>,
+    all: Vec<f64>,
+    determined: Vec<f64>,
     differing: usize,
+    chaotic: usize,
 }
 
 #[cfg(feature = "gpu")]
 impl Column {
-    fn push(&mut self, deviation: f64, differs: bool) {
-        self.values.push(deviation);
+    fn push(&mut self, deviation: f64, differs: bool, determined: bool) {
+        self.all.push(deviation);
+        if determined {
+            self.determined.push(deviation);
+        } else {
+            self.chaotic += 1;
+        }
         self.differing += usize::from(differs);
     }
 
-    fn worst(&self) -> f64 {
-        self.values.iter().copied().fold(0.0_f64, f64::max)
+    fn worst(values: &[f64]) -> f64 {
+        values.iter().copied().fold(0.0_f64, f64::max)
     }
 
     /// `p50`, `p90`, `p99` by nearest rank over the sorted deviations.
-    fn percentiles(&self) -> [f64; 3] {
-        if self.values.is_empty() {
+    fn percentiles(values: &[f64]) -> [f64; 3] {
+        if values.is_empty() {
             return [0.0; 3];
         }
-        let mut sorted = self.values.clone();
+        let mut sorted = values.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let at = |q: f64| {
             #[allow(clippy::cast_precision_loss, reason = "candidate counts are small")]
@@ -247,24 +293,84 @@ impl Column {
     }
 
     fn row(&self, stage: &str, tolerance: f64) -> CheckRow {
-        let worst = self.worst();
-        let [p50, p90, p99] = self.percentiles();
-        let status = if self.values.is_empty() {
+        let worst = Self::worst(&self.determined);
+        let [p50, p90, p99] = Self::percentiles(&self.all);
+        let over_all = Self::worst(&self.all);
+        let tail = if self.chaotic > 0 {
+            format!(" ({} chaotic excluded, worst over all {over_all:.3e})", self.chaotic)
+        } else {
+            String::new()
+        };
+        let status = if self.all.is_empty() {
             "skipped — nothing to compare".to_owned()
         } else if worst <= tolerance {
-            format!("ok — p50 {p50:.3e} p90 {p90:.3e} p99 {p99:.3e}")
+            format!("ok — p50 {p50:.3e} p90 {p90:.3e} p99 {p99:.3e}{tail}")
         } else {
-            format!("FAIL — p50 {p50:.3e} p90 {p90:.3e} p99 {p99:.3e}")
+            format!("FAIL — p50 {p50:.3e} p90 {p90:.3e} p99 {p99:.3e}{tail}")
         };
         CheckRow {
             stage: stage.to_owned(),
-            items: self.values.len(),
+            items: self.all.len(),
             worst,
             tolerance,
             differing: self.differing,
             status,
         }
     }
+}
+
+/// Which candidates' ladders are a function of their input at double precision — C2's probe, over
+/// a whole batch at once.
+///
+/// The ladder is re-climbed from the twelve initial poses one ULP from each candidate's own (each
+/// entry of the 3×4 block moved to its next representable neighbour, one at a time), on the CPU,
+/// and a candidate is *determined* when every one of those twelve answers lands within the row's
+/// own tolerance of its unperturbed one. Thirteen `climb_all` calls over the whole array rather
+/// than thirteen per candidate, so the cost is thirteen rungs and not thirteen ladders each.
+///
+/// `sherd_parity::stages::determined` is the same probe for one candidate; it is not reused here
+/// because it measures with the trace form of `pose_gap`, whose floor on these poses is 3.6e-2
+/// degrees — most of the 0.05 the row allows.
+#[cfg(feature = "gpu")]
+fn determined_batch(
+    rungs: &[sherd_core::matching::ladder::Rung<'_>],
+    inits: &[sherd_core::matching::icp::Pose],
+    scales: &sherd_core::matching::scales::Scales,
+    rotation: f64,
+    translation: f64,
+) -> Vec<bool> {
+    use sherd_core::executor::Engine;
+    use sherd_core::matching::ladder::climb_all;
+
+    let last = |climbed: Vec<Vec<sherd_core::matching::icp::Registration>>| -> Vec<_> {
+        climbed
+            .into_iter()
+            .zip(inits)
+            .map(|(out, init)| out.last().map_or(*init, |r| r.transform))
+            .collect::<Vec<_>>()
+    };
+    let base = last(climb_all(Engine::REFERENCE, rungs, inits, scales));
+    let mut ok = vec![true; inits.len()];
+    for i in 0..3 {
+        for j in 0..4 {
+            let nudged: Vec<_> = inits
+                .iter()
+                .map(|init| {
+                    let mut near = *init;
+                    near[(i, j)] = near[(i, j)].next_up();
+                    near
+                })
+                .collect();
+            let other = last(climb_all(Engine::REFERENCE, rungs, &nudged, scales));
+            for (k, (a, b)) in base.iter().zip(&other).enumerate() {
+                let (deg, units) = pose_deviation(a, b, scales.t);
+                if deg > rotation || units > translation {
+                    ok[k] = false;
+                }
+            }
+        }
+    }
+    ok
 }
 
 /// `sherd-refit-rs gpu-check`: feed identical batches to both executors and report the deviations.
@@ -287,6 +393,7 @@ pub(crate) fn check(
     fixture: Option<&std::path::Path>,
     adapter: Option<&str>,
     pairs: usize,
+    chaos: bool,
 ) -> Result<Vec<CheckRow>> {
     use std::sync::Arc;
 
@@ -377,6 +484,10 @@ pub(crate) fn check(
     let mut s2_disp = Column::default();
     let mut s2_fit = Column::default();
     let mut s2_rmse = Column::default();
+    let mut s1_ctrl = Column::default();
+    let mut s2_ctrl = Column::default();
+    let mut s1_iter = Column::default();
+    let mut s2_iter = Column::default();
     let mut distance = Column::default();
     let mut inside_depth = Column::default();
     let mut inside_flag = 0_usize;
@@ -399,36 +510,57 @@ pub(crate) fn check(
             }
             used += 1;
             let t = pair.scales.t;
-            let report = compare_pair(&pair, &params, &executor);
+            let report = compare_pair(&pair, &params, &executor, chaos);
 
             if wanted("coarse") {
                 for (c, g) in report.coarse_host.iter().zip(&report.coarse_device) {
-                    coarse.push((c - g).abs(), c.to_bits() != g.to_bits());
+                    coarse.push((c - g).abs(), c.to_bits() != g.to_bits(), true);
                     over_one_probe += usize::from((c - g).abs() > tolerance::COARSE);
                 }
                 for (c, g) in report.rescore_host.iter().zip(&report.rescore_device) {
-                    rescore.push((c - g).abs(), c.to_bits() != g.to_bits());
+                    rescore.push((c - g).abs(), c.to_bits() != g.to_bits(), true);
                 }
             }
             if wanted("icp") {
-                for (which, cpu, gpu) in [
-                    (1_u8, &report.stage1_host, &report.stage1_device),
-                    (2, &report.stage2_host, &report.stage2_device),
+                for (which, cpu, gpu, determined) in [
+                    (1_u8, &report.stage1_host, &report.stage1_device, &report.stage1_ok),
+                    (2, &report.stage2_host, &report.stage2_device, &report.stage2_ok),
                 ] {
                     let (rot, disp, fit, rmse) = if which == 1 {
                         (&mut s1_rot, &mut s1_disp, &mut s1_fit, &mut s1_rmse)
                     } else {
                         (&mut s2_rot, &mut s2_disp, &mut s2_fit, &mut s2_rmse)
                     };
-                    for (c, g) in cpu.iter().zip(gpu) {
+                    let (control, poses, iters) = if which == 1 {
+                        (&mut s1_ctrl, &report.stage1_control, &mut s1_iter)
+                    } else {
+                        (&mut s2_ctrl, &report.stage2_control, &mut s2_iter)
+                    };
+                    for (k, (c, g)) in cpu.iter().zip(gpu).enumerate() {
+                        let sound = determined.get(k).copied().unwrap_or(true);
+                        #[allow(clippy::cast_precision_loss, reason = "iteration caps are small")]
+                        let delta = (c.iterations as f64 - g.iterations as f64).abs();
+                        iters.push(
+                            delta,
+                            c.iterations != g.iterations || c.converged != g.converged,
+                            sound,
+                        );
+                    }
+                    for (k, (c, ctrl)) in cpu.iter().zip(poses).enumerate() {
+                        let sound = determined.get(k).copied().unwrap_or(true);
+                        let (deg, _) = pose_deviation(&c.transform, ctrl, t);
+                        control.push(deg, deg > 0.0, sound);
+                    }
+                    for (k, (c, g)) in cpu.iter().zip(gpu).enumerate() {
+                        let sound = determined.get(k).copied().unwrap_or(true);
                         let moved = c.transform != g.transform;
                         let (deg, units) = pose_deviation(&c.transform, &g.transform, t);
-                        rot.push(deg, moved);
-                        disp.push(units, moved);
+                        rot.push(deg, moved, sound);
+                        disp.push(units, moved, sound);
                         let df = (c.fitness - g.fitness).abs();
                         let dr = (c.inlier_rmse - g.inlier_rmse).abs() / t;
-                        fit.push(df, c.correspondences != g.correspondences);
-                        rmse.push(dr, dr > 0.0);
+                        fit.push(df, c.correspondences != g.correspondences, sound);
+                        rmse.push(dr, dr > 0.0, sound);
                     }
                 }
             }
@@ -450,7 +582,7 @@ pub(crate) fn check(
                         } else {
                             (c - g).abs() / t
                         };
-                        distance.push(delta, c.is_finite() != g.is_finite());
+                        distance.push(delta, c.is_finite() != g.is_finite(), true);
                     }
                 }
                 if wanted("inside")
@@ -462,8 +594,11 @@ pub(crate) fn check(
                         inside_items += cpu.len();
                         for (c, g) in cpu.iter().zip(&gpu) {
                             inside_flag += usize::from(c.inside != g.inside);
-                            inside_depth
-                                .push(f64::from((c.depth - g.depth).abs()) / t, c.depth != g.depth);
+                            inside_depth.push(
+                                f64::from((c.depth - g.depth).abs()) / t,
+                                c.depth != g.depth,
+                                true,
+                            );
                         }
                     }
                 }
@@ -482,18 +617,22 @@ pub(crate) fn check(
     }
     if wanted("icp") {
         rows.push(s1_rot.row("icp s1 deg", tolerance::POSE_DEG));
+        rows.push(s1_ctrl.row("icp s1 ctrl", tolerance::POSE_DEG));
+        rows.push(s1_iter.row("icp s1 iter", f64::INFINITY));
         rows.push(s1_disp.row("icp s1 t", tolerance::POSE_T));
         rows.push(s1_fit.row("icp s1 fit", tolerance::ICP));
         rows.push(s1_rmse.row("icp s1 rmse", tolerance::ICP));
         rows.push(s2_rot.row("icp s2 deg", tolerance::POSE_DEG));
+        rows.push(s2_ctrl.row("icp s2 ctrl", tolerance::POSE_DEG));
+        rows.push(s2_iter.row("icp s2 iter", f64::INFINITY));
         rows.push(s2_disp.row("icp s2 t", tolerance::POSE_T));
         rows.push(s2_fit.row("icp s2 fit", tolerance::ICP));
         rows.push(s2_rmse.row("icp s2 rmse", tolerance::ICP));
     }
     if wanted("distance") {
         rows.push(CheckRow {
-            items: distance.values.len(),
-            ..delegated("distance", tolerance::DISTANCE, distance.values.len())
+            items: distance.all.len(),
+            ..delegated("distance", tolerance::DISTANCE, distance.all.len())
         });
     }
     if wanted("inside") {
@@ -570,6 +709,14 @@ struct PairReport {
     stage1_device: Vec<sherd_core::matching::icp::Registration>,
     stage2_host: Vec<sherd_core::matching::icp::Registration>,
     stage2_device: Vec<sherd_core::matching::icp::Registration>,
+    /// Per candidate, whether its own CPU ladder survives all twelve one-ULP perturbations.
+    stage1_ok: Vec<bool>,
+    stage2_ok: Vec<bool>,
+    /// The **control**: the same rungs, on the CPU, from the poses the device actually starts
+    /// from (`init` through the shifted `f32` state and back). What separates the kernel's `f32`
+    /// arithmetic from the ladder's own amplification of an `f32` starting pose.
+    stage1_control: Vec<sherd_core::matching::icp::Pose>,
+    stage2_control: Vec<sherd_core::matching::icp::Pose>,
     pose: sherd_core::matching::icp::Pose,
 }
 
@@ -580,10 +727,12 @@ struct PairReport {
 /// the same question at every rung. A harness that let each side pick its own candidates would be
 /// comparing two different ladders and calling the difference a kernel deviation.
 #[cfg(feature = "gpu")]
+#[allow(clippy::too_many_lines, reason = "R §5.2 to R §5.6 in order, each block a batch")]
 fn compare_pair(
     pair: &sherd_core::matching::pair::Pair<'_>,
     params: &sherd_core::Params,
     executor: &sherd_gpu::GpuExecutor,
+    chaos: bool,
 ) -> PairReport {
     use sherd_core::executor::batch::{CoarseBatch, IcpBatch, Poses};
     use sherd_core::executor::{CPU, Engine, Executor};
@@ -618,9 +767,15 @@ fn compare_pair(
     let inits: Vec<_> =
         kept.iter().map(|&h| homogeneous(&hyp.r[h as usize], &hyp.tau[h as usize])).collect();
     let rungs = ladder::stage1_rungs(&source, &icp_target);
+    let stage1_ok = if chaos {
+        determined_batch(&rungs, &inits, &pair.scales, tolerance::POSE_DEG, tolerance::POSE_T)
+    } else {
+        Vec::new()
+    };
     let mut stage1_host = Vec::new();
     let mut stage1_device = Vec::new();
     let mut poses = inits.clone();
+    let mut control = sherd_gpu::icp::device_round_trip(&inits, &source, &icp_target);
     for rung in &rungs {
         let options = Options {
             estimation: rung.estimation,
@@ -632,7 +787,10 @@ fn compare_pair(
         stage1_host = CPU.icp_rung(&batch);
         stage1_device = executor.icp_rung(&batch);
         poses = stage1_host.iter().map(|r| r.transform).collect();
+        let batch = IcpBatch { source: rung.source, target: rung.target, inits: &control, options };
+        control = CPU.icp_rung(&batch).iter().map(|r| r.transform).collect();
     }
+    let stage1_control = control;
 
     // R §5.4's re-score, over the poses stage 1 actually produced: `Pair::stage1`'s own batch,
     // over B's whole breakline subset at `sc.stage1` rather than sixty points at `sc.coarse`.
@@ -658,8 +816,14 @@ fn compare_pair(
     });
     let take = order.len().min(usize::try_from(params.stage2).unwrap_or(16));
     let mut poses2: Vec<_> = order[..take].iter().map(|&k| poses[k]).collect();
+    let stage2_ok = if chaos {
+        determined_batch(&rungs2, &poses2, &pair.scales, tolerance::POSE_DEG, tolerance::POSE_T)
+    } else {
+        Vec::new()
+    };
     let mut stage2_host = Vec::new();
     let mut stage2_device = Vec::new();
+    let mut control2 = poses2.clone();
     for rung in &rungs2 {
         let options = Options {
             estimation: rung.estimation,
@@ -671,7 +835,11 @@ fn compare_pair(
         stage2_host = CPU.icp_rung(&batch);
         stage2_device = executor.icp_rung(&batch);
         poses2 = stage2_host.iter().map(|r| r.transform).collect();
+        let round = sherd_gpu::icp::device_round_trip(&control2, rung.source, rung.target);
+        let batch = IcpBatch { source: rung.source, target: rung.target, inits: &round, options };
+        control2 = CPU.icp_rung(&batch).iter().map(|r| r.transform).collect();
     }
+    let stage2_control = control2;
     let pose = poses2
         .first()
         .copied()
@@ -686,6 +854,10 @@ fn compare_pair(
         stage1_device,
         stage2_host,
         stage2_device,
+        stage1_ok,
+        stage2_ok,
+        stage1_control,
+        stage2_control,
         pose,
     }
 }
@@ -698,6 +870,7 @@ pub(crate) fn check(
     _fixture: Option<&std::path::Path>,
     _adapter: Option<&str>,
     _pairs: usize,
+    _chaos: bool,
 ) -> Result<Vec<CheckRow>> {
     bail!("gpu-check: this binary was built without the `gpu` feature (D §2)")
 }

@@ -5,7 +5,7 @@
 //! | method | kernel | phase | state |
 //! |---|---|---|---|
 //! | `coarse_scores` | `kernels/coarse.wgsl`, one workgroup per pose | 2b | **on the device** |
-//! | `icp_rung` | `kernels/icp.wgsl`, one workgroup per candidate, every iteration inside | 2b | delegated to the CPU (next commit) |
+//! | `icp_rung` | `kernels/icp.wgsl`, one workgroup per candidate, every iteration inside | 2b | **on the device**, both estimators |
 //! | `bounded_distance` | BVH closest point with `r_max` | 2c | delegated to the CPU |
 //! | `inside` | AABB reject → parity rays → depth | 2c | delegated to the CPU |
 //!
@@ -33,6 +33,7 @@ use sherd_core::matching::icp::Registration;
 
 use crate::coarse::{CoarseKernel, score_of};
 use crate::device::Gpu;
+use crate::icp::IcpKernel;
 use crate::selftest::SelfTest;
 
 /// What one `Executor` method did, over the life of the executor.
@@ -178,6 +179,7 @@ impl Stats {
 #[derive(Debug)]
 struct Kernels {
     coarse: CoarseKernel,
+    icp: IcpKernel,
 }
 
 /// The wgpu implementation of [`Executor`].
@@ -192,12 +194,34 @@ pub struct GpuExecutor {
 impl GpuExecutor {
     /// Whether the matching stage's two kernels are behind the trait.
     ///
-    /// This is what `Backend::Auto` reads (`Selection::decide`). It is a single flag rather than
-    /// one per method because the decision it feeds is a whole-run one: the coarse score is 27 %
-    /// of `synthetic_20`'s matching core-seconds (E2's profile) and the ICP ladders are another
-    /// 27 %, so a build with only the coarse kernel cannot clear D §6.8's 1.5× bar by Amdahl's law
-    /// however fast that kernel is — `1/(1 − 0.27)` is 1.37×. It flips when `icp_rung` lands.
-    pub const HAS_KERNELS: bool = false;
+    /// True since task G2: `coarse_scores` and `icp_rung` are `kernels/coarse.wgsl` and
+    /// `kernels/icp.wgsl`, and `--backend gpu` runs them. `bounded_distance` and `inside` are
+    /// phase 2c's and delegate.
+    pub const HAS_KERNELS: bool = true;
+
+    /// Whether `Backend::Auto` may **pick** this executor — which is a different question, and on
+    /// this machine the answer is no.
+    ///
+    /// D §6.8's rule reads the self-test's ratio, and the self-test measures E7 §5's bounded-NN
+    /// kernel on an idle device: 3–6× the whole ten-core CPU. That number is real and it is not
+    /// the matching stage's. Measured end to end on `synthetic_20`, matching-stage seconds
+    /// (`notes/2026-09-08-g2-kernels.md`):
+    ///
+    /// * **one thread** — 85.4 s on the device against 103.4 s on the CPU, **1.21×**;
+    /// * **ten threads**, five runs each — median 15.92 s against 15.76 s (**0.99×**), best
+    ///   14.70 s against 15.36 s (**1.04×**). Indistinguishable.
+    ///
+    /// The device is not what ran out: it was **busy for 6.35 s** of that stage — 4.33 s of coarse
+    /// score over 1.65 G point-queries and 2.02 s of ICP rungs — and idle for the rest. The
+    /// pipeline runs one pair per rayon task, so ten tasks submit to one queue and then block on
+    /// it, and each thread that blocks is a core that stops working. The kernels' own 1.6–4.2×
+    /// cannot reach the stage through that. D §6.4 describes the shape that would — "CPU threads
+    /// prepare, one GPU thread submits; double-buffered" — and it is not built.
+    ///
+    /// So `Auto` keeps the CPU and says why, `--backend gpu` runs the kernels for anyone measuring
+    /// them, and this constant flips when the scheduler lands rather than when a kernel does.
+    /// D §6.8's bar is 1.5× and the honest measurement is 1.0×.
+    pub const AUTO_ELIGIBLE: bool = false;
 
     /// Wraps an open device whose self-test has already run, compiling the kernels.
     ///
@@ -206,7 +230,7 @@ impl GpuExecutor {
     /// because the compile was inside the timed region.
     #[must_use]
     pub fn new(gpu: Arc<Gpu>, selftest: SelfTest) -> Self {
-        let kernels = Kernels { coarse: CoarseKernel::build(&gpu) };
+        let kernels = Kernels { coarse: CoarseKernel::build(&gpu), icp: IcpKernel::build(&gpu) };
         Self { gpu, selftest, kernels, stats: Stats::default() }
     }
 
@@ -237,8 +261,8 @@ impl GpuExecutor {
 
 impl Executor for GpuExecutor {
     fn name(&self) -> &'static str {
-        // Not "gpu" while a method of the four is still the CPU's, and the name reaches the log.
-        if Self::HAS_KERNELS { "gpu" } else { "gpu (coarse on device, the rest on cpu)" }
+        // R §6's two methods are still the CPU's, and the name reaches the log lines.
+        "gpu (matching on device, verification on cpu)"
     }
 
     fn coarse_scores(&self, batch: &CoarseBatch<'_>) -> Vec<f64> {
@@ -262,8 +286,21 @@ impl Executor for GpuExecutor {
 
     fn icp_rung(&self, batch: &IcpBatch<'_>) -> Vec<Registration> {
         self.stats.icp.call();
-        self.stats.icp.delegate();
-        CPU.icp_rung(batch)
+        match self.kernels.icp.run(&self.gpu, batch) {
+            Ok(Some((out, run))) => {
+                self.stats.icp.device(run.dispatches, run.gpu, run.iterations);
+                out
+            }
+            Ok(None) => {
+                self.stats.icp.delegate();
+                CPU.icp_rung(batch)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "icp_rung fell back to the CPU");
+                self.stats.icp.error();
+                CPU.icp_rung(batch)
+            }
+        }
     }
 
     fn bounded_distance(&self, batch: &DistBatch<'_>) -> Vec<f64> {
@@ -287,11 +324,12 @@ mod tests {
 
     /// Phase 2b's flag is what `Backend::Auto` reads, and the two matching kernels are in.
     #[test]
-    fn the_auto_flag_waits_for_both_matching_kernels() {
+    fn the_kernels_exist_and_auto_still_says_cpu() {
+        const { assert!(GpuExecutor::HAS_KERNELS, "task G2 puts coarse and icp on the device") };
         const {
             assert!(
-                !GpuExecutor::HAS_KERNELS,
-                "the coarse kernel alone is 27 % of matching: 1.37x by Amdahl, under D §6.8's 1.5x"
+                !GpuExecutor::AUTO_ELIGIBLE,
+                "measured: matching is 1.0x on ten threads, because ten tasks share one queue"
             );
         }
     }

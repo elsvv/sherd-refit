@@ -35,6 +35,27 @@ use crate::shader::{Kernel, interleave, interleave_narrowed, uniform};
 /// D §6.4 step 2's cap on one dispatch.
 pub const MAX_POINT_QUERIES: usize = 20_000_000;
 
+/// The smallest batch worth a dispatch, in point-queries — measured, like `icp::MIN_CANDIDATES`.
+///
+/// A dispatch costs a submission, a grid build, an upload and a readback whatever it computes, and
+/// the grid and the target cloud are rebuilt for every call. `crates/sherd-gpu/tests/adapter.rs`
+/// prints the table this comes from, over a 6 000-point breakline:
+///
+/// | poses × points | queries | ratio |
+/// |---|---|---|
+/// | 1 × 60 | 60 | 2.5× (both sides microseconds) |
+/// | 64 × 60 | 3 840 | 1.4× |
+/// | 64 × 800 | 51 200 | 0.61× |
+/// | 1 000 × 60 | 60 000 | 0.41× |
+/// | 1 000 × 800 | 800 000 | 2.53× |
+/// | 40 000 × 60 | 2 400 000 | 1.80× |
+/// | 40 000 × 800 | 32 000 000 | 3.36× |
+///
+/// R §5.2's own batch is tens of thousands of hypotheses on sixty points — 1.5 to 2.4 M queries,
+/// far above the line. R §5.4's re-score is a few hundred poses on `brk_sub`, which lands near it
+/// and goes either way by collection.
+pub const MIN_QUERIES: usize = 200_000;
+
 /// The WGSL source: D §6.2's grid, then the kernel that queries it.
 const SOURCE: &str =
     concat!(include_str!("kernels/grid.wgsl"), include_str!("kernels/coarse.wgsl"));
@@ -43,6 +64,8 @@ const SOURCE: &str =
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct CoarseParams {
+    lo: [f32; 4],
+    hi: [f32; 4],
     poses: u32,
     points: u32,
     radius: f32,
@@ -109,6 +132,10 @@ impl CoarseKernel {
         {
             return Ok(None);
         }
+        // Too small to be worth a submission and a readback (see `MIN_QUERIES`).
+        if poses * points < MIN_QUERIES {
+            return Ok(None);
+        }
         let Some(grid) = HashGrid::build(batch.target.points, batch.radius) else {
             return Ok(None);
         };
@@ -119,6 +146,17 @@ impl CoarseKernel {
         let probe = interleave(batch.points, batch.normals);
         let device_poses = batch.poses.device();
         let rows: Vec<[f32; 4]> = device_poses.iter().flat_map(|p| p.rows).collect();
+
+        // The breakline's box, from the grid's own `f32` points, so that the kernel's reject is
+        // computed against the coordinates it queries.
+        let mut box_lo = [f32::INFINITY; 3];
+        let mut box_hi = [f32::NEG_INFINITY; 3];
+        for p in grid.points() {
+            for k in 0..3 {
+                box_lo[k] = box_lo[k].min(p[k]);
+                box_hi[k] = box_hi[k].max(p[k]);
+            }
+        }
 
         let header = uniform(gpu, "coarse grid", &grid.header());
         let slots = buffers::upload(gpu, "coarse slots", grid.slots());
@@ -139,6 +177,8 @@ impl CoarseKernel {
             let chunk_poses = range.end - range.start;
             let grid_shape = Dispatch::for_workgroups(u32::try_from(chunk_poses).unwrap_or(1));
             let params = CoarseParams {
+                lo: [box_lo[0], box_lo[1], box_lo[2], 0.0],
+                hi: [box_hi[0], box_hi[1], box_hi[2], 0.0],
                 poses: u32::try_from(chunk_poses).unwrap_or(u32::MAX),
                 points: u32::try_from(points).unwrap_or(u32::MAX),
                 radius: narrow(batch.radius),
@@ -201,7 +241,7 @@ pub fn score_of(agree: u32, points: usize) -> f64 {
 mod tests {
     #![allow(clippy::float_cmp, reason = "the point of `score_of` is which double it produces")]
 
-    use super::{MAX_POINT_QUERIES, score_of};
+    use super::{MAX_POINT_QUERIES, MIN_QUERIES, score_of};
 
     /// The host-side division is the CPU executor's, to the bit — including the cases where a
     /// reciprocal would differ.
@@ -217,10 +257,18 @@ mod tests {
         assert_eq!(score_of(0, 0), 0.0, "an empty probe scores zero rather than NaN");
     }
 
-    /// D §6.4 step 2's cap is a query count, so the pose chunk depends on the probe size.
+    /// D §6.4 step 2's cap is a query count, so the pose chunk depends on the probe size, and so
+    /// does the floor under which a batch is the CPU's.
     #[test]
     fn the_dispatch_cap_is_twenty_million_point_queries() {
         assert_eq!(MAX_POINT_QUERIES / 60, 333_333);
         assert_eq!(MAX_POINT_QUERIES / 800, 25_000);
+        // R §5.2 scores tens of thousands of hypotheses on sixty points and is never near the
+        // floor; one pose on sixty points is, and belongs on the CPU.
+        const { assert!(60 < MIN_QUERIES && 25_000 * 60 > MIN_QUERIES) };
+        // The measured cells: 1 000 × 60 is 0.41× and stays on the CPU; 1 000 × 800 is 2.53× and
+        // goes to the device.
+        const { assert!(1_000 * 60 < MIN_QUERIES && 1_000 * 800 >= MIN_QUERIES) };
+        const { assert!(MIN_QUERIES < MAX_POINT_QUERIES) };
     }
 }

@@ -54,6 +54,7 @@ pub mod buffers;
 pub mod coarse;
 pub mod device;
 pub mod executor;
+pub mod icp;
 pub mod selftest;
 pub mod shader;
 pub mod slots;

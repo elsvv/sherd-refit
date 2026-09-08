@@ -291,23 +291,26 @@ pub struct Selection {
 impl Selection {
     /// D §6.8's rule, applied to a self-test that has already run.
     ///
-    /// `has_kernels` is what keeps this honest while the crate is being built out: the device
-    /// works and the self-test passes long before every `Executor` method has a kernel, and a
-    /// partial executor cannot clear D §6.8's 1.5× bar however fast its kernels are. `Auto`
-    /// therefore reads `GpuExecutor::HAS_KERNELS` and says which fact decided it.
+    /// `worth_using` is what keeps this honest. The self-test measures E7 §5's bounded-NN kernel
+    /// on an idle device, and that ratio is not the matching stage's: task G2 measured the two
+    /// matching kernels at 1.6–4.2× in isolation and the stage they belong to at **1.0×** on ten
+    /// threads, because the pipeline runs one pair per rayon task and ten tasks then block on one
+    /// queue. `Auto` therefore reads `GpuExecutor::AUTO_ELIGIBLE`, which is that measurement and
+    /// not the self-test's.
     #[must_use]
-    pub fn decide(selftest: SelfTest, has_kernels: bool) -> Self {
+    pub fn decide(selftest: SelfTest, worth_using: bool) -> Self {
         let adapter = Some(selftest.adapter.clone());
         if !selftest.passed() {
             let reason =
                 format!("the self-test failed ({}); using the CPU", selftest.failures().join("; "));
             return Self { adapter, selftest: Some(selftest), use_gpu: false, reason };
         }
-        if !has_kernels {
+        if !worth_using {
             let reason = format!(
-                "the self-test passed at {:.2}x on {}, but the GPU executor does not yet have \
-                 both matching kernels (D §12: 2b and 2c) and the ones it has cannot clear \
-                 D §6.8's bar by Amdahl's law; using the CPU",
+                "the self-test passed at {:.2}x on {}, but that is the bounded-NN kernel on an \
+                 idle device and not the matching stage: measured end to end, the stage is 1.0x \
+                 on ten threads because the pipeline gives one pair to each thread and they then \
+                 block on one queue (D §6.4's block scheduler is not built); using the CPU",
                 selftest.speedup, selftest.adapter.name
             );
             return Self { adapter, selftest: Some(selftest), use_gpu: false, reason };
@@ -797,7 +800,7 @@ mod tests {
         // Everything passes and it still says CPU while a matching kernel is missing.
         let partial = Selection::decide(selftest(true, 8.0, "IntegratedGpu"), false);
         assert!(!partial.use_gpu);
-        assert!(partial.reason.contains("both matching kernels"), "{}", partial.reason);
+        assert!(partial.reason.contains("1.0x on ten threads"), "{}", partial.reason);
 
         // With kernels: a passing self-test above the threshold picks the GPU.
         let picked = Selection::decide(selftest(true, 8.0, "IntegratedGpu"), true);

@@ -150,14 +150,16 @@ pub fn read_back<T: Pod>(
     let mut encoder =
         gpu.device().create_command_encoder(&CommandEncoderDescriptor { label: Some("readback") });
     encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, bytes);
-    gpu.queue().submit(Some(encoder.finish()));
+    let submission = gpu.queue().submit(Some(encoder.finish()));
 
     let slice = staging.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = tx.send(result);
     });
-    gpu.wait()?;
+    // This submission and not the queue's latest: ten threads share one queue, and waiting for
+    // "the most recent submission" makes every readback wait for every other pair's work.
+    gpu.wait_for(submission)?;
     match rx.recv() {
         Ok(Ok(())) => {}
         Ok(Err(e)) => return Err(GpuError::Readback { what, message: e.to_string() }),

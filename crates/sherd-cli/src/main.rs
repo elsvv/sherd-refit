@@ -92,6 +92,13 @@ struct GpuCheckArgs {
     /// cross-check of D §10.4 layer 3 wants more, because a tie that flips is rare per pair.
     #[arg(long, default_value_t = 1, value_name = "N")]
     pairs: usize,
+    /// Separate a kernel deviation from a chaotic ladder (D §10.2's `chaotic` row, task C2 §5).
+    ///
+    /// Every candidate's ladder is re-climbed on the CPU from the twelve initial poses one ULP
+    /// from its own; a candidate whose own answer moves further than the row's tolerance under
+    /// one of them is excluded from the worst case and counted. It costs thirteen CPU ladders.
+    #[arg(long)]
+    chaos: bool,
     /// Which GPU adapter to use, by index or by a substring of its name (D §9).
     #[arg(long, value_name = "NAME|INDEX")]
     gpu_adapter: Option<String>,
@@ -650,6 +657,9 @@ fn run(args: &RunArgs) -> Result<()> {
         println!("  not assembled: {}", alone.join(", "));
     }
     print_timings(&summary.timings, wall);
+    for line in resolved.device_lines() {
+        println!("  {line}");
+    }
     println!("{} files in {}", summary.written.len(), args.out.display());
     Ok(())
 }
@@ -687,6 +697,9 @@ fn bench(args: &BenchArgs) -> Result<()> {
         summary.assembled().count()
     );
     print_timings(&summary.timings, wall);
+    for line in resolved.device_lines() {
+        println!("  {line}");
+    }
     match args.gate {
         Some(gate) if wall > gate => {
             bail!("{wall:.1} s wall is over the gate of {gate:.1} s")
@@ -720,6 +733,7 @@ fn gpu_check(args: &GpuCheckArgs) -> Result<()> {
         args.fixture.as_deref(),
         args.gpu_adapter.as_deref(),
         args.pairs.max(1),
+        args.chaos,
     )?;
     println!(
         "{:<12} {:>10} {:>12} {:>12} {:>10}  status",

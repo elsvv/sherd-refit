@@ -14,16 +14,31 @@
 // out. Whenever the two counts agree the two **scores are bit-identical**, and the cross-check is
 // then a comparison of integers rather than an argument about the last bit of a mean.
 //
-// # The near mask is not here, and that is a semantic claim
+// # The bounding box, and what E2's near mask is really worth
 //
 // `CoarseBatch::mask` is E2's conservative pre-filter: `may_be_near` returns `false` only when no
 // breakline point is within the radius, so a caller that falls through on `true` computes exactly
-// what it computes without the mask (`spatial::grid`'s own module documentation, and the test that
-// asserts it on 60 000 queries). It is a speed structure for a KD-tree descent, and the grid's own
-// answer to an empty neighbourhood is 27 hash probes, which is the same fast path by construction.
-// Running it on the device would add a second `f32` rounding of a bound that is conservative in
-// `f64` — a new way to disagree, bought for nothing. The kernel therefore ignores the mask and the
-// note carries the measured cost of doing so.
+// what it computes without it. It is a **speed** structure, and the first version of this kernel
+// left it out on the grounds that the hash grid's own answer to an empty neighbourhood — 27 cell
+// probes that all miss — is already the fast path. Measured, that was wrong: the kernel ran at
+// 13.8 ns/query against the CPU's 12.6 ns/query of wall time over ten threads on
+// `synthetic_20`'s own batches, and the matching stage came out **1.04× slower on the GPU than on
+// the CPU**. Twenty-seven probes that miss are not free; a query that is nowhere near the
+// breakline should cost three comparisons, not fifty-four memory reads.
+//
+// So the kernel carries the *first* of E2's two filters, the one `PointTree::nearest_below`
+// applies before it descends: the cloud's own axis-aligned box. E2 §4 measured that as three
+// quarters of R §5.2's probe. It is conservative the same way the CPU's is — a query is rejected
+// only when its distance to the box already exceeds the radius — with the slack widened from
+// `16·f64::EPSILON` to `1e-4` relative, because these coordinates are 150 units in `f32` and the
+// gap to the box carries 1e-5 of rounding there. A wider slack can only let a query through, and a
+// query that gets through is answered by the grid, so the count is the count.
+//
+// The *second* filter — the dilated 64³ cell mask, for the quarter that lands inside the box and
+// still finds nothing — is not here. Its cell index is `⌊(q − lo)·(1/cell)⌋` and an `f32` rounding
+// of that lands in the neighbouring cell, whose dilated block is not a superset of the right one;
+// making it safe means dilating by two and giving back most of what it rejects. The note carries
+// the measurement of what is left on the table.
 //
 // # Reduction
 //
@@ -33,6 +48,9 @@
 // is `f32` and where the order does decide the bits — is the same code with a different type.
 
 struct Params {
+    // The breakline's own bounding box, from the grid's `f32` points; `w` unused.
+    lo: vec4<f32>,
+    hi: vec4<f32>,
     // Poses in this dispatch.
     poses: u32,
     // Probe points per pose.
@@ -89,6 +107,12 @@ fn coarse(
                 r1.x * p.x + r1.y * p.y + r1.z * p.z + r1.w,
                 r2.x * p.x + r2.y * p.y + r2.z * p.z + r2.w,
             );
+            // The box reject of `PointTree::nearest_below`, in the kernel's own arithmetic.
+            let gap = max(params.lo.xyz - q, max(q - params.hi.xyz, vec3<f32>(0.0, 0.0, 0.0)));
+            if (gap.x * gap.x + gap.y * gap.y + gap.z * gap.z > radius2 * 1.0001) {
+                k = k + LANES;
+                continue;
+            }
             let hit = nearest_below(q, radius2);
             if (hit.x != MISS) {
                 let n = probe[k * 2u + 1u];

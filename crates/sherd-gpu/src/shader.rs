@@ -132,8 +132,8 @@ impl Kernel {
             pass.set_bind_group(0, bind, &[]);
             pass.dispatch_workgroups(grid.x, grid.y, 1);
         }
-        gpu.queue().submit(Some(encoder.finish()));
-        gpu.wait()
+        let submission = gpu.queue().submit(Some(encoder.finish()));
+        gpu.wait_for(submission)
     }
 }
 

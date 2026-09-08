@@ -1233,20 +1233,24 @@ Numbers the port must reproduce on the benchmark sets, with the defaults above (
 streams are seeded from `Params.seed`, and no CLI exposes it, so the table used to print whatever
 one draw gave. Running the reference with `Params(seed = 0…4)` and with the working-mesh budget at
 ±5 % (190 000 and 210 000 faces, seed 0) moves three of the seven rows — including the one written
-as a prohibition (task Y, `notes/2026-09-07-y-phase1d-findings.md` §3). The seven runs per set are
-what the ranges below are made of; a row with a single figure is the seed-0 draw of a set that has
-not been swept.
+as a prohibition (task Y, `notes/2026-09-07-y-phase1d-findings.md` §3) — and a five-seed sweep of
+the three rows task Y left alone moves two more (task Z,
+`notes/2026-09-08-z-phase1e-findings.md` §5). The runs per set are what the ranges below are made
+of: seven for `pot_B`, `pot_G` and `synthetic_20` (five seeds and the two budgets), five for
+`pot_A`, `pot_C` and `pot_H` (seeds alone). **Every one of the thirty-six is the reference's own
+run**, and no range here was widened to admit a figure of the port's: the port's own numbers lie
+inside the *old* rows as well, and what the sweep moved is the bottom of the band, not the top.
 
 | set | gate | the reference's own seven runs |
 |---|---|---|
 | `input/test_fragments_1` | joins used exactly {021–094, 094–104}; 007 unplaced; both `pen` = 0; tight of both ≥ 0.27; the two seams within 20 % of 20.3 t and 10.7 t | not swept (the row is a set of decisions, and they are stable — see below) |
-| `input/sfspp/pot_A` | fragment accuracy ≥ 87.5 %, precision 1.000 | not swept; 87.5 % at seed 0 |
+| `input/sfspp/pot_A` | fragment accuracy **87.5–100 %**, precision 1.000 | 87.5, 87.5, 100, 87.5, 100 % by seed; precision 1.000 in all five; 6 or 7 joins used and **every one correct**; groups 7+1 or one of 8 (task Z) |
 | `pot_B` | fragment accuracy 88.9–100 %, precision 1.000 | 100, 88.9, 88.9, 100, 100 % by seed; 100, 100 % at ±5 % faces; precision 1.000 in all seven |
-| `pot_C` | 75 %, precision 0.500–0.667 | not swept; see the note below, which already measured this row's precision at five seeds |
+| `pot_C` | fragment accuracy **50–75 %**, precision 0.500–0.667 | 75, 75, 75, 75, **50** % by seed; precision 0.500, 0.667, 0.667, 0.500, 0.500; 2–4 joins used, of which 1–2 correct and the rest wrong-pose or unscorable (task Z; the note below measured the precision column at five seeds of the *old* thickness estimator and the accuracy column is now measured too) |
 | `pot_G` | fragment accuracy 0 %; **at most two joins used, and every join used must be a wrong-pose join on a ground-truth-adjacent pair** (the ground truth interpenetrates) | 0, 1, 2, 1, 1 joins by seed; 0, 0 at ±5 % faces; 0 % accuracy in all seven, and every join used was a wrong-pose join on an adjacent pair (1.5–2.5°, 1.11–1.20 t) |
-| `pot_H` | 36.4 %, 0.429 | not swept |
+| `pot_H` | fragment accuracy **27.3–36.4 %**, precision **0.333–0.500** | 36.4, 36.4, **27.3**, 36.4, 36.4 % by seed; precision 0.429, 0.429, 0.333, 0.429, 0.500; 6 or 7 joins used, 2 or 3 of them correct; largest group 8 at four seeds of five (task Z) |
 | `input/synthetic_pingsdorf_20` | fragment accuracy 85–95 %, precision 1.000 | 95, 95, 95, 85, 95 % by seed; 95, 95 % at ±5 % faces; precision 1.000 in all seven |
-| all sets | cross-object joins 0; group purity 1.000 | held in all 21 runs |
+| all sets | cross-object joins 0; group purity 1.000 | held in all **36** runs (task Y's 21 and task Z's 15) — on these seven single-object collections. On the one *mixed* development set, `mixed_ABG`, neither implementation holds it, and D §10.3 carries that set as roadmap item 4's baseline rather than as a gate (decision 2026-09-08) |
 
 **The two seam figures are measurements, and they have moved three times.** They were 21.3 t and
 11.3 t in `2026-09-05-test-set-result.md`; the budget commits `991ff87` and `ca59c6a` took the
@@ -1268,10 +1272,18 @@ ground-truth-adjacent neighbour at a wrong pose in every run measured. Its `tigh
 `min_tight` — 0.255 at the old estimator's seed 0, 0.250 with §3.2's deterministic rays — so which
 of its marginal candidates is accepted flips on nothing. Running the *old* estimator at seeds 0–4
 gives precision 0.667, 0.667, **0.500**, 0.667, 0.667 with fragment accuracy 75.0 % on all five;
-the deterministic estimator gives 0.500 with the same 75.0 %. Fragment accuracy — the
-SfS++-comparable number, and the one every other row of this table leads with — is what is stable
-here; the precision column on this set is not, and 0.500 is inside the estimator's own cloud rather
-than a regression.
+the deterministic estimator gives 0.500 with the same 75.0 %.
+
+**Task Z swept §3.2's deterministic estimator at the same five seeds, and fragment accuracy is not
+stable either** — 75, 75, 75, 75 and **50 %**, with precision 0.500, 0.667, 0.667, 0.500, 0.500.
+The sentence this paragraph used to end with ("fragment accuracy is what is stable here") was true
+of the *old* estimator's five seeds and is now known to be false of the current one's: at seed 4 the
+reference places two of the four scorable fragments instead of three, using two joins instead of
+four. The cause is the same one the paragraph already names — piece 01 has no correct pose
+available and its `tight` sits on `min_tight`, so which of its marginal candidates survives flips on
+nothing — and what the fifth seed shows is that the flip can take a *placement* with it and not
+only a precision digit. Neither column of this row is a single number; both are bands, and the port
+sits at the top of both (75 % / 0.667).
 
 Per-stage numeric tolerances for the fixture harness are defined in the port design
 (`2026-09-06-rust-core-design.md`, §10.2). One of them used to be a property of the algorithm

@@ -1210,11 +1210,14 @@ purity is 0.158 above the reference's.
 
 Quality, task Y, all seven collections run natively: R §13's terracotta row **exactly** (the two
 joins, 007 unplaced, both `pen` 0, tight 0.56/0.67 and 0.54/0.56, seams 20.667 t and 12.333 t);
-pot_A **100 %** / 1.000 (the reference's own seed-0 draw is 87.5 %), pot_B **88.9 %** / 1.000
-(reference 88.9–100 %), pot_C 75 % / 0.667 (=), pot_G 0 % with **two** joins, both wrong-pose on
-ground-truth-adjacent pairs (reference: 0–2 such joins, seed depending), pot_H 36.4 % / 0.429 (=),
-synthetic 20 **90 %** / 1.000 (reference 85–95 %); cross-object joins **0** and group purity
-**1.000** on every set. Every row is inside R §13's restated gate.
+pot_A **100 %** / 1.000 (reference 87.5–100 %, task Z), pot_B **88.9 %** / 1.000
+(reference 88.9–100 %), pot_C 75 % / 0.667 (reference 50–75 % / 0.500–0.667, task Z: the port is at
+the top of both bands), pot_G 0 % with **two** joins, both wrong-pose on
+ground-truth-adjacent pairs (reference: 0–2 such joins, seed depending), pot_H 36.4 % / 0.429
+(reference 27.3–36.4 % / 0.333–0.500, task Z), synthetic 20 **90 %** / 1.000 (reference 85–95 %);
+cross-object joins **0** and group purity **1.000** on every one of these seven. Every row is inside
+R §13's restated gate, and the three bands task Z added were measured on the reference at five
+seeds each — 15 runs — not derived from the port.
 
 ### 10.4 Test layers
 

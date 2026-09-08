@@ -56,6 +56,66 @@ pub(crate) fn info_lines() -> Vec<String> {
     }
 }
 
+/// What `sherd-refit-rs info` prints under "gpu self-test": the adapter it opened, every check
+/// D §6.8's self-test made, and the two ratios — the kernel's and the matching stage's.
+///
+/// The two are printed together and named apart on purpose. The self-test measures E7 §5's
+/// bounded-NN kernel on an **idle** device and reports 3–6× here; the matching stage, where that
+/// kernel's work actually lives, measures 1.0–1.5× because the device and the ten cores share one
+/// power and bandwidth envelope (D §6.6, task G3 §5). Reading the first as the second is the
+/// mistake task G2's note made and task G3 measured, so `info` prints both and says which is
+/// which.
+#[must_use]
+pub(crate) fn selftest_lines(adapter: Option<&str>) -> Vec<String> {
+    #[cfg(feature = "gpu")]
+    {
+        use sherd_gpu::{AdapterChoice, Gpu, GpuExecutor, Selection, SelfTest, selftest};
+
+        let choice = adapter.map_or(AdapterChoice::Default, AdapterChoice::parse);
+        let opened = Gpu::open(&choice).and_then(|gpu| {
+            let test = SelfTest::run(&gpu)?;
+            Ok(test)
+        });
+        let test = match opened {
+            Ok(test) => test,
+            Err(e) => return vec![format!("not run: {e}")],
+        };
+        let mut lines = vec![format!(
+            "{} on {}",
+            if test.passed() { "passed" } else { "FAILED" },
+            test.adapter
+        )];
+        lines.extend(test.checks.iter().map(|c| {
+            format!("  {} {}: {}", if c.passed { "ok  " } else { "FAIL" }, c.name, c.detail)
+        }));
+        lines.push(format!(
+            "  kernel:  {:.1} ns per bounded-NN query, {:.2}x the whole CPU pool on that batch \
+             (an idle device, E7 §5)",
+            test.ns_per_query(),
+            test.speedup,
+        ));
+        lines.push(format!(
+            "  stage:   {:.2}-{:.2}x measured on the matching stage over the seven development \
+             collections ({}) — the device and the cores share one envelope, D §6.6",
+            selftest::STAGE_SPEEDUP.0,
+            selftest::STAGE_SPEEDUP.1,
+            selftest::STAGE_SPEEDUP_SOURCE,
+        ));
+        let selection = Selection::decide(test, GpuExecutor::AUTO_ELIGIBLE);
+        lines.push(format!(
+            "  --backend auto: {} — {}",
+            if selection.use_gpu { "gpu" } else { "cpu" },
+            selection.reason,
+        ));
+        lines
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let _ = adapter;
+        vec!["not run: this binary was built without the `gpu` feature (D §2)".to_owned()]
+    }
+}
+
 /// What a run resolved `--backend` to: the engine to pass down, the backend to record, and the
 /// sentence to log.
 #[derive(Debug)]
@@ -183,15 +243,17 @@ pub(crate) fn resolve(
             }
             let reason = format!(
                 "--backend gpu on {}: the self-test passed ({:.1} ns/query, {:.2}x the CPU on its \
-                 batch). R §5.2's coarse score and R §7's ICP rung run on the device, above the \
-                 size thresholds; R §6.1's bounded distance and R §6.4's inside test are still \
-                 the CPU implementation's (D §12: 2c), and `gpu-check` says which is which. The \
-                 self-test's ratio is a kernel on an idle device and not the stage's: the \
-                 matching stage measures 1.04-1.40x, and the device loses 1.6x of its own \
-                 throughput as the ten cores fill up (task G3).",
+                 batch). R §5.2's coarse score and R §7's ICP rung run on the device, between the \
+                 measured size thresholds; R §6.1's bounded distance and R §6.4's inside test are \
+                 still the CPU implementation's (D §12: 2c), and `gpu-check` says which is which. \
+                 The self-test's ratio is a kernel on an idle device and not the stage's: the \
+                 matching stage measures {:.2}-{:.2}x, and the device loses 1.6x of its own \
+                 throughput as the ten cores fill up (tasks G3, G4).",
                 test.adapter.name,
                 test.ns_per_query(),
                 test.speedup,
+                sherd_gpu::selftest::STAGE_SPEEDUP.0,
+                sherd_gpu::selftest::STAGE_SPEEDUP.1,
             );
             let executor: &'static GpuExecutor =
                 Box::leak(Box::new(GpuExecutor::new(Arc::new(gpu), test)));

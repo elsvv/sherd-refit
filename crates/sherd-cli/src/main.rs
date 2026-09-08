@@ -64,8 +64,24 @@ enum Command {
     /// Feed identical batches to both executors and report where they disagree (D §10.4 layer 3).
     GpuCheck(GpuCheckArgs),
 
-    /// Print what this build is: versions, algorithm reference, backends.
-    Info,
+    /// Print what this build is: versions, algorithm reference, backends, and what the GPU on
+    /// this machine actually does.
+    Info(InfoArgs),
+}
+
+/// Arguments of `info`.
+///
+/// The self-test opens a device and runs D §6.8's four checks, which takes about a second, so
+/// `--no-selftest` is there for a scripted `info` that only wants the versions. Everything else
+/// this command prints is free.
+#[derive(Debug, Args)]
+struct InfoArgs {
+    /// Which GPU adapter to test, by index or by a substring of its name (D §9).
+    #[arg(long, value_name = "NAME|INDEX")]
+    gpu_adapter: Option<String>,
+    /// Only list the adapters; do not open one or run the self-test.
+    #[arg(long)]
+    no_selftest: bool,
 }
 
 /// Arguments of `gpu-check`: D §10.4 layer 3's cross-check harness.
@@ -462,8 +478,8 @@ fn main() -> Result<()> {
         Command::Parity(args) => parity(&args),
         Command::Bench(args) => bench(&args),
         Command::GpuCheck(args) => gpu_check(&args),
-        Command::Info => {
-            info();
+        Command::Info(args) => {
+            info(&args);
             Ok(())
         }
     }
@@ -482,7 +498,12 @@ fn init_logging(verbose: u8) {
 }
 
 /// Prints what this build is; the same three strings go into `report.json`'s `engine` key.
-fn info() {
+///
+/// Since task G4 it also answers the question an operator actually has in front of a new machine —
+/// *is the GPU worth asking for here?* — by opening the adapter, running D §6.8's self-test and
+/// printing **both** ratios with their names on them: the kernel's, on an idle device, and the
+/// matching stage's, which is the one `--backend auto` is allowed to read.
+fn info(args: &InfoArgs) {
     println!("sherd-refit-rs {CORE_VERSION}");
     println!("  algorithm reference: {ALGO_REF}");
     println!("  cache version:       {CACHE_VERSION}");
@@ -494,6 +515,15 @@ fn info() {
     let threads = std::thread::available_parallelism().map_or(0, std::num::NonZero::get);
     println!("  cores available:     {threads}");
     println!("  default seed:        {}", Params::default().seed);
+    if args.no_selftest {
+        println!("  gpu self-test:       skipped (--no-selftest)");
+        return;
+    }
+    let mut lines = gpu::selftest_lines(args.gpu_adapter.as_deref()).into_iter();
+    println!("  gpu self-test:       {}", lines.next().unwrap_or_default());
+    for line in lines {
+        println!("                     {line}");
+    }
 }
 
 /// R §3.1–3.5 for a whole collection, with the cache of R §3.7 (plan steps S4, B1, B2 and B3).

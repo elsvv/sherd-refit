@@ -55,6 +55,30 @@ use crate::device::{AdapterEntry, Gpu, Requirements, WORKGROUP};
 /// D §6.8's threshold for `Backend::Auto`: the GPU must beat the whole CPU by this much.
 pub const AUTO_SPEEDUP: f64 = 1.5;
 
+/// What the **matching stage** measures on this machine, against the CPU backend — the quantity
+/// [`AUTO_SPEEDUP`] is a bar for, and not the one the self-test reports.
+///
+/// The self-test times E7 §5's bounded-NN kernel on an idle device and reports 3–6× here. The
+/// stage that kernel's work belongs to reports the range below, because the device and the ten
+/// cores share one power and memory-bandwidth envelope (D §6.6): the same submissions of the same
+/// work take 5.66 s of device time beside one busy core and 9.06 s beside nine. Task G2's note
+/// quoted the first figure for the second and task G3 measured the difference; this constant
+/// exists so that `info` and `Backend::Auto` quote the measured one.
+///
+/// Re-measured in task G4 after its two tuning changes, three interleaved runs per collection,
+/// median of the per-round paired ratios: terracotta 1.07×, pot_A 1.26×, pot_B 1.43×, pot_C 1.13×,
+/// pot_G 1.09×, pot_H 1.10×, `synthetic_20` 1.28× (task G3's were 1.04–1.40× with `synthetic_20`
+/// at 1.08×).
+pub const STAGE_SPEEDUP: (f64, f64) = (STAGE_SPEEDUP_MIN, STAGE_SPEEDUP_MAX);
+
+/// The slowest of the seven development collections in [`STAGE_SPEEDUP`] — the terracotta, whose
+/// six pairs put 0.05 s of work on the device.
+pub const STAGE_SPEEDUP_MIN: f64 = 1.07;
+/// The fastest of the seven development collections in [`STAGE_SPEEDUP`] — `pot_B`.
+pub const STAGE_SPEEDUP_MAX: f64 = 1.43;
+/// Where [`STAGE_SPEEDUP`] was measured, for the line `info` prints.
+pub const STAGE_SPEEDUP_SOURCE: &str = "task G4";
+
 /// Terms in the reduction check — E7 §3's own 1e7.
 pub const REDUCE_TERMS: usize = 10_000_000;
 
@@ -308,10 +332,11 @@ impl Selection {
         if !worth_using {
             let reason = format!(
                 "the self-test passed at {:.2}x on {}, but that is the bounded-NN kernel on an \
-                 idle device and not the matching stage: measured end to end, the stage is 1.0x \
-                 on ten threads because the pipeline gives one pair to each thread and they then \
-                 block on one queue (D §6.4's block scheduler is not built); using the CPU",
-                selftest.speedup, selftest.adapter.name
+                 idle device and not the matching stage: measured end to end over the seven \
+                 development collections the stage is {:.2}-{:.2}x ({STAGE_SPEEDUP_SOURCE}), \
+                 under the {AUTO_SPEEDUP}x D §6.8 asks for, because the device and the cores \
+                 share one power and bandwidth envelope (D §6.6); using the CPU",
+                selftest.speedup, selftest.adapter.name, STAGE_SPEEDUP_MIN, STAGE_SPEEDUP_MAX,
             );
             return Self { adapter, selftest: Some(selftest), use_gpu: false, reason };
         }
@@ -800,7 +825,11 @@ mod tests {
         // Everything passes and it still says CPU while a matching kernel is missing.
         let partial = Selection::decide(selftest(true, 8.0, "IntegratedGpu"), false);
         assert!(!partial.use_gpu);
-        assert!(partial.reason.contains("1.0x on ten threads"), "{}", partial.reason);
+        assert!(
+            partial.reason.contains("1.07-1.43x") && partial.reason.contains("matching stage"),
+            "the reason has to quote the *stage*'s measured range, not the kernel's: {}",
+            partial.reason
+        );
 
         // With kernels: a passing self-test above the threshold picks the GPU.
         let picked = Selection::decide(selftest(true, 8.0, "IntegratedGpu"), true);

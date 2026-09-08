@@ -661,8 +661,8 @@ above is a device that has the machine to itself, and a run does not.
 The same effect read from the other side, and the cheapest remaining gain in the GPU path: **giving
 the device less work makes the stage faster.** `--gpu-memory 0.05` refuses the seventeen largest
 batches of `synthetic_20` (5 % of the calls, answered by the CPU, results unchanged) and takes the
-matching stage from 12.77 s to **10.75 s** — 1.35× the CPU backend at the default thread count,
-better than any thread setting. §6.4's three size thresholds are a **floor**; what this says is
+matching stage from 13.07 s to **11.16 s** — **1.37×** the CPU backend against 1.17× uncapped, at
+the default thread count and better than any thread setting (three-way interleaved medians). §6.4's three size thresholds are a **floor**; what this says is
 that there is also a **ceiling**, a batch large enough that running it on the device costs the
 machine more than it saves. Deriving it means retaking `tests/adapter.rs`'s crossover tables with
 the ten cores loaded, which is the condition a run is actually in and not the one they were

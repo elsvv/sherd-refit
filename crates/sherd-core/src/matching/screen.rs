@@ -24,6 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::executor::Executor;
 use crate::matching::coarse::{self, Probe, Target};
 use crate::matching::hypotheses;
 use crate::matching::scales::Scales;
@@ -73,7 +74,7 @@ pub fn cap(idx: &[u32], n: usize, seed: u64) -> Vec<u32> {
 /// The matcher's own R §5.1 and R §5.2 over the two capped subsets, with the probe drawn from the
 /// capped `ib` rather than from the whole of B's subset. Zero when either fragment has no usable
 /// breakline or the dihedral filter keeps nothing.
-pub fn screen_pair(a: &Screened<'_>, b: &Screened<'_>, p: &Params) -> f64 {
+pub fn screen_pair(exec: &dyn Executor, a: &Screened<'_>, b: &Screened<'_>, p: &Params) -> f64 {
     if a.frames.sub.is_empty() || b.frames.sub.is_empty() {
         return 0.0;
     }
@@ -86,7 +87,7 @@ pub fn screen_pair(a: &Screened<'_>, b: &Screened<'_>, p: &Params) -> f64 {
     let sc = Scales::for_pair(p, a.thick.min(b.thick), a.res.max(b.res));
     let probe = Probe::draw(b.frames, &ib, p.coarse_points as usize, p.seed);
     let target = Target { points: &a.frames.p, normals: &a.frames.ns, tree: a.tree };
-    coarse::scores(&target, &probe, &hyp, sc.coarse).into_iter().fold(0.0_f64, f64::max)
+    coarse::scores(exec, &target, &probe, &hyp, sc.coarse).into_iter().fold(0.0_f64, f64::max)
 }
 
 /// R §4.3's `top_partners`: the union over fragments of each fragment's `k` best-scoring partners.

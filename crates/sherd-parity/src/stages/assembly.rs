@@ -48,6 +48,7 @@ use std::path::Path;
 use nalgebra::Matrix4;
 use sherd_core::assembly::{Assembly, Piece, assemble, recenter};
 use sherd_core::error::{Error, Result};
+use sherd_core::executor::CPU;
 use sherd_core::fragment::Fragment;
 use sherd_core::fragment::samples::MatchData;
 use sherd_core::matching::pair::{self, Candidate};
@@ -131,7 +132,7 @@ fn injected(collection: &Collection, report: &mut StageReport) -> Result<()> {
     let Some(candidates) = reference_candidates(collection, report)? else { return Ok(()) };
     let t = md_t_median(collection)?.map_or(f64::NAN, |md| md.t);
     let views = piece_views(&pieces);
-    let out = assemble(&views, &candidates, &collection.manifest.collection.params);
+    let out = assemble(&CPU, &views, &candidates, &collection.manifest.collection.params);
     compare(collection, report, &views, &candidates, &out, t, PLAIN)?;
     recentre_row(collection, report, &views, t)?;
     Ok(())
@@ -162,7 +163,7 @@ fn native(collection: &Collection, report: &mut StageReport) -> Result<()> {
 
     // PMC-8 alone: the reference's own candidates, the port's own samples.
     if let Some(candidates) = reference_candidates(collection, report)? {
-        let out = assemble(&pieces, &candidates, &params);
+        let out = assemble(&CPU, &pieces, &candidates, &params);
         compare(collection, report, &pieces, &candidates, &out, t, PMC8)?;
     }
 
@@ -184,7 +185,7 @@ fn native(collection: &Collection, report: &mut StageReport) -> Result<()> {
         );
         candidates.extend(found);
     }
-    let out = assemble(&pieces, &candidates, &params);
+    let out = assemble(&CPU, &pieces, &candidates, &params);
     alarms(collection, report, &candidates, &out)
 }
 

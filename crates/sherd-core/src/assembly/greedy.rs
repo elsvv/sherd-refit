@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 
 use nalgebra::Matrix4;
 
+use crate::executor::Executor;
 use crate::matching::pair::Candidate;
 use crate::matching::verify::pose_inverse;
 use crate::params::Params;
@@ -200,6 +201,7 @@ fn rel(c: &Candidate, x: FragId) -> Matrix4<f64> {
 /// starts to lose its shape.
 #[derive(Clone, Copy)]
 struct Inputs<'a> {
+    exec: &'a dyn Executor,
     pieces: &'a [Piece<'a>],
     candidates: &'a [Candidate],
     accepted: &'a [usize],
@@ -225,7 +227,7 @@ impl Inputs<'_> {
         placed: FragId,
         new: FragId,
     ) -> Result<Matrix4<f64>, Rejection> {
-        let Self { pieces, candidates, accepted, p } = *self;
+        let Self { exec, pieces, candidates, accepted, p } = *self;
         let c = &candidates[accepted[here]];
         let anchor = grouping.pose(placed).expect("the anchor of a placement is placed");
         let t_new = anchor * rel(c, placed);
@@ -237,7 +239,7 @@ impl Inputs<'_> {
             }
             let inverse = pose_inverse(&grouping.pose(other).expect("a group member is placed"));
             let t_rel = inverse * t_new;
-            let pen = penetration(&pieces[other as usize], &pieces[new as usize], &t_rel, p);
+            let pen = penetration(exec, &pieces[other as usize], &pieces[new as usize], &t_rel, p);
             if pen > p.max_pen {
                 return Err(Rejection::Penetrates { other, pen });
             }
@@ -298,10 +300,15 @@ impl Inputs<'_> {
 /// Every fragment left unplaced becomes a singleton group, and the groups come back sorted by size
 /// (stable). R §8.2's recentring is deliberately *not* applied here: R §9's refinement runs between
 /// the two, and the pipeline recentres once, afterwards.
-pub fn assemble(pieces: &[Piece<'_>], candidates: &[Candidate], p: &Params) -> Assembly {
+pub fn assemble(
+    exec: &dyn Executor,
+    pieces: &[Piece<'_>],
+    candidates: &[Candidate],
+    p: &Params,
+) -> Assembly {
     let started = std::time::Instant::now();
     let accepted = best_per_pair(candidates);
-    let inputs = Inputs { pieces, candidates, accepted: &accepted, p };
+    let inputs = Inputs { exec, pieces, candidates, accepted: &accepted, p };
     let mut grouping = Grouping::new(pieces.len());
     let mut used: Vec<usize> = Vec::new();
     let mut rejected: Vec<Rejected> = Vec::new();

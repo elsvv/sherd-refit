@@ -39,6 +39,7 @@
 use nalgebra::Matrix4;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use sherd_core::error::Result;
+use sherd_core::executor::Engine;
 use sherd_core::matching::hypotheses::{self, Hypotheses};
 use sherd_core::matching::icp::{self, Numerics, Options};
 use sherd_core::matching::ladder;
@@ -306,11 +307,12 @@ fn refine(
     kept.par_iter()
         .map(|&h| {
             let init = icp::homogeneous(&hyp.r[h as usize], &hyp.tau[h as usize]);
-            let climbed = ladder::climb(rungs, &init, sc, numerics);
+            let climbed = ladder::climb(Engine::cpu(numerics), rungs, &init, sc);
             let last = climbed.last().copied();
             let transform = last.map_or(init, |r| r.transform);
             Refined {
                 score: ladder::brk_score(
+                    Engine::cpu(numerics),
                     &scoring,
                     &b.brk_sub.p,
                     &b.brk_sub.n,

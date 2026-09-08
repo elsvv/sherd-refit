@@ -33,11 +33,10 @@ use rayon::prelude::*;
 use crate::assembly::{Piece, assemble, recenter};
 use crate::collection::{self, Entry};
 use crate::error::{Error, Result};
-use crate::executor::Backend;
+use crate::executor::{Backend, Engine, Executor};
 use crate::fragment::{Fragment, cache, samples};
 use crate::matching::cache::MatchCache;
 use crate::matching::hypotheses::Frames;
-use crate::matching::icp::Numerics;
 use crate::matching::pair::{self, Candidate};
 use crate::matching::screen::{Screened, screen_pair, top_partners};
 use crate::memory::{self, Budget, MemorySemaphore, reservation};
@@ -258,6 +257,22 @@ pub fn default_workers() -> usize {
 /// `MatchData` a worker already holds.
 #[allow(clippy::too_many_lines, reason = "the reference's `pipeline.run`, stage for stage")]
 pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSummary> {
+    run_with(input, out_dir, options, Engine::REFERENCE)
+}
+
+/// [`run`] on a chosen executor (D §6.1).
+///
+/// `sherd-core` has no GPU dependency and cannot build a `GpuExecutor`, so the executor is handed
+/// in: the CLI resolves `--backend`, `sherd-gpu` builds the device, and the pipeline never learns
+/// which of the two it is holding. `options.backend` is what the run *asked* for and is what
+/// `report.json` records; `engine.exec` is what it got.
+#[allow(clippy::too_many_lines, reason = "the reference's `pipeline.run`, stage for stage")]
+pub fn run_with(
+    input: &Path,
+    out_dir: &Path,
+    options: &RunOptions,
+    engine: Engine<'_>,
+) -> Result<RunSummary> {
     let entries = collection::discover(input)?;
     if entries.len() < 2 {
         return Err(Error::read(
@@ -332,7 +347,7 @@ pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSumm
     if params.screen_top_k > 0 && pairs.len() >= params.screen_min_pairs as usize {
         let started = Instant::now();
         let before = pairs.len();
-        pairs = screen(&fragments, &names, &pairs, params);
+        pairs = screen(engine.exec, &fragments, &names, &pairs, params);
         timings.insert("screen", started.elapsed().as_secs_f64());
         screened = Some((before, pairs.len()));
         tracing::info!(
@@ -352,7 +367,8 @@ pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSumm
 
     // 2b. matching (R §5–§6)
     let started = Instant::now();
-    let mut per_pair = match_all(&fragments, &pairs, params, options.keep_per_pair, workers, None);
+    let mut per_pair =
+        match_all(engine, &fragments, &pairs, params, options.keep_per_pair, workers, None);
     timings.insert("matching", started.elapsed().as_secs_f64());
     let mut candidates: Vec<Candidate> = per_pair.iter().flatten().copied().collect();
     tracing::info!(
@@ -381,7 +397,7 @@ pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSumm
             s_pen: s,
         })
         .collect();
-    let mut assembly = assemble(&pieces, &candidates, params);
+    let mut assembly = assemble(engine.exec, &pieces, &candidates, params);
     timings.insert("assembly", started.elapsed().as_secs_f64());
 
     // 3a. second pass (R §8.1, off by default)
@@ -394,15 +410,22 @@ pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSumm
             stage1_floor: 0.0,
             ..*params
         };
-        let again =
-            match_all(&fragments, &retry, &bigger, options.keep_per_pair, workers, Some("second"));
+        let again = match_all(
+            engine,
+            &fragments,
+            &retry,
+            &bigger,
+            options.keep_per_pair,
+            workers,
+            Some("second"),
+        );
         for (k, found) in retry.iter().zip(again) {
             let at = pairs.iter().position(|p| p == k).expect("a retried pair is a pair");
             per_pair[at] = found;
         }
         candidates = per_pair.iter().flatten().copied().collect();
         timings.insert("second_pass", started.elapsed().as_secs_f64());
-        assembly = assemble(&pieces, &candidates, params);
+        assembly = assemble(engine.exec, &pieces, &candidates, params);
         tracing::info!(
             pairs = retry.len(),
             seconds = timings["second_pass"],
@@ -420,7 +443,7 @@ pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSumm
     let mut poses = assembly.poses.clone();
     if options.refine && assembly.groups.iter().any(|g| g.len() > 1) {
         let started = Instant::now();
-        poses = refine(&fragments, &assembly.groups, &poses, &used, params)?;
+        poses = refine(engine, &fragments, &assembly.groups, &poses, &used, params)?;
         timings.insert("refine", started.elapsed().as_secs_f64());
         tracing::info!(seconds = timings["refine"], joins = used.len(), "refinement done");
     }
@@ -542,6 +565,7 @@ pub fn block_size(workers: usize, n_pairs: usize) -> usize {
 
 /// R §4–§6 over a list of pairs, in the reference's block order, candidates back in pair order.
 fn match_all(
+    engine: Engine<'_>,
     fragments: &[Fragment],
     pairs: &[(usize, usize)],
     params: &Params,
@@ -574,8 +598,14 @@ fn match_all(
                 .map(|&k| {
                     let (a, b) = pairs[k];
                     let started = Instant::now();
-                    let cs =
-                        pair::match_pair_cached(&fragments[a], &fragments[b], params, keep, &cache);
+                    let cs = pair::match_pair_cached(
+                        engine,
+                        &fragments[a],
+                        &fragments[b],
+                        params,
+                        keep,
+                        &cache,
+                    );
                     tracing::info!(
                         pair = %format!("{}__{}", fragments[a].name, fragments[b].name),
                         seconds = started.elapsed().as_secs_f64(),
@@ -607,6 +637,7 @@ fn match_all(
 
 /// R §4.3's partner search: the pairs worth matching, in the order they were given.
 fn screen(
+    exec: &dyn Executor,
     fragments: &[Fragment],
     names: &[String],
     pairs: &[(usize, usize)],
@@ -643,7 +674,7 @@ fn screen(
                 .map(|&k| {
                     let (a, b) = pairs[k];
                     let s = match (view(a), view(b)) {
-                        (Some(a), Some(b)) => screen_pair(&a, &b, params),
+                        (Some(a), Some(b)) => screen_pair(exec, &a, &b, params),
                         _ => 0.0,
                     };
                     (k, s)
@@ -720,6 +751,7 @@ fn second_pass_pairs(
 /// R §9 for a whole collection: one fracture cloud per member of a group of two or more, then the
 /// spanning walk.
 fn refine(
+    engine: Engine<'_>,
     fragments: &[Fragment],
     groups: &[Vec<FragId>],
     poses: &[Matrix4<f64>],
@@ -766,7 +798,7 @@ fn refine(
         .zip(&clouds)
         .map(|(f, c)| RefinePiece { thick: f.thick, res: f.res(), cloud: c.as_ref() })
         .collect();
-    Ok(refine_joins(&pieces, poses, groups, used, params, Numerics::REFERENCE).poses)
+    Ok(refine_joins(&pieces, poses, groups, used, params, engine).poses)
 }
 
 /// The tail of the reference's `pipeline.segment_only`: the segmentation preview alone.

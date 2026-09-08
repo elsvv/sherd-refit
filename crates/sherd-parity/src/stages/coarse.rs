@@ -27,6 +27,7 @@
 //! natively is what the scores are for: the kept poses of the stages below.
 
 use sherd_core::error::Result;
+use sherd_core::executor::CPU;
 use sherd_core::matching::coarse::{self, Probe, Target};
 use sherd_core::matching::hypotheses;
 use sherd_core::spatial::kdtree::PointTree;
@@ -96,7 +97,7 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
             continue;
         };
         let target = Target { points: &fa.p, normals: &fa.ns, tree: &tree };
-        let ours = coarse::scores(&target, &Probe::at(&fb, &idx), &hyp, sc.coarse);
+        let ours = coarse::scores(&CPU, &target, &Probe::at(&fb, &idx), &hyp, sc.coarse);
 
         report.push(Check::count(&scope, "n_scored", ours.len() as u64, theirs.len() as u64));
         let (mut worst, mut differing) = (0.0_f64, 0);

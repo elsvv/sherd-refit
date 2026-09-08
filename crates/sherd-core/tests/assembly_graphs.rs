@@ -19,6 +19,7 @@
 use nalgebra::Matrix4;
 use sherd_core::Params;
 use sherd_core::assembly::{Piece, Rejection, assemble, recenter};
+use sherd_core::executor::CPU;
 use sherd_core::matching::pair::Candidate;
 use sherd_core::matching::verify::Scores;
 use sherd_core::spatial::bvh::RayScene;
@@ -128,7 +129,7 @@ fn a_chain_grows_from_its_strongest_join() {
         join(1, 2, [10.0, 0.0, 0.0], 2.0),
         join(2, 3, [10.0, 0.0, 0.0], 1.0),
     ];
-    let out = assemble(&pieces, &candidates, &Params::default());
+    let out = assemble(&CPU, &pieces, &candidates, &Params::default());
 
     assert_eq!(out.groups, [vec![0, 1, 2, 3]]);
     assert_eq!(used_pairs(&candidates, &out.used), [(0, 1), (1, 2), (2, 3)]);
@@ -150,7 +151,7 @@ fn a_loop_closing_edge_that_disagrees_is_rejected_and_moves_nothing() {
         // 0 → 2 the long way round: a quarter turn, and 20 units off where the chain puts it.
         pose_join(0, 2, quarter_turn([40.0, 0.0, 0.0]), 1.0),
     ];
-    let out = assemble(&pieces, &candidates, &Params::default());
+    let out = assemble(&CPU, &pieces, &candidates, &Params::default());
 
     assert_eq!(out.groups, [vec![0, 1, 2]]);
     assert_eq!(used_pairs(&candidates, &out.used), [(0, 1), (1, 2)]);
@@ -170,7 +171,7 @@ fn a_loop_closing_edge_that_disagrees_is_rejected_and_moves_nothing() {
 
     // The same triangle with a loop-closing edge that *agrees* keeps it as a used join.
     let agreeing = vec![candidates[0], candidates[1], join(0, 2, [20.0, 0.0, 0.0], 1.0)];
-    let out = assemble(&pieces, &agreeing, &Params::default());
+    let out = assemble(&CPU, &pieces, &agreeing, &Params::default());
     assert_eq!(used_pairs(&agreeing, &out.used), [(0, 1), (1, 2), (0, 2)]);
     assert!(out.rejected.is_empty(), "{:?}", out.rejected);
 }
@@ -184,7 +185,7 @@ fn two_objects_stay_apart_and_the_odd_fragment_is_a_singleton() {
         join(1, 2, [10.0, 0.0, 0.0], 3.0),
         join(3, 4, [10.0, 0.0, 0.0], 2.0),
     ];
-    let out = assemble(&pieces, &candidates, &Params::default());
+    let out = assemble(&CPU, &pieces, &candidates, &Params::default());
 
     assert_eq!(out.groups, [vec![0, 1, 2], vec![3, 4], vec![5]]);
     assert_eq!(used_pairs(&candidates, &out.used), [(0, 1), (1, 2), (3, 4)]);
@@ -200,10 +201,16 @@ fn two_objects_stay_apart_and_the_odd_fragment_is_a_singleton() {
 fn equal_scores_and_equal_sizes_are_broken_by_the_candidate_order() {
     let pieces = bare(4);
     let first = vec![join(2, 3, [1.0, 0.0, 0.0], 5.0), join(0, 1, [1.0, 0.0, 0.0], 5.0)];
-    assert_eq!(assemble(&pieces, &first, &Params::default()).groups, [vec![2, 3], vec![0, 1]]);
+    assert_eq!(
+        assemble(&CPU, &pieces, &first, &Params::default()).groups,
+        [vec![2, 3], vec![0, 1]]
+    );
 
     let second = vec![first[1], first[0]];
-    assert_eq!(assemble(&pieces, &second, &Params::default()).groups, [vec![0, 1], vec![2, 3]]);
+    assert_eq!(
+        assemble(&CPU, &pieces, &second, &Params::default()).groups,
+        [vec![0, 1], vec![2, 3]]
+    );
 }
 
 /// Only accepted candidates count, and a pair is represented by the **first** of its candidates at
@@ -219,7 +226,7 @@ fn a_pair_is_represented_by_its_first_best_accepted_candidate() {
         join(0, 1, [20.0, 0.0, 0.0], 4.0),
         join(0, 1, [30.0, 0.0, 0.0], 1.0),
     ];
-    let out = assemble(&pieces, &candidates, &Params::default());
+    let out = assemble(&CPU, &pieces, &candidates, &Params::default());
     assert_eq!(out.accepted, [1], "the strict `>` keeps the first candidate at the best score");
     assert_eq!(out.poses[1][(0, 3)], 10.0);
 }
@@ -250,7 +257,7 @@ fn a_penetrating_join_is_rejected_and_so_is_the_weaker_join_that_disagrees_with_
         join(0, 2, [1.5, 0.0, 0.0], 2.0),
         join(1, 2, [1.5, 0.0, 0.0], 1.0),
     ];
-    let out = assemble(&pieces, &candidates, &Params::default());
+    let out = assemble(&CPU, &pieces, &candidates, &Params::default());
 
     assert_eq!(out.groups, [vec![0, 1], vec![2]]);
     assert_eq!(used_pairs(&candidates, &out.used), [(0, 1)]);
@@ -285,7 +292,7 @@ fn a_penetrating_join_is_rejected_and_so_is_the_weaker_join_that_disagrees_with_
             s_pen: &interior,
         })
         .collect();
-    let out = assemble(&open, &candidates, &Params::default());
+    let out = assemble(&CPU, &open, &candidates, &Params::default());
     assert_eq!(out.groups, [vec![0, 1, 2]]);
     assert_eq!(used_pairs(&candidates, &out.used), [(0, 1), (0, 2)]);
 }

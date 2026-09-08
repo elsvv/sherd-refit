@@ -16,7 +16,8 @@
 //! the note compares against the reference's.
 
 use sherd_core::error::Result;
-use sherd_core::matching::icp::{self, Numerics};
+use sherd_core::executor::Engine;
+use sherd_core::matching::icp;
 use sherd_core::matching::ladder::{self, Rung};
 use sherd_core::matching::scales::Scales;
 use sherd_core::matching::{coarse, hypotheses};
@@ -71,9 +72,10 @@ fn main() -> Result<()> {
             for (i, &h) in kept.iter().enumerate() {
                 let init = icp::homogeneous(&hyp.r[h as usize], &hyp.tau[h as usize]);
                 let started = std::time::Instant::now();
-                let out = ladder::climb(&rungs, &init, &sc, Numerics::REFERENCE);
+                let out = ladder::climb(Engine::REFERENCE, &rungs, &init, &sc);
                 let last = out.last().expect("two rungs");
                 let score = ladder::brk_score(
+                    Engine::REFERENCE,
                     &scoring,
                     &b.brk_sub.p,
                     &b.brk_sub.n,
@@ -102,7 +104,7 @@ fn main() -> Result<()> {
             for (i, &k) in kept2.iter().enumerate() {
                 let init = stage1[k as usize];
                 let started = std::time::Instant::now();
-                let out = ladder::climb(&rungs, &init, &sc, Numerics::REFERENCE);
+                let out = ladder::climb(Engine::REFERENCE, &rungs, &init, &sc);
                 spent += started.elapsed();
                 climbed += 1;
                 let gaps: Vec<(f64, f64)> = out
@@ -148,7 +150,7 @@ fn line(
 /// The worst distance between the ladder's answer and its answers from the twelve one-ULP
 /// neighbours of `init` — the probe `stages::determined` gates on, printed rather than judged.
 fn spread(rungs: &[Rung<'_>], init: &nalgebra::Matrix4<f64>, sc: &Scales) -> (f64, f64) {
-    let base = ladder::climb(rungs, init, sc, Numerics::REFERENCE)
+    let base = ladder::climb(Engine::REFERENCE, rungs, init, sc)
         .last()
         .expect("a ladder has rungs")
         .transform;
@@ -157,7 +159,7 @@ fn spread(rungs: &[Rung<'_>], init: &nalgebra::Matrix4<f64>, sc: &Scales) -> (f6
         for j in 0..4 {
             let mut near = *init;
             near[(i, j)] = near[(i, j)].next_up();
-            let out = ladder::climb(rungs, &near, sc, Numerics::REFERENCE);
+            let out = ladder::climb(Engine::REFERENCE, rungs, &near, sc);
             let (angle, distance) =
                 pose_gap(&out.last().expect("a ladder has rungs").transform, &base, sc.t);
             worst = (worst.0.max(angle), worst.1.max(distance));

@@ -43,6 +43,7 @@ use std::path::{Path, PathBuf};
 use nalgebra::Matrix4;
 use sherd_core::Params;
 use sherd_core::error::{Error, Result};
+use sherd_core::executor::Engine;
 use sherd_core::matching::icp::Numerics;
 use sherd_core::matching::ladder::{Rung, climb};
 use sherd_core::mesh::Mesh;
@@ -450,12 +451,15 @@ pub fn determined(
     rotation: f64,
     translation: f64,
 ) -> bool {
-    let Some(base) = climb(rungs, init, scales, numerics).last().copied() else { return true };
+    let Some(base) = climb(Engine::cpu(numerics), rungs, init, scales).last().copied() else {
+        return true;
+    };
     for i in 0..3 {
         for j in 0..4 {
             let mut near = *init;
             near[(i, j)] = near[(i, j)].next_up();
-            let Some(other) = climb(rungs, &near, scales, numerics).last().copied() else {
+            let Some(other) = climb(Engine::cpu(numerics), rungs, &near, scales).last().copied()
+            else {
                 continue;
             };
             let (angle, distance) = pose_gap(&other.transform, &base.transform, scales.t);

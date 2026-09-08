@@ -21,6 +21,7 @@
 use nalgebra::Matrix4;
 use sherd_core::assembly::{assemble, recenter};
 use sherd_core::error::Result;
+use sherd_core::executor::CPU;
 use sherd_core::mesh::geometry::face_geometry;
 use sherd_core::refine::{FractureCloud, MAX_POINTS, RefinePiece, fracture_cloud, refine_joins};
 use sherd_core::render::{PALETTE, Paint, Splat, group_label, principal_views, render_views};
@@ -60,7 +61,7 @@ fn main() -> Result<()> {
     let views = piece_views(&pieces);
     let candidates =
         reference_candidates(&collection, &mut report)?.expect("the dump's candidates");
-    let assembly = assemble(&views, &candidates, &params);
+    let assembly = assemble(&CPU, &views, &candidates, &params);
     let used: Vec<(FragId, FragId)> =
         assembly.used.iter().map(|&i| (candidates[i].a, candidates[i].b)).collect();
 
@@ -140,7 +141,7 @@ fn main() -> Result<()> {
         &assembly.groups,
         &used,
         &params,
-        sherd_core::matching::icp::Numerics::REFERENCE,
+        sherd_core::executor::Engine::REFERENCE,
     );
     let poses = recenter(&refined.poses, &views, &assembly.groups);
 

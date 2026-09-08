@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use sherd_core::Params;
+use sherd_core::executor::Engine;
 use sherd_core::fragment::Fragment;
-use sherd_core::matching::icp::Numerics;
 use sherd_core::matching::pair::Pair;
 
 fn slab_input() -> PathBuf {
@@ -121,7 +121,7 @@ fn the_slab_pairs_true_pose_survives_the_coarse_stage() {
     assert!(pair.matchable());
     let hyp = pair.hypotheses(&params);
     assert!(hyp.len() > 1000, "{} hypotheses", hyp.len());
-    let cs = pair.coarse(&hyp, &pair.probe(&params));
+    let cs = pair.coarse(Engine::REFERENCE, &hyp, &pair.probe(&params));
     let kept = pair.suppress(&hyp, &cs, &params);
     assert_eq!(kept.len(), params.stage1 as usize, "the walk fills its budget on a true pair");
 
@@ -180,7 +180,7 @@ fn the_slab_pairs_two_ladders_reach_the_ground_truth() {
     let (a, b) = slab_fragments();
     let pair = Pair::build(a, b, &params);
     let hyp = pair.hypotheses(&params);
-    let cs = pair.coarse(&hyp, &pair.probe(&params));
+    let cs = pair.coarse(Engine::REFERENCE, &hyp, &pair.probe(&params));
     let kept = pair.suppress(&hyp, &cs, &params);
 
     let points = probe_points(b);
@@ -192,7 +192,7 @@ fn the_slab_pairs_two_ladders_reach_the_ground_truth() {
     };
 
     // R §5.4: the breakline ladder, from every pose the coarse suppression kept.
-    let stage1 = pair.stage1(&hyp, &kept, Numerics::REFERENCE);
+    let stage1 = pair.stage1(Engine::REFERENCE, &hyp, &kept);
     assert_eq!(stage1.len(), kept.len());
     let best1 = stage1
         .iter()
@@ -217,7 +217,7 @@ fn the_slab_pairs_two_ladders_reach_the_ground_truth() {
     assert!(!kept2.is_empty() && kept2.len() <= params.stage2 as usize);
     let mut best2 = (f64::INFINITY, f64::INFINITY);
     for &k in &kept2 {
-        let out = pair.stage2(&stage1[k as usize].transform, Numerics::REFERENCE);
+        let out = pair.stage2(Engine::REFERENCE, &stage1[k as usize].transform);
         assert_eq!(out.len(), 4, "R §5.6 is four rungs");
         let e = error(&out[3].transform);
         if e.1 < best2.1 {

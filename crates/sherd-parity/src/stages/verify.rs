@@ -58,6 +58,7 @@
 
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use sherd_core::error::Result;
+use sherd_core::executor::CPU;
 use sherd_core::matching::verify::{self, Scores};
 
 use super::{Collection, Spread};
@@ -162,7 +163,7 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
         let sc = pair.scales()?;
 
         let ours: Vec<Scores> =
-            poses.par_iter().map(|t| verify::verify(&sa, &sb, t, &sc, true, None)).collect();
+            poses.par_iter().map(|t| verify::verify(&CPU, &sa, &sb, t, &sc, true, None)).collect();
         let mut worst = [0.0_f64; ROWS.len()];
         let (mut worst_pen, mut over_limit, mut differing) = (0.0_f64, 0_usize, 0_usize);
         for ((mine, theirs), &accepted) in ours.iter().zip(&theirs).zip(&accepted) {

@@ -42,6 +42,8 @@
 
 use nalgebra::Matrix4;
 
+use crate::executor::Engine;
+use crate::executor::batch::IcpBatch;
 use crate::matching::icp::{self, IcpTarget, Options};
 use crate::matching::scales::Scales;
 use crate::mesh::Mesh;
@@ -283,7 +285,7 @@ pub fn refine_joins(
     groups: &[Vec<FragId>],
     used: &[(FragId, FragId)],
     params: &Params,
-    numerics: icp::Numerics,
+    engine: Engine<'_>,
 ) -> Refinement {
     let mut out = poses.to_vec();
     let mut joins = Vec::new();
@@ -301,7 +303,7 @@ pub fn refine_joins(
             };
             let (a, b) = edges.remove(step);
             let (fixed, moving) = if done.contains(&a) { (a, b) } else { (b, a) };
-            if let Some(join) = refine_one(pieces, &out, fixed, moving, params, numerics) {
+            if let Some(join) = refine_one(pieces, &out, fixed, moving, params, engine) {
                 out[moving as usize] = join.rungs[1] * out[moving as usize];
                 joins.push(join);
             } else {
@@ -324,7 +326,7 @@ fn refine_one(
     fixed: FragId,
     moving: FragId,
     params: &Params,
-    numerics: icp::Numerics,
+    engine: Engine<'_>,
 ) -> Option<RefinedJoin> {
     let (target_piece, source_piece) = (&pieces[fixed as usize], &pieces[moving as usize]);
     let (source_cloud, target_cloud) = (source_piece.cloud?, target_piece.cloud?);
@@ -347,9 +349,15 @@ fn refine_one(
             estimation: icp::Estimation::PointToPlane,
             max_correspondence_distance: scales.icp_dist(k),
             max_iteration: ITERATIONS,
-            numerics,
+            numerics: engine.numerics,
         };
-        let result = icp::register(&source, &target, &pose, &options);
+        let batch = IcpBatch {
+            source: &source,
+            target: &target,
+            inits: std::slice::from_ref(&pose),
+            options,
+        };
+        let result = engine.exec.icp_rung(&batch).pop().expect("one pose in, one result out");
         pose = result.transform;
         rungs[i] = pose;
         dist[i] = options.max_correspondence_distance;
@@ -371,7 +379,7 @@ mod tests {
     use super::{
         FractureCloud, MAX_POINTS, RefinePiece, refine_joins, select_vertices, vertex_normals,
     };
-    use crate::matching::icp::Numerics;
+    use crate::executor::Engine;
     use crate::mesh::Mesh;
     use crate::params::Params;
     use nalgebra::Matrix4;
@@ -470,7 +478,7 @@ mod tests {
             &[vec![0, 1, 2], vec![]],
             &[(1, 2), (0, 1)],
             &Params::default(),
-            Numerics::REFERENCE,
+            Engine::REFERENCE,
         );
         // `used` order is (1,2) then (0,1); the walk starts at 0, so (1,2) has no endpoint in
         // `done` on the first pass and (0,1) is taken first. Then (1,2).
@@ -509,7 +517,7 @@ mod tests {
             &[vec![0, 1]],
             &[(0, 1)],
             &Params::default(),
-            Numerics::REFERENCE,
+            Engine::REFERENCE,
         );
         assert!(out.joins.is_empty());
         assert_eq!(out.poses, poses);

@@ -8,6 +8,7 @@
 
 use nalgebra::Matrix4;
 
+use crate::executor::Executor;
 use crate::matching::scales::Scales;
 use crate::matching::verify::{penetration_share, pose_inverse};
 use crate::params::Params;
@@ -30,15 +31,21 @@ pub const TRANS_TOL_T: f64 = 0.5;
 /// `0` when either mesh is open or missing: a signed distance against a mesh with a hole is not a
 /// function of the geometry (PMC-7, R §6.4), and the reference refuses the question rather than
 /// answering it wrongly.
-pub fn penetration(a: &Piece<'_>, b: &Piece<'_>, t_ab: &Matrix4<f64>, p: &Params) -> f64 {
+pub fn penetration(
+    exec: &dyn Executor,
+    a: &Piece<'_>,
+    b: &Piece<'_>,
+    t_ab: &Matrix4<f64>,
+    p: &Params,
+) -> f64 {
     if !(a.watertight && b.watertight) {
         return 0.0;
     }
     let (Some(mesh_a), Some(mesh_b)) = (a.mesh, b.mesh) else { return 0.0 };
     let depth = Scales::for_pair(p, a.thick.min(b.thick), a.res.max(b.res)).pen;
     // `sd_a` is B's samples measured against A's mesh, which is the reference's own `sdA`.
-    let sd_a = penetration_share(b.s_pen, t_ab, mesh_a, depth);
-    let sd_b = penetration_share(a.s_pen, &pose_inverse(t_ab), mesh_b, depth);
+    let sd_a = penetration_share(exec, b.s_pen, t_ab, mesh_a, depth);
+    let sd_b = penetration_share(exec, a.s_pen, &pose_inverse(t_ab), mesh_b, depth);
     sd_a.max(sd_b)
 }
 

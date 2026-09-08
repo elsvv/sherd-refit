@@ -41,7 +41,7 @@ use std::path::Path;
 
 use nalgebra::Matrix4;
 use sherd_core::error::Result;
-use sherd_core::matching::icp::Numerics;
+use sherd_core::executor::Engine;
 use sherd_core::mesh::Mesh;
 use sherd_core::mesh::geometry::face_geometry;
 use sherd_core::refine::{
@@ -129,7 +129,7 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
         &fixture.groups,
         &fixture.used,
         &collection.manifest.collection.params,
-        Numerics::REFERENCE,
+        Engine::REFERENCE,
     );
     compare(collection, &mut report, &fixture, &out, &clouds);
     Ok(report)

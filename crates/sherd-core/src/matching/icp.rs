@@ -773,6 +773,13 @@ fn euler_zyx(alpha: f64, beta: f64, gamma: f64) -> Matrix3<f64> {
     rz * ry * rx
 }
 
+/// The 3×3 rotation of a pose, named so that a crate without a `nalgebra` dependency of its own
+/// can still build one (the CLI's `gpu-check`).
+pub type Rotation = Matrix3<f64>;
+
+/// The translation of a pose, named for the same reason.
+pub type Translation = Vector3<f64>;
+
 /// A 4×4 from a rotation and a translation.
 pub fn homogeneous(rotation: &Matrix3<f64>, translation: &Vector3<f64>) -> Matrix4<f64> {
     let mut m = Matrix4::identity();

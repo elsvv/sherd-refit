@@ -26,9 +26,10 @@
 //! reproduces the reference's scores, which is what the injected parity row measures. Natively the
 //! two implementations evaluate the same estimator on a different sixty points.
 
-use nalgebra::{Matrix3, Matrix4, Vector3};
-use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+use nalgebra::Matrix4;
 
+use crate::executor::Executor;
+use crate::executor::batch::{CoarseBatch, Poses};
 use crate::matching::hypotheses::{Frames, Hypotheses};
 use crate::rng::{self, Draw};
 use crate::spatial::grid::NearMask;
@@ -106,40 +107,30 @@ impl Probe {
 
 /// R §5.2 for every hypothesis: the fraction of the probe that lands on A's breakline.
 ///
-/// The hypotheses are independent, so this is `rayon`'s to spread; each score is computed from its
-/// own pose alone and the result does not depend on the thread count (D §7).
-pub fn scores(target: &Target<'_>, probe: &Probe, hyp: &Hypotheses, delta: f64) -> Vec<f64> {
-    if probe.is_empty() {
-        // The reference would divide by zero here; it cannot reach this, because R §5 returns
-        // before the coarse stage when B has no breakline and `brk_sub` is what the probe is drawn
-        // from. A score of zero is the answer that ranks such a pair last rather than NaN.
-        return vec![0.0; hyp.len()];
-    }
-    // The reference's `mean` is a *division*, and `k · (1/60)` is not `k / 60`: 1/60 has no exact
-    // double, so multiplying by the reciprocal moves the last bit of some scores. Measured on
-    // pot_G, 52 of one pair's 40 029 hypotheses came out one ulp away before this was a division.
-    #[allow(clippy::cast_precision_loss, reason = "the probe is 60 points")]
-    let points = probe.len() as f64;
+/// The hypotheses are independent, so this is one [`Executor`] batch and the executor's to spread;
+/// each score is computed from its own pose alone and the result does not depend on the thread
+/// count (D §7).
+pub fn scores(
+    exec: &dyn Executor,
+    target: &Target<'_>,
+    probe: &Probe,
+    hyp: &Hypotheses,
+    delta: f64,
+) -> Vec<f64> {
     // One mask over A's breakline for the whole pair (D §6.2, `spatial::grid`): tens of thousands
     // of hypotheses throw the same sixty points at the same curve, and the mask answers "nothing
     // within `delta`" for most of them without a tree descent. It is a filter — a `true` still
     // goes to `nearest_below` — so the scores are the scores.
     let mask = NearMask::of(target.points, delta);
-    (0..hyp.len())
-        .into_par_iter()
-        .map(|h| {
-            let agree = agreeing_masked(
-                target,
-                mask.as_ref(),
-                &probe.q,
-                &probe.qn,
-                &hyp.r[h],
-                &hyp.tau[h],
-                delta,
-            );
-            f64::from(agree) / points
-        })
-        .collect()
+    exec.coarse_scores(&CoarseBatch {
+        target: *target,
+        mask: mask.as_ref(),
+        points: &probe.q,
+        normals: &probe.qn,
+        poses: Poses::Split { r: &hyp.r, tau: &hyp.tau },
+        radius: delta,
+        normal_agree: NORMAL_AGREE,
+    })
 }
 
 /// R §5.4's `brk_score`: the same estimator as [`scores`], on one pose and a point set of the
@@ -149,87 +140,39 @@ pub fn scores(target: &Target<'_>, probe: &Probe, hyp: &Hypotheses, delta: f64) 
 /// `sc.coarse` (0.15 t), and over the whole of B's `brk_sub` rather than sixty of it — a different
 /// radius and a different point set, the same kernel (D §6.5). `points` and `normals` are B's
 /// breakline points and shell normals at `brk_sub`, in that order.
+///
+/// No near mask: R §5.2 builds one because tens of thousands of poses share it, and here one pose
+/// does.
 pub fn score_pose(
+    exec: &dyn Executor,
     target: &Target<'_>,
     points: &[[f64; 3]],
     normals: &[[f64; 3]],
     transform: &Matrix4<f64>,
     delta: f64,
 ) -> f64 {
-    if points.is_empty() {
-        return 0.0;
-    }
-    let mut rot = Matrix3::zeros();
-    for i in 0..3 {
-        for j in 0..3 {
-            rot[(i, j)] = transform[(i, j)];
-        }
-    }
-    let tau = Vector3::new(transform[(0, 3)], transform[(1, 3)], transform[(2, 3)]);
-    #[allow(clippy::cast_precision_loss, reason = "a breakline subset is a few thousand points")]
-    let n = points.len() as f64;
-    f64::from(agreeing(target, points, normals, &rot, &tau, delta)) / n
+    score_poses(exec, target, points, normals, std::slice::from_ref(transform), delta)[0]
 }
 
-/// How many of `points` land on the target's breakline under the pose `(rot, tau)` with agreeing
-/// shell normals — the inner loop of R §5.2 and R §5.4, written once.
-fn agreeing(
+/// [`score_pose`] for a batch of poses over the same points — the shape stage 1's re-score has
+/// once R §5.5's candidates are refined together (D §6.4 step 4).
+pub fn score_poses(
+    exec: &dyn Executor,
     target: &Target<'_>,
     points: &[[f64; 3]],
     normals: &[[f64; 3]],
-    rot: &Matrix3<f64>,
-    tau: &Vector3<f64>,
+    transforms: &[Matrix4<f64>],
     delta: f64,
-) -> u32 {
-    agreeing_masked(target, None, points, normals, rot, tau, delta)
-}
-
-/// [`agreeing`] with `spatial::grid`'s near mask in front of the tree.
-///
-/// The mask can only turn a query that would have missed into a query that is not made; a `true`
-/// falls through to the same `nearest_below` call, so the count is the same count. It is built
-/// per *pair* rather than per hypothesis, which is why it is worth having at all.
-#[allow(clippy::too_many_arguments, reason = "one pose, one probe, one target, one filter")]
-fn agreeing_masked(
-    target: &Target<'_>,
-    mask: Option<&NearMask>,
-    points: &[[f64; 3]],
-    normals: &[[f64; 3]],
-    rot: &Matrix3<f64>,
-    tau: &Vector3<f64>,
-    delta: f64,
-) -> u32 {
-    let mut agree = 0_u32;
-    for (point, normal) in points.iter().zip(normals) {
-        let moved = [
-            rot[(0, 0)] * point[0] + rot[(0, 1)] * point[1] + rot[(0, 2)] * point[2] + tau[0],
-            rot[(1, 0)] * point[0] + rot[(1, 1)] * point[1] + rot[(1, 2)] * point[2] + tau[1],
-            rot[(2, 0)] * point[0] + rot[(2, 1)] * point[1] + rot[(2, 2)] * point[2] + tau[2],
-        ];
-        // scipy's `distance_upper_bound` is *exclusive* — a neighbour exactly at `delta` comes
-        // back as `inf`, which is what `np.isfinite(d)` then reads — and the bound is also what
-        // makes this stage affordable: most probe points of most poses land nowhere near A's
-        // breakline, and a bounded search abandons those in a few comparisons. `nearest_below` is
-        // both halves, and its radius is widened by the rounding of `delta · delta` so that the
-        // traversal can never drop a neighbour the strict test would have kept.
-        if mask.is_some_and(|mask| !mask.may_be_near(&moved)) {
-            continue;
-        }
-        let Some((near, _)) = target.tree.nearest_below(&moved, delta) else {
-            continue;
-        };
-        let turned = [
-            rot[(0, 0)] * normal[0] + rot[(0, 1)] * normal[1] + rot[(0, 2)] * normal[2],
-            rot[(1, 0)] * normal[0] + rot[(1, 1)] * normal[1] + rot[(1, 2)] * normal[2],
-            rot[(2, 0)] * normal[0] + rot[(2, 1)] * normal[1] + rot[(2, 2)] * normal[2],
-        ];
-        let theirs = target.normals[near as usize];
-        let dot = theirs[0] * turned[0] + theirs[1] * turned[1] + theirs[2] * turned[2];
-        if dot > NORMAL_AGREE {
-            agree += 1;
-        }
-    }
-    agree
+) -> Vec<f64> {
+    exec.coarse_scores(&CoarseBatch {
+        target: *target,
+        mask: None,
+        points,
+        normals,
+        poses: Poses::Homogeneous(transforms),
+        radius: delta,
+        normal_agree: NORMAL_AGREE,
+    })
 }
 
 #[cfg(test)]
@@ -237,6 +180,7 @@ mod tests {
     #![allow(clippy::float_cmp, reason = "a score is k/n and the tests assert which k")]
 
     use super::{Probe, Target, scores};
+    use crate::executor::CPU;
     use crate::matching::hypotheses::{Frames, build_with};
     use crate::spatial::kdtree::PointTree;
 
@@ -271,7 +215,7 @@ mod tests {
         let hyp = build_with(&a, &b_flip, &[0], &[0], 25.0);
         assert_eq!(hyp.len(), 1);
 
-        assert_eq!(scores(&target, &probe, &hyp, 0.5), vec![1.0]);
+        assert_eq!(scores(&CPU, &target, &probe, &hyp, 0.5), vec![1.0]);
 
         // The same probe moved off the curve by more than delta lands nowhere.
         let far = Probe {
@@ -279,7 +223,7 @@ mod tests {
             q: probe.q.iter().map(|p| [p[0], p[1] + 0.6, p[2]]).collect(),
             qn: probe.qn.clone(),
         };
-        assert_eq!(scores(&target, &far, &hyp, 0.5), vec![0.0]);
+        assert_eq!(scores(&CPU, &target, &far, &hyp, 0.5), vec![0.0]);
     }
 
     /// The radius is scipy's `distance_upper_bound`, which is **exclusive**: a probe point exactly
@@ -296,8 +240,12 @@ mod tests {
 
         let at =
             |dy: f64| Probe { idx: vec![0], q: vec![[0.0, dy, 0.0]], qn: vec![[0.0, 0.0, 1.0]] };
-        assert_eq!(scores(&target, &at(0.25), &hyp, 0.5), vec![1.0]);
-        assert_eq!(scores(&target, &at(0.5), &hyp, 0.5), vec![0.0], "exclusive at the radius");
+        assert_eq!(scores(&CPU, &target, &at(0.25), &hyp, 0.5), vec![1.0]);
+        assert_eq!(
+            scores(&CPU, &target, &at(0.5), &hyp, 0.5),
+            vec![0.0],
+            "exclusive at the radius"
+        );
     }
 
     /// A pose that lands B's curve on A's with the shells facing opposite ways scores 0, however
@@ -317,7 +265,7 @@ mod tests {
             q: vec![[0.0; 3], [1.0, 0.0, 0.0]],
             qn: vec![[0.0, 0.0, -1.0]; 2],
         };
-        assert_eq!(scores(&target, &flipped, &hyp, 0.5), vec![0.0]);
+        assert_eq!(scores(&CPU, &target, &flipped, &hyp, 0.5), vec![0.0]);
 
         // Just inside 45° is still agreement; just outside is not.
         let tilt = |c: f64| Probe {
@@ -325,8 +273,8 @@ mod tests {
             q: vec![[0.0; 3]],
             qn: vec![[(1.0 - c * c).sqrt(), 0.0, c]],
         };
-        assert_eq!(scores(&target, &tilt(0.71), &hyp, 0.5), vec![1.0]);
-        assert_eq!(scores(&target, &tilt(0.7), &hyp, 0.5), vec![0.0], "the test is `> 0.7`");
+        assert_eq!(scores(&CPU, &target, &tilt(0.71), &hyp, 0.5), vec![1.0]);
+        assert_eq!(scores(&CPU, &target, &tilt(0.7), &hyp, 0.5), vec![0.0], "the test is `> 0.7`");
     }
 
     /// The score is a fraction of the probe, in steps of `1/n`.
@@ -346,8 +294,12 @@ mod tests {
             q: vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 9.0, 0.0], [0.0, -9.0, 0.0]],
             qn: vec![[0.0, 0.0, 1.0]; 4],
         };
-        assert_eq!(scores(&target, &probe, &hyp, 0.5), vec![0.5]);
-        assert_eq!(scores(&target, &Probe::default(), &hyp, 0.5), vec![0.0], "no probe, no score");
+        assert_eq!(scores(&CPU, &target, &probe, &hyp, 0.5), vec![0.5]);
+        assert_eq!(
+            scores(&CPU, &target, &Probe::default(), &hyp, 0.5),
+            vec![0.0],
+            "no probe, no score"
+        );
     }
 
     /// The draw is R §5.2's: `min(points, |pool|)` distinct members of the pool, seeded, and the

@@ -47,6 +47,7 @@ use std::path::{Path, PathBuf};
 use nalgebra::Matrix4;
 use sherd_core::assembly::{assemble, recenter};
 use sherd_core::error::{Error, Result};
+use sherd_core::executor::CPU;
 use sherd_core::fragment::samples::points_from_uniforms;
 use sherd_core::matching::pair::Candidate;
 use sherd_core::mesh::geometry::{FaceGeometry, column_mean, face_geometry};
@@ -167,7 +168,7 @@ fn transforms_rows(collection: &Collection, report: &mut StageReport) -> Result<
     // what the file's own rows are looked up by anyway.
     let order = match reference_candidates(collection, report)? {
         Some(candidates) => {
-            assemble(&views, &candidates, &collection.manifest.collection.params).order
+            assemble(&CPU, &views, &candidates, &collection.manifest.collection.params).order
         }
         None => Vec::new(),
     };

@@ -43,6 +43,8 @@
 use nalgebra::Matrix4;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::executor::Executor;
+use crate::executor::batch::{DistBatch, DistReduce, InsideBatch};
 use crate::fragment::samples::MatchData;
 use crate::matching::coarse::NORMAL_AGREE;
 use crate::matching::scales::Scales;
@@ -312,14 +314,15 @@ pub struct FractureScores {
 /// the `A` scores are `d2`'s (A's own points), which is the reference's pairing and the one that
 /// makes `tightA` a statement about A.
 pub fn fracture_scores(
+    exec: &dyn Executor,
     a: &Surfaces<'_>,
     b: &Surfaces<'_>,
     transform: &Matrix4<f64>,
     sc: &Scales,
 ) -> FractureScores {
     let inverse = pose_inverse(transform);
-    let d1 = surface_distances(&b.pf, transform, a.fracture, sc.facing);
-    let d2 = surface_distances(&a.pf, &inverse, b.fracture, sc.facing);
+    let d1 = surface_distances(exec, &b.pf, transform, a.fracture, sc.facing);
+    let d2 = surface_distances(exec, &a.pf, &inverse, b.fracture, sc.facing);
     let (tight_a, gap_a, contact_a) = one_side(&d2, a.frac_area, sc);
     let (tight_b, gap_b, contact_b) = one_side(&d1, b.frac_area, sc);
     FractureScores {
@@ -349,21 +352,19 @@ fn one_side(d: &[f64], area: f64, sc: &Scales) -> (f64, f64, f64) {
 /// or below it — `sc.tight`, `2·sc.tight` and `sc.facing` itself — so a point whose surface is
 /// further away needs no number, only the knowledge that it has none.
 fn surface_distances(
+    exec: &dyn Executor,
     points: &[[f64; 3]],
     transform: &Matrix4<f64>,
     scene: &RayScene,
     max_dist: f64,
 ) -> Vec<f64> {
-    #[allow(clippy::cast_possible_truncation, reason = "the scene is f32, as Open3D's is")]
-    let window = max_dist as f32;
-    points
-        .iter()
-        .map(|p| {
-            scene
-                .bounded_distance(narrow(apply(transform, *p)), window)
-                .map_or(f64::INFINITY, f64::from)
-        })
-        .collect()
+    exec.bounded_distance(&DistBatch {
+        points,
+        transform,
+        scene,
+        max_dist,
+        reduce: DistReduce::All,
+    })
 }
 
 /// R §6.2: the length of A's breakline, in `t`, covered by B's with agreeing shell normals.
@@ -442,6 +443,7 @@ pub fn continuity_scores(
 /// *not* a pass — R §6.5 reads `pen = 0` as "no penetration found", and a fragment with holes
 /// simply never contributes one.
 pub fn penetration_scores(
+    exec: &dyn Executor,
     a: &Surfaces<'_>,
     b: &Surfaces<'_>,
     transform: &Matrix4<f64>,
@@ -452,22 +454,9 @@ pub fn penetration_scores(
         return (0.0, 0.0, true);
     }
     let inverse = pose_inverse(transform);
-    let (pen_b, min_b) = one_penetration(&b.s, transform, mesh_a, sc.pen);
-    let (pen_a, min_a) = one_penetration(&a.s, &inverse, mesh_b, sc.pen);
+    let (pen_b, min_b) = one_penetration(exec, &b.s, transform, mesh_a, sc.pen);
+    let (pen_a, min_a) = one_penetration(exec, &a.s, &inverse, mesh_b, sc.pen);
     (pen_a.max(pen_b), (-min_a).max(-min_b) / sc.t, false)
-}
-
-/// How deep one already-moved point sits inside a mesh, or `None` when it is outside it.
-///
-/// `−sd` of Open3D's signed distance for a point the parity test calls inside, with the AABB
-/// reject in front of it: a point outside the box is outside the mesh, and no ray is cast for it.
-#[inline]
-fn depth_inside(point: [f32; 3], scene: &RayScene, lo: [f32; 3], hi: [f32; 3]) -> Option<f64> {
-    let outside_box = (0..3).any(|k| point[k] < lo[k] || point[k] > hi[k]);
-    if outside_box || !scene.inside(point) {
-        return None;
-    }
-    Some(f64::from(scene.distance(point)))
 }
 
 /// R §6.4's count in one direction alone: the share of `points`, moved by `transform`, that sit
@@ -480,23 +469,19 @@ fn depth_inside(point: [f32; 3], scene: &RayScene, lo: [f32; 3], hi: [f32; 3]) -
 /// The points are spread over `rayon`: the answer is a count, so it does not depend on how they
 /// are divided (D §7).
 pub fn penetration_share(
+    exec: &dyn Executor,
     points: &[[f64; 3]],
     transform: &Matrix4<f64>,
     scene: &RayScene,
     pen: f64,
 ) -> f64 {
-    use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
-
     if points.is_empty() {
         return 0.0;
     }
-    let (lo, hi) = scene.aabb();
-    let deeper = points
-        .par_iter()
-        .filter(|p| {
-            depth_inside(narrow(apply(transform, **p)), scene, lo, hi)
-                .is_some_and(|depth| depth > pen)
-        })
+    let deeper = exec
+        .inside(&InsideBatch { points, transform, scene })
+        .iter()
+        .filter(|o| o.is_inside() && f64::from(o.depth) > pen)
         .count();
     #[allow(clippy::cast_precision_loss, reason = "sample counts are far below 2^53")]
     let share = deeper as f64 / points.len() as f64;
@@ -516,6 +501,7 @@ pub fn penetration_share(
 /// * when *nothing* is inside, the smallest signed distance is the smallest positive distance, and
 ///   a running minimum finds it with a window that shrinks as it goes.
 fn one_penetration(
+    exec: &dyn Executor,
     points: &[[f64; 3]],
     transform: &Matrix4<f64>,
     scene: &RayScene,
@@ -524,12 +510,14 @@ fn one_penetration(
     if points.is_empty() {
         return (0.0, 0.0);
     }
-    let (lo, hi) = scene.aabb();
-    let moved: Vec<[f32; 3]> = points.iter().map(|p| narrow(apply(transform, *p))).collect();
+    let outcomes = exec.inside(&InsideBatch { points, transform, scene });
     let mut deepest = f64::NEG_INFINITY;
     let mut deeper_than_pen = 0_usize;
-    for point in &moved {
-        let Some(distance) = depth_inside(*point, scene, lo, hi) else { continue };
+    for outcome in &outcomes {
+        if !outcome.is_inside() {
+            continue;
+        }
+        let distance = f64::from(outcome.depth);
         deepest = deepest.max(distance);
         if distance > pen {
             deeper_than_pen += 1;
@@ -541,14 +529,16 @@ fn one_penetration(
         return (fraction, -deepest);
     }
     // Nothing is inside: R §6.4's `min(sd)` is the closest the two surfaces come, and each query
-    // only has to beat the best distance so far.
-    let mut best = f32::MAX;
-    for point in &moved {
-        if let Some(distance) = scene.bounded_distance(*point, best) {
-            best = best.min(distance);
-        }
-    }
-    (fraction, f64::from(best))
+    // only has to beat the best distance so far — a min-reduction with a shrinking window, which
+    // is what `DistReduce::Min` is. The window starts at `f32::MAX`, i.e. unbounded.
+    let best = exec.bounded_distance(&DistBatch {
+        points,
+        transform,
+        scene,
+        max_dist: f64::from(f32::MAX),
+        reduce: DistReduce::Min,
+    });
+    (fraction, best[0])
 }
 
 /// R §6: every score of one pose.
@@ -560,6 +550,7 @@ fn one_penetration(
 /// `frac` passes in fracture scores already computed for this very pose, which is the only reason
 /// the early rejection is cheaper than the thing it replaces.
 pub fn verify(
+    exec: &dyn Executor,
     a: &Surfaces<'_>,
     b: &Surfaces<'_>,
     transform: &Matrix4<f64>,
@@ -567,7 +558,7 @@ pub fn verify(
     full: bool,
     frac: Option<FractureScores>,
 ) -> Scores {
-    let frac = frac.unwrap_or_else(|| fracture_scores(a, b, transform, sc));
+    let frac = frac.unwrap_or_else(|| fracture_scores(exec, a, b, transform, sc));
     let mut scores = Scores {
         tight_a: frac.tight[0],
         tight_b: frac.tight[1],
@@ -589,7 +580,7 @@ pub fn verify(
     let (cont, cont_n) = continuity_scores(a, b, transform, sc);
     scores.cont = cont;
     scores.cont_n = cont_n;
-    let (pen, pen_depth, unavailable) = penetration_scores(a, b, transform, sc);
+    let (pen, pen_depth, unavailable) = penetration_scores(exec, a, b, transform, sc);
     scores.pen = pen;
     scores.pen_depth = pen_depth;
     scores.pen_unavailable = unavailable;
@@ -724,13 +715,6 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-/// A point narrowed to the `f32` the BVH is built in — Open3D narrows its queries the same way.
-#[inline]
-#[allow(clippy::cast_possible_truncation, reason = "the scene is f32, as Open3D's is")]
-fn narrow(p: [f64; 3]) -> [f32; 3] {
-    [p[0] as f32, p[1] as f32, p[2] as f32]
-}
-
 /// R §6.2's voxel index of a point: `⌊p / voxel⌋` per axis, on a grid fixed to the world origin.
 #[inline]
 #[allow(clippy::cast_possible_truncation, reason = "a mesh coordinate over t/3 fits an i64")]
@@ -745,6 +729,7 @@ mod tests {
         FractureScores, Scores, Surfaces, accept, continuity_scores, fracture_scores, median,
         penetration_scores, pose_inverse, seam_score, verify,
     };
+    use crate::executor::CPU;
     use crate::matching::scales::Scales;
     use crate::params::Params;
     use crate::spatial::bvh::RayScene;
@@ -835,26 +820,26 @@ mod tests {
         // t = 1, res = 0: tight = 0.01, facing = 0.3, gap limit = 0.03.
         let sc = Scales::for_pair(&Params::default(), 1.0, 0.0);
 
-        let s = fracture_scores(&side_a, &side_b, &Matrix4::identity(), &sc);
+        let s = fracture_scores(&CPU, &side_a, &side_b, &Matrix4::identity(), &sc);
         assert!(s.tight.iter().all(|&t| (t - 1.0).abs() < 1e-12), "{s:?}");
         assert!(s.gap.iter().all(|&g| g < 1e-6), "{s:?}");
         // `contact` is the fraction in contact times the fracture area over `t²`.
         assert!(s.contact.iter().all(|&c| (c - 4.0).abs() < 1e-9), "{s:?}");
 
         // Inside `tight` (0.01 t): still perfect contact, and the gap is the offset itself.
-        let s = fracture_scores(&side_a, &side_b, &shifted(0.005), &sc);
+        let s = fracture_scores(&CPU, &side_a, &side_b, &shifted(0.005), &sc);
         assert!((s.tight[2] - 1.0).abs() < 1e-12);
         assert!((s.gap[2] - 0.005).abs() < 1e-6, "{:?}", s.gap);
 
         // Past `2·tight`: no tight contact and no contact area, but still facing, so the gap is
         // measured rather than refused.
-        let s = fracture_scores(&side_a, &side_b, &shifted(0.05), &sc);
+        let s = fracture_scores(&CPU, &side_a, &side_b, &shifted(0.05), &sc);
         assert_eq!(s.tight[2], 0.0);
         assert_eq!(s.contact[2], 0.0);
         assert!((s.gap[2] - 0.05).abs() < 1e-6, "{:?}", s.gap);
 
         // Past `facing` (0.3 t): fewer than twenty facing points, and R §6.1's refusal.
-        let s = fracture_scores(&side_a, &side_b, &shifted(0.5), &sc);
+        let s = fracture_scores(&CPU, &side_a, &side_b, &shifted(0.5), &sc);
         assert_eq!((s.tight[2], s.gap[2], s.contact[2]), (0.0, 1.0, 0.0));
     }
 
@@ -871,7 +856,7 @@ mod tests {
         let side_b = fracture_side(&scene, off, 4.0);
         let sc = Scales::for_pair(&Params::default(), 1.0, 0.0);
 
-        let s = fracture_scores(&side_a, &side_b, &Matrix4::identity(), &sc);
+        let s = fracture_scores(&CPU, &side_a, &side_b, &Matrix4::identity(), &sc);
         assert!((s.tight[0] - 1.0).abs() < 1e-12, "A's samples are on B's wall: {s:?}");
         assert_eq!(s.tight[1], 0.0, "B's samples are 0.05 t off A's wall: {s:?}");
         assert_eq!(s.tight[2], 0.0, "and `tight` is the worse of the two");
@@ -1018,7 +1003,7 @@ mod tests {
         let outside_b = vec![[4.0, 5.0, 6.0], [1.0, 2.0, 3.0]];
         let a = build(&fracture, &mesh_a, outside_b, true);
         let b = build(&fracture, &mesh_b, inside_a, true);
-        let (pen, depth, unavailable) = penetration_scores(&a, &b, &Matrix4::identity(), &sc);
+        let (pen, depth, unavailable) = penetration_scores(&CPU, &a, &b, &Matrix4::identity(), &sc);
         assert!(!unavailable);
         assert!((pen - 0.5).abs() < 1e-12, "two of four: {pen}");
         assert!((depth - 4.0).abs() < 1e-5, "the deepest sample is 4 from the wall: {depth}");
@@ -1028,19 +1013,22 @@ mod tests {
         // sample sits on the `z = 10` face's diagonal (`x = y`) and is still found inside, because
         // the other two rays are not degenerate. One ray — Open3D's own rule — would lose it.
         let diagonal = build(&fracture, &mesh_b, vec![[5.0, 5.0, 9.0]], true);
-        let (pen, _, _) = penetration_scores(&a, &diagonal, &Matrix4::identity(), &sc);
+        let (pen, _, _) = penetration_scores(&CPU, &a, &diagonal, &Matrix4::identity(), &sc);
         assert!((pen - 1.0).abs() < 1e-12, "the majority of three still finds it: {pen}");
 
         // With nothing inside either mesh, `pen` is zero and `pen_depth` is the negated distance
         // to the nearest surface — R §6.4's `−min(sd)` where every `sd` is positive.
         let far = build(&fracture, &mesh_b, vec![[-4.0, 5.0, 5.0], [-9.0, 5.0, 5.0]], true);
-        let (pen, depth, _) = penetration_scores(&a, &far, &Matrix4::identity(), &sc);
+        let (pen, depth, _) = penetration_scores(&CPU, &a, &far, &Matrix4::identity(), &sc);
         assert_eq!(pen, 0.0);
         assert!((depth + 4.0).abs() < 1e-5, "the closest sample is 4 outside: {depth}");
 
         // A fragment that is not watertight has no signed distance, and R §6.4 says so.
         let holed = build(&fracture, &mesh_b, vec![[5.0, 5.0, 5.0]], false);
-        assert_eq!(penetration_scores(&a, &holed, &Matrix4::identity(), &sc), (0.0, 0.0, true));
+        assert_eq!(
+            penetration_scores(&CPU, &a, &holed, &Matrix4::identity(), &sc),
+            (0.0, 0.0, true)
+        );
     }
 
     /// R §6.5 refuses on any one of its five limits, and the two flags refuse on their own.
@@ -1127,15 +1115,15 @@ mod tests {
         let side_b = fracture_side(&scene, wall_samples(), 4.0);
         let sc = Scales::for_pair(&Params::default(), 1.0, 0.0);
 
-        let s = verify(&side_a, &side_b, &Matrix4::identity(), &sc, false, None);
+        let s = verify(&CPU, &side_a, &side_b, &Matrix4::identity(), &sc, false, None);
         assert!(s.partial);
         assert!((s.tight - 1.0).abs() < 1e-12, "the cheap half is still measured");
         assert_eq!((s.cont, s.cont_n, s.pen, s.pen_depth), (1.0, -1.0, 0.0, 0.0));
         assert!(!accept(&s, &Params::default(), &sc));
 
         // Fracture scores computed once are not computed again: the same numbers come back.
-        let frac = fracture_scores(&side_a, &side_b, &Matrix4::identity(), &sc);
-        let reused = verify(&side_a, &side_b, &Matrix4::identity(), &sc, false, Some(frac));
+        let frac = fracture_scores(&CPU, &side_a, &side_b, &Matrix4::identity(), &sc);
+        let reused = verify(&CPU, &side_a, &side_b, &Matrix4::identity(), &sc, false, Some(frac));
         assert_eq!(reused, s);
         assert_eq!(
             FractureScores { tight: [1.0; 3], ..frac }.tight,
@@ -1144,7 +1132,7 @@ mod tests {
         );
 
         // The full pass has no `partial` and, with no mesh on either side, no penetration either.
-        let s = verify(&side_a, &side_b, &Matrix4::identity(), &sc, true, None);
+        let s = verify(&CPU, &side_a, &side_b, &Matrix4::identity(), &sc, true, None);
         assert!(!s.partial && s.pen_unavailable);
     }
 

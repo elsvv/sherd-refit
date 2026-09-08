@@ -41,9 +41,11 @@
 use nalgebra::Matrix4;
 
 use super::coarse::{self, Target};
-use super::icp::{self, Estimation, IcpTarget, Numerics, Options, Registration};
+use super::icp::{Estimation, IcpTarget, Options, Registration};
 use super::nms;
 use super::scales::Scales;
+use crate::executor::Engine;
+use crate::executor::batch::IcpBatch;
 
 /// R §5.4's rungs, as multiples of `t_pair` before [`Scales::icp_dist`] stretches them.
 pub const STAGE1_RUNGS: [f64; 2] = [0.2, 0.08];
@@ -84,23 +86,43 @@ pub struct Rung<'a> {
 /// compares them one at a time: a ladder that ends in the right place by a different route is a
 /// different ladder, and only the intermediate poses say so.
 pub fn climb(
+    engine: Engine<'_>,
     rungs: &[Rung<'_>],
     init: &Matrix4<f64>,
     scales: &Scales,
-    numerics: Numerics,
 ) -> Vec<Registration> {
-    let mut pose = *init;
-    let mut out = Vec::with_capacity(rungs.len());
+    let mut climbed = climb_all(engine, rungs, std::slice::from_ref(init), scales);
+    climbed.pop().unwrap_or_default()
+}
+
+/// [`climb`] for a batch of candidates that share the ladder (D §6.4 steps 4 and 5).
+///
+/// One [`Executor`](crate::executor::Executor) batch per rung, over every candidate that has
+/// reached it, rather than one ladder per candidate: a rung is the unit a GPU dispatch wants, and
+/// each candidate's ladder is independent of every other's, so the result is the result whichever
+/// way the loops are nested. The returned vector is indexed by candidate and holds `rungs.len()`
+/// registrations each, in ladder order.
+pub fn climb_all(
+    engine: Engine<'_>,
+    rungs: &[Rung<'_>],
+    inits: &[Matrix4<f64>],
+    scales: &Scales,
+) -> Vec<Vec<Registration>> {
+    let mut out: Vec<Vec<Registration>> = vec![Vec::with_capacity(rungs.len()); inits.len()];
+    let mut poses: Vec<Matrix4<f64>> = inits.to_vec();
     for rung in rungs {
         let options = Options {
             estimation: rung.estimation,
             max_correspondence_distance: scales.icp_dist(rung.k),
             max_iteration: rung.iterations,
-            numerics,
+            numerics: engine.numerics,
         };
-        let result = icp::register(rung.source, rung.target, &pose, &options);
-        pose = result.transform;
-        out.push(result);
+        let batch = IcpBatch { source: rung.source, target: rung.target, inits: &poses, options };
+        let results = engine.exec.icp_rung(&batch);
+        for (i, result) in results.into_iter().enumerate() {
+            poses[i] = result.transform;
+            out[i].push(result);
+        }
     }
     out
 }
@@ -141,13 +163,26 @@ pub fn stage2_rungs<'a>(
 /// R §5.4's `brk_score`: the fraction of B's breakline subset that lands on A's breakline within
 /// `delta` with an agreeing shell normal, under the pose `transform`.
 pub fn brk_score(
+    engine: Engine<'_>,
     target: &Target<'_>,
     points: &[[f64; 3]],
     normals: &[[f64; 3]],
     transform: &Matrix4<f64>,
     delta: f64,
 ) -> f64 {
-    coarse::score_pose(target, points, normals, transform, delta)
+    coarse::score_pose(engine.exec, target, points, normals, transform, delta)
+}
+
+/// [`brk_score`] for the whole of R §5.3's kept list at once — one batch, one call (D §6.4).
+pub fn brk_scores(
+    engine: Engine<'_>,
+    target: &Target<'_>,
+    points: &[[f64; 3]],
+    normals: &[[f64; 3]],
+    transforms: &[Matrix4<f64>],
+    delta: f64,
+) -> Vec<f64> {
+    coarse::score_poses(engine.exec, target, points, normals, transforms, delta)
 }
 
 /// R §5.5's walk order: the stage-1 scores, descending, ties by ascending candidate (PMC-6).
@@ -190,8 +225,9 @@ mod tests {
     use super::{
         STAGE1_FLOOR, brk_score, climb, stage1_order, stage1_rungs, stage2_rungs, suppress_stage1,
     };
+    use crate::executor::Engine;
     use crate::matching::coarse::Target;
-    use crate::matching::icp::{IcpTarget, Numerics, homogeneous};
+    use crate::matching::icp::{IcpTarget, homogeneous};
     use crate::matching::scales::Scales;
     use crate::params::Params;
     use crate::spatial::kdtree::PointTree;
@@ -216,14 +252,19 @@ mod tests {
 
         // A pose 0.25 t out of place: inside the wide rung's radius, outside the re-score's.
         let init = homogeneous(&Matrix3::identity(), &Vector3::new(0.12, 0.10, 0.05));
-        assert!(brk_score(&scoring, &points, &normals, &init, scales.stage1) < 1.0);
+        assert!(
+            brk_score(Engine::REFERENCE, &scoring, &points, &normals, &init, scales.stage1) < 1.0
+        );
 
         let rungs = stage1_rungs(&points, &target);
-        let out = climb(&rungs, &init, &scales, Numerics::REFERENCE);
+        let out = climb(Engine::REFERENCE, &rungs, &init, &scales);
         assert_eq!(out.len(), 2);
         let refined = out[1].transform;
         assert!(
-            (brk_score(&scoring, &points, &normals, &refined, scales.stage1) - 1.0).abs() < 1e-12
+            (brk_score(Engine::REFERENCE, &scoring, &points, &normals, &refined, scales.stage1)
+                - 1.0)
+                .abs()
+                < 1e-12
         );
         // And the pose it found is the identity it started from.
         let (angle, distance) = {
@@ -248,7 +289,7 @@ mod tests {
         assert!(rungs.iter().all(|r| r.iterations == 30));
         let scales = Scales::for_pair(&Params::default(), 2.0, 0.0);
         assert!((scales.icp_dist(rungs[0].k) - 0.4).abs() < 1e-15);
-        let out = climb(&rungs, &Matrix4::identity(), &scales, Numerics::REFERENCE);
+        let out = climb(Engine::REFERENCE, &rungs, &Matrix4::identity(), &scales);
         assert_eq!(out.len(), 4);
         assert!(out.iter().all(|r| (r.fitness - 1.0).abs() < 1e-12));
     }

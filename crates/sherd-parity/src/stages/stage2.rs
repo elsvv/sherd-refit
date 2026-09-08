@@ -29,6 +29,7 @@
 
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use sherd_core::error::Result;
+use sherd_core::executor::Engine;
 use sherd_core::matching::icp::{self, Numerics, Options, Registration};
 use sherd_core::matching::ladder;
 use sherd_core::matching::scales::Scales;
@@ -291,5 +292,8 @@ fn refine(
     sc: &Scales,
     numerics: Numerics,
 ) -> Vec<Vec<Registration>> {
-    kept2.par_iter().map(|&k| ladder::climb(rungs, &stage1[k as usize], sc, numerics)).collect()
+    kept2
+        .par_iter()
+        .map(|&k| ladder::climb(Engine::cpu(numerics), rungs, &stage1[k as usize], sc))
+        .collect()
 }

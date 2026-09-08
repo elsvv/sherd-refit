@@ -27,12 +27,13 @@ use std::sync::Arc;
 use nalgebra::Matrix4;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 
+use crate::executor::Engine;
 use crate::fragment::Fragment;
 use crate::fragment::samples::MatchData;
 use crate::matching::cache::MatchCache;
 use crate::matching::coarse::{self, Probe, Target};
 use crate::matching::hypotheses::{self, Frames, Hypotheses};
-use crate::matching::icp::{IcpTarget, Numerics, Registration, cloud_points, homogeneous};
+use crate::matching::icp::{IcpTarget, Registration, cloud_points, homogeneous};
 use crate::matching::ladder::{self, Rung};
 use crate::matching::nms;
 use crate::matching::scales::Scales;
@@ -134,12 +135,12 @@ impl<'a> Pair<'a> {
     }
 
     /// R §5.2's coarse score of every hypothesis.
-    pub fn coarse(&self, hyp: &Hypotheses, probe: &Probe) -> Vec<f64> {
+    pub fn coarse(&self, engine: Engine<'_>, hyp: &Hypotheses, probe: &Probe) -> Vec<f64> {
         let Some(tree) = self.a.kd_brk.as_ref() else {
             return vec![0.0; hyp.len()];
         };
         let target = Target { points: &self.frames_a.p, normals: &self.frames_a.ns, tree };
-        coarse::scores(&target, probe, hyp, self.scales.coarse)
+        coarse::scores(engine.exec, &target, probe, hyp, self.scales.coarse)
     }
 
     /// R §5.3's non-maximum suppression over the coarse scores: the poses stage 1 refines.
@@ -151,33 +152,45 @@ impl<'a> Pair<'a> {
     /// R §5.4: the breakline ladder and its re-score for every kept hypothesis.
     ///
     /// The candidates are independent — each one starts from its own hypothesis and touches
-    /// nothing the others touch — so they are `rayon`'s to spread; the results are collected by
-    /// index, so the list is the reference's `kept` order whatever the thread count does (D §7).
+    /// nothing the others touch — so the whole kept list is one batch per rung and one batch for
+    /// the re-score (D §6.4 step 4); the results are collected by index, so the list is the
+    /// reference's `kept` order whatever the executor does with it (D §7).
     pub fn stage1(
         &self,
+        engine: Engine<'_>,
         hyp: &Hypotheses,
         kept: &[u32],
-        numerics: Numerics,
     ) -> Vec<Stage1Candidate> {
+        let Some(tree) = self.a.kd_brk.as_ref() else { return Vec::new() };
         let target = IcpTarget::from_cloud(&self.a.pc_brk_full);
         let source = cloud_points(&self.b.pc_brk);
         let rungs = ladder::stage1_rungs(&source, &target);
-        let Some(tree) = self.a.kd_brk.as_ref() else { return Vec::new() };
         let scoring = Target { points: &self.frames_a.p, normals: &self.frames_a.ns, tree };
         let (brk_points, brk_normals) = self.b_subset();
-        kept.par_iter()
-            .map(|&h| {
-                let init = homogeneous(&hyp.r[h as usize], &hyp.tau[h as usize]);
-                let out = ladder::climb(&rungs, &init, &self.scales, numerics);
-                let transform = out.last().map_or(init, |r| r.transform);
-                let score = ladder::brk_score(
-                    &scoring,
-                    &brk_points,
-                    &brk_normals,
-                    &transform,
-                    self.scales.stage1,
-                );
-                Stage1Candidate { hypothesis: h, transform, score }
+
+        let inits: Vec<Matrix4<f64>> =
+            kept.iter().map(|&h| homogeneous(&hyp.r[h as usize], &hyp.tau[h as usize])).collect();
+        let climbed = ladder::climb_all(engine, &rungs, &inits, &self.scales);
+        let transforms: Vec<Matrix4<f64>> = climbed
+            .iter()
+            .zip(&inits)
+            .map(|(out, init)| out.last().map_or(*init, |r| r.transform))
+            .collect();
+        let scores = ladder::brk_scores(
+            engine,
+            &scoring,
+            &brk_points,
+            &brk_normals,
+            &transforms,
+            self.scales.stage1,
+        );
+        kept.iter()
+            .zip(transforms)
+            .zip(scores)
+            .map(|((&hypothesis, transform), score)| Stage1Candidate {
+                hypothesis,
+                transform,
+                score,
             })
             .collect()
     }
@@ -196,9 +209,9 @@ impl<'a> Pair<'a> {
     /// refine should build a [`SurfaceLadder`] once and climb it instead — which is what
     /// [`Pair::match_pair`] does, and most of why one thread of the port outruns ten of Open3D's
     /// (C2's note §6: `registration_icp` rebuilds a `KDTreeFlann` on every call).
-    pub fn stage2(&self, init: &Matrix4<f64>, numerics: Numerics) -> Vec<Registration> {
+    pub fn stage2(&self, engine: Engine<'_>, init: &Matrix4<f64>) -> Vec<Registration> {
         let ladder = SurfaceLadder::of(self);
-        ladder::climb(&ladder.rungs(), init, &self.scales, numerics)
+        ladder::climb(engine, &ladder.rungs(), init, &self.scales)
     }
 
     /// R §6's view of both fragments, built once for the whole pair.
@@ -214,38 +227,100 @@ impl<'a> Pair<'a> {
     /// R §5.6 and R §6 for one stage-1 pose: the four rungs, then the verification and R §6.5.
     ///
     /// `brk` is the pose's own stage-1 re-score, which travels with the candidate into the report.
-    /// With `Params::early_reject_tight > 0` the fracture scores are taken after the two `pc_reg`
-    /// rungs and a candidate below the threshold skips the two `pc_frac` rungs and the expensive
-    /// half of R §6; it keeps its cheap scores, is marked `partial`, and can never be accepted.
-    /// That is off by default, and R §5.6 says why: the estimate can still rise by 0.09 over the
-    /// two remaining rungs, so a threshold safe against `min_tight` saves almost nothing.
     pub fn stage2_candidate(
         &self,
+        engine: Engine<'_>,
         ladder: &SurfaceLadder,
         surfaces: &(Surfaces<'_>, Surfaces<'_>),
         init: &Matrix4<f64>,
         brk: f64,
         p: &Params,
-        numerics: Numerics,
     ) -> Candidate {
+        self.stage2_batch(engine, ladder, surfaces, std::slice::from_ref(init), &[brk], p)
+            .pop()
+            .expect("one pose in, one candidate out")
+    }
+
+    /// R §5.6 and R §6 for a batch of stage-1 poses (D §6.4 steps 5 and 6).
+    ///
+    /// The four rungs are climbed a rung at a time over the whole batch, then R §6 scores each
+    /// pose; per candidate the sequence is exactly the one [`Pair::stage2_candidate`] describes,
+    /// because each ladder depends on nothing but its own pose.
+    ///
+    /// With `Params::early_reject_tight > 0` the fracture scores are taken after the two `pc_reg`
+    /// rungs and a candidate below the threshold skips the two `pc_frac` rungs and the expensive
+    /// half of R §6; it keeps its cheap scores, is marked `partial`, and can never be accepted.
+    /// That is off by default, and R §5.6 says why: the estimate can still rise by 0.09 over the
+    /// two remaining rungs, so a threshold safe against `min_tight` saves almost nothing. It is
+    /// also what keeps the last two rungs a batch over the *survivors* rather than over the batch.
+    pub fn stage2_batch(
+        &self,
+        engine: Engine<'_>,
+        ladder: &SurfaceLadder,
+        surfaces: &(Surfaces<'_>, Surfaces<'_>),
+        inits: &[Matrix4<f64>],
+        brk: &[f64],
+        p: &Params,
+    ) -> Vec<Candidate> {
         let (a, b) = surfaces;
         let rungs = ladder.rungs();
-        let climbed = ladder::climb(&rungs[..2], init, &self.scales, numerics);
-        let mut pose = climbed.last().map_or(*init, |r| r.transform);
+        let climbed = ladder::climb_all(engine, &rungs[..2], inits, &self.scales);
+        let mut poses: Vec<Matrix4<f64>> = climbed
+            .iter()
+            .zip(inits)
+            .map(|(out, init)| out.last().map_or(*init, |r| r.transform))
+            .collect();
+
+        // R §5.6's early rejection, if it is on: the candidates it rejects keep their cheap scores
+        // and leave the batch here.
+        let mut out: Vec<Option<Candidate>> = vec![None; inits.len()];
+        let mut alive: Vec<usize> = (0..inits.len()).collect();
         if p.early_reject_tight > 0.0 {
-            let frac = verify::fracture_scores(a, b, &pose, &self.scales);
-            if frac.tight[2] < p.early_reject_tight {
-                let mut scores = verify::verify(a, b, &pose, &self.scales, false, Some(frac));
-                scores.brk = brk;
-                return self.candidate(pose, scores, false);
+            let mut kept = Vec::with_capacity(alive.len());
+            for &i in &alive {
+                let frac = verify::fracture_scores(engine.exec, a, b, &poses[i], &self.scales);
+                if frac.tight[2] < p.early_reject_tight {
+                    let mut scores = verify::verify(
+                        engine.exec,
+                        a,
+                        b,
+                        &poses[i],
+                        &self.scales,
+                        false,
+                        Some(frac),
+                    );
+                    scores.brk = brk[i];
+                    out[i] = Some(self.candidate(poses[i], scores, false));
+                } else {
+                    kept.push(i);
+                }
+            }
+            alive = kept;
+        }
+
+        let fine_inits: Vec<Matrix4<f64>> = alive.iter().map(|&i| poses[i]).collect();
+        let climbed = ladder::climb_all(engine, &rungs[2..], &fine_inits, &self.scales);
+        for (&i, out_rungs) in alive.iter().zip(&climbed) {
+            if let Some(last) = out_rungs.last() {
+                poses[i] = last.transform;
             }
         }
-        let climbed = ladder::climb(&rungs[2..], &pose, &self.scales, numerics);
-        pose = climbed.last().map_or(pose, |r| r.transform);
-        let mut scores = verify::verify(a, b, &pose, &self.scales, true, None);
-        scores.brk = brk;
-        let accepted = verify::accept(&scores, p, &self.scales);
-        self.candidate(pose, scores, accepted)
+        let scored: Vec<Candidate> = alive
+            .par_iter()
+            .map(|&i| {
+                let mut scores =
+                    verify::verify(engine.exec, a, b, &poses[i], &self.scales, true, None);
+                scores.brk = brk[i];
+                let accepted = verify::accept(&scores, p, &self.scales);
+                self.candidate(poses[i], scores, accepted)
+            })
+            .collect();
+        for (&i, candidate) in alive.iter().zip(scored) {
+            out[i] = Some(candidate);
+        }
+        out.into_iter()
+            .map(|c| c.expect("every candidate is scored on one path or the other"))
+            .collect()
     }
 
     /// R §4–§6 for this pair: the best `keep` candidates, best first (R §5.7).
@@ -255,7 +330,7 @@ impl<'a> Pair<'a> {
     /// R §6.5 — and the three places it gives up early are the reference's too: a pair with no
     /// fracture sample or no breakline, a pair with no hypothesis, and a pair whose coarse
     /// suppression kept nothing.
-    pub fn match_pair(&self, p: &Params, keep: usize, numerics: Numerics) -> Vec<Candidate> {
+    pub fn match_pair(&self, engine: Engine<'_>, p: &Params, keep: usize) -> Vec<Candidate> {
         if !self.matchable() {
             return Vec::new();
         }
@@ -264,9 +339,9 @@ impl<'a> Pair<'a> {
             tracing::info!(pair = self.name(), "no hypotheses");
             return Vec::new();
         }
-        let cs = self.coarse(&hyp, &self.probe(p));
+        let cs = self.coarse(engine, &hyp, &self.probe(p));
         let kept = self.suppress(&hyp, &cs, p);
-        let stage1 = self.stage1(&hyp, &kept, numerics);
+        let stage1 = self.stage1(engine, &hyp, &kept);
         let Some(best1) = stage1.iter().map(|c| c.score).reduce(f64::max) else {
             tracing::info!(pair = self.name(), "nothing passed the coarse stage");
             return Vec::new();
@@ -296,13 +371,10 @@ impl<'a> Pair<'a> {
         let Some(surfaces) = self.surfaces() else { return Vec::new() };
         let kept2 = self.suppress_stage1(&stage1, p);
         let ladder = SurfaceLadder::of(self);
-        let mut candidates: Vec<Candidate> = kept2
-            .par_iter()
-            .map(|&k| {
-                let pose = &stage1[k as usize];
-                self.stage2_candidate(&ladder, &surfaces, &pose.transform, pose.score, p, numerics)
-            })
-            .collect();
+        let inits: Vec<Matrix4<f64>> =
+            kept2.iter().map(|&k| stage1[k as usize].transform).collect();
+        let brk: Vec<f64> = kept2.iter().map(|&k| stage1[k as usize].score).collect();
+        let mut candidates = self.stage2_batch(engine, &ladder, &surfaces, &inits, &brk, p);
         // R §5.7: `seam · tight`, descending, stable — ties keep the `kept2` order. `brk_best` is
         // the pair's own best stage-1 score and goes on every candidate, the reference's included.
         candidates.sort_by(|x, y| {
@@ -405,7 +477,7 @@ pub fn match_pair(a: &Fragment, b: &Fragment, p: &Params, keep: usize) -> Vec<Ca
     if Pair::skipped(a, b, p) {
         return Vec::new();
     }
-    Pair::build(a, b, p).match_pair(p, keep, Numerics::REFERENCE)
+    Pair::build(a, b, p).match_pair(Engine::REFERENCE, p, keep)
 }
 
 /// [`match_pair`] through D §5's shared `MatchData` cache.
@@ -415,6 +487,7 @@ pub fn match_pair(a: &Fragment, b: &Fragment, p: &Params, keep: usize) -> Vec<Ca
 /// candidates bit for bit; only the pipeline calls it, because only the pipeline matches enough
 /// pairs for an entry to be asked for twice.
 pub fn match_pair_cached<'a>(
+    engine: Engine<'_>,
     a: &'a Fragment,
     b: &'a Fragment,
     p: &Params,
@@ -424,7 +497,7 @@ pub fn match_pair_cached<'a>(
     if Pair::skipped(a, b, p) {
         return Vec::new();
     }
-    Pair::build_cached(a, b, p, Some(cache)).match_pair(p, keep, Numerics::REFERENCE)
+    Pair::build_cached(a, b, p, Some(cache)).match_pair(engine, p, keep)
 }
 
 /// One pose surviving R §5.4, with the hypothesis it came from and its re-score.

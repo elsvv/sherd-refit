@@ -62,6 +62,7 @@ use std::collections::BTreeMap;
 
 use nalgebra::Matrix4;
 use sherd_core::error::Result;
+use sherd_core::executor::CPU;
 use sherd_core::fragment::Fragment;
 use sherd_core::matching::pair::{self, Candidate};
 use sherd_core::matching::verify::{self, Scores};
@@ -198,7 +199,7 @@ fn injected(collection: &Collection, report: &mut StageReport) -> Result<()> {
             .iter()
             .enumerate()
             .map(|(i, t)| {
-                let mut scores = verify::verify(&sa, &sb, t, &sc, true, None);
+                let mut scores = verify::verify(&CPU, &sa, &sb, t, &sc, true, None);
                 scores.brk = stage1[kept2[i] as usize];
                 (i, scores)
             })

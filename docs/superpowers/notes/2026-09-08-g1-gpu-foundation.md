@@ -1,6 +1,6 @@
 # G1 — phase 2a: the `sherd-gpu` crate, and everything that lets a kernel be trusted
 
-**Date:** 2026-09-08. Branch `rust-core`, six commits from `8e4eaad` (the head of task Z).
+**Date:** 2026-09-08. Branch `rust-core`, seven commits from `8e4eaad` (the head of task Z).
 Design references: D §2 (workspace), §3 (dependencies), §6.1 (the `Executor` interface), §6.2 (the
 hash grid), §6.3 (buffers and slots), §6.4 (batch formation), §6.7 (CPU/GPU agreement), §6.8
 (operational concerns), §9 (CLI), §10.4 (test layers), §10.5 (CI), §12 (phasing).
@@ -89,11 +89,13 @@ answers without a rayon bridge.
 |---|---|
 | outputs byte-identical to `9bf35d6`'s | **PASS** — 92 files on terracotta, pot_A, pot_H and synthetic_20; 85 identical as raw bytes, the four `report.json` and three `report.md` identical once the wall clock is removed |
 | `parity --stage all`, 8 sets × 2 modes | **PASS** — **23 804 checks, 0 failed**, task Z's number to the check |
-| `fmt`, `clippy -D warnings`, tests, debug **and** release | **PASS** — 351 tests debug, 334 release, 0 failed; clippy clean in both profiles and with `--no-default-features` |
+| `fmt`, `clippy -D warnings`, tests, debug **and** release | **PASS** — **354 tests, 0 failed, in both profiles**; clippy clean in both and with `-p sherd-cli --no-default-features` |
 
 The identity gate is E2 §9's and Z §8.1's own script and comparison
 (`output/bench_g1/{identity.sh,compare_out.py}`), re-run against this tree's binary after the CLI
-changes, not only after the core refactor.
+changes, not only after the core refactor; 85 of the 92 files match as raw bytes and the other
+seven are the four `report.json` and three `report.md`, which is Z §8.1's breakdown to the file.
+Parity was likewise re-run end to end after the CLI changes and came back at the same 23 804 / 0.
 
 ## 3. The device, and what the self-test actually asserts
 

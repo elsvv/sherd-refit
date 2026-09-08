@@ -55,6 +55,7 @@ pub mod coarse;
 pub mod device;
 pub mod executor;
 pub mod icp;
+pub mod pipeline;
 pub mod selftest;
 pub mod shader;
 pub mod slots;

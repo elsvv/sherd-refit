@@ -37,6 +37,14 @@ pub enum Error {
         message: String,
     },
 
+    /// The run was asked to stop between two units of work (D §5,
+    /// [`progress::Cancel`](crate::progress::Cancel)).
+    ///
+    /// Not a failure: the stage that returns it finished every unit it started, so nothing
+    /// half-built was written and nothing has to be undone.
+    #[error("cancelled")]
+    Cancelled,
+
     /// A mesh has no faces left after cleaning and largest-component extraction (R §3.1).
     #[error("fragment `{name}`: no faces left after cleaning")]
     EmptyMesh {

@@ -55,6 +55,10 @@ image = { version = "0.25.10", default-features = false, features = [
 
 # --- CLI, logging, errors ---------------------------------------------------------------------
 clap = { version = "4.6.6", features = ["derive"] }
+# D §5 asks the CLI to wire Ctrl-C to the pipeline's cancellation flag, and `std` has no signal
+# API on any platform. `ctrlc` is the smallest thing that does: one handler, four platforms, and
+# on unix it is `nix`'s `sigaction` and nothing else. Task G3.
+ctrlc = "3.5.2"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 anyhow = "1.0.104"

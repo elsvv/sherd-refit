@@ -226,6 +226,10 @@ struct RunArgs {
     /// Which GPU adapter to use, by index or by a substring of its name (D §9).
     #[arg(long, value_name = "NAME|INDEX")]
     gpu_adapter: Option<String>,
+    /// Gigabytes the kernels may hold on the device at once (D §1, D §6.3); 0 removes the bound.
+    /// A batch that does not fit is answered by the CPU and counted, never dropped.
+    #[arg(long, value_name = "GB")]
+    gpu_memory: Option<f64>,
     /// Neither read nor write the fragment cache (R §3.7).
     #[arg(long)]
     no_cache: bool,
@@ -444,6 +448,9 @@ struct BenchArgs {
     /// Which GPU adapter to use, by index or by a substring of its name (D §9).
     #[arg(long, value_name = "NAME|INDEX")]
     gpu_adapter: Option<String>,
+    /// Gigabytes the kernels may hold on the device at once (D §1); 0 removes the bound.
+    #[arg(long, value_name = "GB")]
+    gpu_memory: Option<f64>,
 }
 
 fn main() -> Result<()> {
@@ -592,6 +599,38 @@ fn segment(args: &SegmentArgs) -> Result<()> {
     Ok(())
 }
 
+/// D §5's Ctrl-C: a flag the pipeline checks between units of work.
+///
+/// The handler does one thing — raise the flag — and returns; the run then stops at its next
+/// fragment or its next pair, having finished the one it was on. That is what makes it safe on the
+/// GPU path as well as on the CPU: batches already on the device run to completion (a dispatch is
+/// bounded by D §6.4's chunking), the submitting thread retires every command buffer it submitted,
+/// and nothing is left half-written or half-mapped.
+///
+/// A **second** Ctrl-C is the operator saying they meant it, and it aborts. The first one can take
+/// as long as the pair in flight — up to a couple of seconds on a large collection — and an
+/// operator who has waited through that is entitled to a harder stop.
+fn watch_signals() -> sherd_core::progress::Watch {
+    let cancel = sherd_core::progress::Cancel::new();
+    let flag = cancel.clone();
+    let handler = ctrlc::set_handler(move || {
+        if flag.is_cancelled() {
+            eprintln!("interrupted again: stopping now");
+            std::process::exit(130);
+        }
+        eprintln!(
+            "interrupted: finishing the units in flight, then stopping (Ctrl-C again to abort)"
+        );
+        flag.cancel();
+    });
+    if let Err(e) = handler {
+        // A handler that could not be installed is worth a line and not a failure: the run is
+        // still correct, it just cannot be stopped politely.
+        tracing::warn!(error = %e, "could not install the Ctrl-C handler; the run cannot be cancelled");
+    }
+    sherd_core::progress::Watch::cancelled_by(cancel)
+}
+
 /// R §2–§11 for a whole collection: the reference's `sherd-refit run`, flag for flag.
 #[allow(clippy::cast_precision_loss, reason = "counts and seconds printed in a table")]
 fn run(args: &RunArgs) -> Result<()> {
@@ -610,7 +649,7 @@ fn run(args: &RunArgs) -> Result<()> {
     if let Err(e) = pipeline::set_threads(threads) {
         bail!("--threads {threads}: {e}");
     }
-    let resolved = gpu::resolve(args.backend, args.gpu_adapter.as_deref())?;
+    let resolved = gpu::resolve(args.backend, args.gpu_adapter.as_deref(), args.gpu_memory)?;
     tracing::info!(backend = %resolved.backend, "{}", resolved.reason);
     let options = pipeline::RunOptions {
         target_faces: args.target_faces as usize,
@@ -623,6 +662,7 @@ fn run(args: &RunArgs) -> Result<()> {
         workers: schedule_workers(args.workers),
         backend: resolved.backend,
         memory: budget(args.memory_budget),
+        watch: watch_signals(),
     };
     if args.force && !args.no_cache {
         clear_caches(&args.input, &args.out)?;
@@ -680,7 +720,7 @@ fn bench(args: &BenchArgs) -> Result<()> {
     }
     // As on `run`, and for the same reason: the self-test times a rayon batch, and a rayon call
     // initialises the global pool at its default size.
-    let resolved = gpu::resolve(args.backend, args.gpu_adapter.as_deref())?;
+    let resolved = gpu::resolve(args.backend, args.gpu_adapter.as_deref(), args.gpu_memory)?;
     tracing::info!(backend = %resolved.backend, "{}", resolved.reason);
     let options = pipeline::RunOptions {
         target_faces: args.target_faces as usize,

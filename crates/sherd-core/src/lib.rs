@@ -89,6 +89,7 @@ pub mod memory;
 pub mod mesh;
 pub mod params;
 pub mod pipeline;
+pub mod progress;
 pub mod refine;
 pub mod render;
 pub mod report;

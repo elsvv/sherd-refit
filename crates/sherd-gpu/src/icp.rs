@@ -172,6 +172,10 @@ impl IcpKernel {
         let Some(grid) = HashGrid::of_f32(&shifted_target, narrow(radius)) else {
             return Ok(None);
         };
+        // D §1's ceiling, before any buffer exists (see `coarse::device_bytes`).
+        let Some(_held) = gpu.allocations().reserve(device_bytes(&grid, n_src, n)) else {
+            return Ok(None);
+        };
         let cloud = interleave_narrowed(grid.points(), &normals);
         let source: Vec<[f32; 4]> = batch
             .source
@@ -205,7 +209,9 @@ impl IcpKernel {
             gpu: Duration::ZERO,
             iterations: n * batch.options.max_iteration,
         };
-        let mut out: Vec<Registration> = Vec::with_capacity(n);
+        let staging = buffers::staging(gpu, (n * STATE_WORDS * 4) as u64);
+        let mut encoder = kernel.encoder(gpu);
+        let mut held = Vec::new();
         let mut start = 0;
         while start < n {
             let end = (start + per_dispatch).min(n);
@@ -241,23 +247,62 @@ impl IcpKernel {
                     BindingResource::Buffer(corres.as_entire_buffer_binding()),
                 ],
             );
-            let started = Instant::now();
-            kernel.dispatch(gpu, &bind, shape)?;
-            run.gpu += started.elapsed();
+            // Every chunk's dispatch goes into one command buffer, in order — the passes of a
+            // command buffer execute in the order they were recorded, which is what lets the
+            // chunks share one correspondence array — and each writes its own slice of the one
+            // staging buffer the host maps at the end.
+            kernel.record(&mut encoder, &bind, shape);
+            encoder.copy_buffer_to_buffer(
+                &state,
+                0,
+                &staging,
+                (start * STATE_WORDS * 4) as u64,
+                (chunk * STATE_WORDS * 4) as u64,
+            );
+            held.push((params_buffer, state, bind));
             run.dispatches += 1;
-            let words = buffers::read_back::<f32>(gpu, "icp state", &state, chunk * STATE_WORDS)?;
-            for c in 0..chunk {
-                out.push(registration(
+            start = end;
+        }
+        let started = Instant::now();
+        let words = buffers::submit_and_read::<f32>(
+            gpu,
+            "icp state",
+            encoder.finish(),
+            staging,
+            n * STATE_WORDS,
+        )?;
+        run.gpu = started.elapsed();
+        drop(held);
+        let out: Vec<Registration> = (0..n)
+            .map(|c| {
+                registration(
                     &words[c * STATE_WORDS..(c + 1) * STATE_WORDS],
                     &centre_s,
                     &centre_t,
                     n_src,
-                ));
-            }
-            start = end;
-        }
+                )
+            })
+            .collect();
         Ok(Some((out, run)))
     }
+}
+
+/// What one call of this kernel puts on the device (D §1, `--gpu-memory`).
+///
+/// The grid's three arrays, the interleaved target cloud, the source, one correspondence word per
+/// source point per candidate of the largest dispatch, and the candidate state twice — once on the
+/// device, once in the staging buffer it is copied into.
+fn device_bytes(grid: &HashGrid, n_src: usize, candidates: usize) -> u64 {
+    let cell = |n: usize, stride: usize| (n as u64) * (stride as u64);
+    let per_dispatch = MAX_CANDIDATES.min(candidates).max(1);
+    cell(grid.slots().len(), 16)
+        + cell(grid.counts().len(), 4)
+        + cell(grid.sorted_idx().len(), 4)
+        + cell(grid.points().len(), 32)
+        + cell(n_src, 16)
+        + cell(per_dispatch, 4) * (n_src as u64)
+        + cell(candidates, 4 * STATE_WORDS) * 2
+        + 256
 }
 
 /// The poses the device actually starts from, back in world coordinates: `init` through the

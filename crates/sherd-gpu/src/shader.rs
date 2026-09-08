@@ -114,25 +114,39 @@ impl Kernel {
         })
     }
 
+    /// Records one dispatch into a caller-owned encoder, submitting nothing.
+    ///
+    /// This is what D §6.4's software pipeline needs: a call that scores 300 000 hypotheses in
+    /// three chunks, or runs a rung over 1 200 candidates in three, is **one** submission whose
+    /// passes execute in the order they were recorded, not three submissions with three host round
+    /// trips between them. The readback copy goes into the same encoder, so an `Executor` method
+    /// costs the queue exactly one command buffer.
+    pub fn record(&self, encoder: &mut wgpu::CommandEncoder, bind: &BindGroup, grid: Dispatch) {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some(self.label),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, bind, &[]);
+        pass.dispatch_workgroups(grid.x, grid.y, 1);
+    }
+
+    /// An encoder labelled for this kernel.
+    #[must_use]
+    pub fn encoder(&self, gpu: &Gpu) -> wgpu::CommandEncoder {
+        gpu.device().create_command_encoder(&CommandEncoderDescriptor { label: Some(self.label) })
+    }
+
     /// Submits one dispatch and waits for it.
     ///
     /// `submit` + `poll(Wait)` and nothing else — the pipeline is already compiled and the buffers
     /// are already resident, which is what makes a wall-clock measurement around this call the
-    /// kernel's own (E7 §7.1, G1 §5.1).
+    /// kernel's own (E7 §7.1, G1 §5.1). The self-test times this; the two matching kernels record
+    /// instead ([`Kernel::record`]).
     pub fn dispatch(&self, gpu: &Gpu, bind: &BindGroup, grid: Dispatch) -> Result<(), GpuError> {
-        let mut encoder = gpu
-            .device()
-            .create_command_encoder(&CommandEncoderDescriptor { label: Some(self.label) });
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some(self.label),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, bind, &[]);
-            pass.dispatch_workgroups(grid.x, grid.y, 1);
-        }
-        let submission = gpu.queue().submit(Some(encoder.finish()));
+        let mut encoder = self.encoder(gpu);
+        self.record(&mut encoder, bind, grid);
+        let submission = gpu.submit(encoder.finish());
         gpu.wait_for(submission)
     }
 }

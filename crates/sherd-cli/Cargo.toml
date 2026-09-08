@@ -26,6 +26,7 @@ sherd-gpu = { workspace = true, optional = true }
 sherd-parity.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+ctrlc.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

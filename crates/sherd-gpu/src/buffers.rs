@@ -25,6 +25,7 @@ use wgpu::{Buffer, BufferUsages, CommandEncoderDescriptor};
 
 use crate::GpuError;
 use crate::device::{Gpu, MAX_WORKGROUPS_PER_DIM, WORKGROUP};
+use crate::pipeline::Staged;
 
 /// How one array is split so that no binding exceeds the cap (D §6.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,9 +131,46 @@ pub fn output(gpu: &Gpu, label: &str, bytes: u64) -> Buffer {
     })
 }
 
+/// A `MAP_READ` buffer a command buffer can copy into and the host can then map.
+#[must_use]
+pub fn staging(gpu: &Gpu, bytes: u64) -> Buffer {
+    gpu.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: bytes.max(4),
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+/// Runs one command buffer whose last recorded act is a copy into `staging`, on D §6.4's
+/// submitting thread, and returns what the copy holds — **one** submission for a whole `Executor`
+/// call.
+///
+/// The caller's thread waits on a channel and never touches `poll`; `pipeline` explains what that
+/// is worth and what it was measured against.
+pub fn submit_and_read<T: Pod>(
+    gpu: &Gpu,
+    what: &'static str,
+    commands: wgpu::CommandBuffer,
+    staging: Buffer,
+    len: usize,
+) -> Result<Vec<T>, GpuError> {
+    let elements = len * std::mem::size_of::<T>();
+    let bytes = gpu.run_job(commands, Some(Staged { buffer: staging, bytes: elements }))?;
+    if bytes.len() < elements {
+        return Err(GpuError::Readback {
+            what,
+            message: format!("{} bytes came back of {elements} asked for", bytes.len()),
+        });
+    }
+    Ok(bytemuck::cast_slice::<u8, T>(&bytes[..elements]).to_vec())
+}
+
 /// Copies a device buffer into host memory through a `MAP_READ` staging buffer.
 ///
-/// One readback per batch, which is what D §6.3's "readback volume is tiny" assumes.
+/// One readback per batch, which is what D §6.3's "readback volume is tiny" assumes. The two
+/// matching kernels fold their copy into the dispatch's own command buffer instead
+/// ([`submit_and_read`]); this is the standalone form the self-test and the tests use.
 pub fn read_back<T: Pod>(
     gpu: &Gpu,
     what: &'static str,
@@ -141,16 +179,11 @@ pub fn read_back<T: Pod>(
 ) -> Result<Vec<T>, GpuError> {
     let elements = len * std::mem::size_of::<T>();
     let bytes = elements as u64;
-    let staging = gpu.device().create_buffer(&wgpu::BufferDescriptor {
-        label: Some("readback"),
-        size: bytes.max(4),
-        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
+    let staging = staging(gpu, bytes);
     let mut encoder =
         gpu.device().create_command_encoder(&CommandEncoderDescriptor { label: Some("readback") });
     encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, bytes);
-    let submission = gpu.queue().submit(Some(encoder.finish()));
+    let submission = gpu.submit(encoder.finish());
 
     let slice = staging.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();

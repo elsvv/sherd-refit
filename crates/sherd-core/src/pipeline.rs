@@ -42,6 +42,7 @@ use crate::matching::screen::{Screened, screen_pair, top_partners};
 use crate::memory::{self, Budget, MemorySemaphore, reservation};
 use crate::mesh::geometry;
 use crate::params::Params;
+use crate::progress::Watch;
 use crate::refine::{self, FractureCloud, RefinePiece, fracture_cloud, refine_joins};
 use crate::render::{self, PALETTE, Paint, Splat};
 use crate::report::{
@@ -81,10 +82,28 @@ pub fn preprocess(
     out_dir: Option<&Path>,
     budget: Budget,
 ) -> Vec<Result<Preprocessed>> {
+    preprocess_watched(entries, target_faces, out_dir, budget, &Watch::default())
+}
+
+/// [`preprocess`] under D §5's cancellation flag and progress callback.
+///
+/// The check is at the top of each fragment's job and the report is at the bottom of it, so a
+/// cancelled run leaves no half-built fragment and writes no half-built cache: a job either ran
+/// whole or did not start. Jobs already in flight when the flag goes up finish — which is what
+/// makes the guarantee true rather than nearly true.
+pub fn preprocess_watched(
+    entries: &[Entry],
+    target_faces: usize,
+    out_dir: Option<&Path>,
+    budget: Budget,
+    watch: &Watch,
+) -> Vec<Result<Preprocessed>> {
     let semaphore = MemorySemaphore::new(budget);
+    let finished = AtomicUsize::new(0);
     let out: Vec<Result<Preprocessed>> = entries
         .par_iter()
         .map(|entry| {
+            watch.check()?;
             let started = std::time::Instant::now();
             // D §5 step 2: reserve what E1's model says this scan will add to the process's peak
             // RSS, and wait for it. A file whose size cannot be read reserves nothing — the load
@@ -98,6 +117,11 @@ pub fn preprocess(
                 cache_path.as_deref(),
             )?;
             drop(permit);
+            watch.advance(
+                "preprocess",
+                finished.fetch_add(1, Ordering::Relaxed) + 1,
+                entries.len(),
+            );
             Ok(Preprocessed { fragment, cached, seconds: started.elapsed().as_secs_f64() })
         })
         .collect();
@@ -169,6 +193,9 @@ pub struct RunOptions {
     pub backend: Backend,
     /// D §5 step 2's preprocessing memory budget (D §9's `--memory-budget`).
     pub memory: Budget,
+    /// D §5's cancellation flag and progress callback; neither by default
+    /// ([`progress`](crate::progress)).
+    pub watch: Watch,
 }
 
 impl Default for RunOptions {
@@ -184,6 +211,7 @@ impl Default for RunOptions {
             workers: 0,
             backend: Backend::Cpu,
             memory: Budget::default_for_machine(),
+            watch: Watch::default(),
         }
     }
 }
@@ -299,6 +327,7 @@ pub fn run_with(
         options.target_faces,
         cache_dir.as_deref(),
         options.memory,
+        &options.watch,
     )?;
     timings.insert("preprocess", started.elapsed().as_secs_f64());
     let names: Vec<String> = fragments.iter().map(|f| f.name.clone()).collect();
@@ -367,8 +396,16 @@ pub fn run_with(
 
     // 2b. matching (R §5–§6)
     let started = Instant::now();
-    let mut per_pair =
-        match_all(engine, &fragments, &pairs, params, options.keep_per_pair, workers, None);
+    let mut per_pair = match_all(
+        engine,
+        &fragments,
+        &pairs,
+        params,
+        options.keep_per_pair,
+        workers,
+        None,
+        &options.watch,
+    )?;
     timings.insert("matching", started.elapsed().as_secs_f64());
     let mut candidates: Vec<Candidate> = per_pair.iter().flatten().copied().collect();
     tracing::info!(
@@ -418,7 +455,8 @@ pub fn run_with(
             options.keep_per_pair,
             workers,
             Some("second"),
-        );
+            &options.watch,
+        )?;
         for (k, found) in retry.iter().zip(again) {
             let at = pairs.iter().position(|p| p == k).expect("a retried pair is a pair");
             per_pair[at] = found;
@@ -525,8 +563,9 @@ fn preprocess_collection(
     target_faces: usize,
     out_dir: Option<&Path>,
     budget: Budget,
+    watch: &Watch,
 ) -> Result<Vec<Fragment>> {
-    let results = preprocess(entries, target_faces, out_dir, budget);
+    let results = preprocess_watched(entries, target_faces, out_dir, budget, watch);
     let mut fragments = Vec::with_capacity(results.len());
     for (i, result) in results.into_iter().enumerate() {
         let mut fragment = result?.fragment;
@@ -563,7 +602,47 @@ pub fn block_size(workers: usize, n_pairs: usize) -> usize {
     if n_pairs > 4 * workers && n_pairs < 16 * workers { 1 } else { BLOCK }
 }
 
+/// D §6.4's software pipeline: `body` on a pool deep enough that a block waiting on a device is
+/// not a core standing still.
+///
+/// The design sentence is *"CPU threads prepare block k+1 while the GPU runs block k;
+/// double-buffered"*, and this is what it comes to in a pipeline whose unit of work is a pair. A
+/// worker that hands a batch to the device blocks until the device answers — measured on
+/// `synthetic_20`, the device had work outstanding for 11.3 s of a 15.7 s matching stage while the
+/// pool used 78 of the 157 core-seconds the stage could have burnt. Neither side was the limit;
+/// the *alternation* was. [`Executor::device_slack`] says how many extra blocks have to be in
+/// flight for the two to overlap, and the CPU executor says none.
+///
+/// It cannot move a result. Every parallel section under it collects by index, R §4.2's block size
+/// comes from `--workers` rather than from the pool, and the pairs of a block still run in the
+/// reference's order inside one task.
+fn with_device_slack<T: Send>(exec: &dyn Executor, body: impl FnOnce() -> T + Send) -> T {
+    let slack = exec.device_slack();
+    if slack == 0 {
+        return body();
+    }
+    let threads = rayon::current_num_threads() + slack;
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .thread_name(|i| format!("sherd-match-{i}"))
+        .build()
+    {
+        Ok(pool) => {
+            tracing::info!(threads, slack, "matching on a device-slack pool");
+            pool.install(body)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not build the device-slack pool; using the run's");
+            body()
+        }
+    }
+}
+
 /// R §4–§6 over a list of pairs, in the reference's block order, candidates back in pair order.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the reference's `_match_all`: what to match, how, on how many workers, watched by               what"
+)]
 fn match_all(
     engine: Engine<'_>,
     fragments: &[Fragment],
@@ -572,9 +651,10 @@ fn match_all(
     keep: usize,
     workers: usize,
     tag: Option<&str>,
-) -> Vec<Vec<Candidate>> {
+    watch: &Watch,
+) -> Result<Vec<Vec<Candidate>>> {
     if pairs.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let blocks = pair_blocks(pairs, block_size(workers, pairs.len()));
     tracing::info!(
@@ -590,36 +670,44 @@ fn match_all(
     // that belongs to one partner and is a miss by construction (`matching::cache`).
     let cache = MatchCache::sized();
     let mut out: Vec<Vec<Candidate>> = vec![Vec::new(); pairs.len()];
-    let found: Vec<Vec<(usize, Vec<Candidate>)>> = blocks
-        .par_iter()
-        .map(|block| {
-            block
-                .iter()
-                .map(|&k| {
-                    let (a, b) = pairs[k];
-                    let started = Instant::now();
-                    let cs = pair::match_pair_cached(
-                        engine,
-                        &fragments[a],
-                        &fragments[b],
-                        params,
-                        keep,
-                        &cache,
-                    );
-                    tracing::info!(
-                        pair = %format!("{}__{}", fragments[a].name, fragments[b].name),
-                        seconds = started.elapsed().as_secs_f64(),
-                        candidates = cs.len(),
-                        accepted = cs.iter().filter(|c| c.accepted).count(),
-                        at = done.fetch_add(1, Ordering::Relaxed) + 1,
-                        of = pairs.len(),
-                        "pair matched"
-                    );
-                    (k, cs)
-                })
-                .collect()
-        })
-        .collect();
+    let found: Vec<Vec<(usize, Vec<Candidate>)>> = with_device_slack(engine.exec, || {
+        #[allow(clippy::redundant_closure_for_method_calls, reason = "the collect needs the type")]
+        blocks
+            .par_iter()
+            .map(|block| {
+                block
+                    .iter()
+                    .map(|&k| {
+                        // D §5's unit of work for the matching stage. A pair either ran whole or
+                        // did not start, so the candidate list a cancelled run carries is a
+                        // prefix of a complete one rather than a torn version of it.
+                        watch.check()?;
+                        let (a, b) = pairs[k];
+                        let started = Instant::now();
+                        let cs = pair::match_pair_cached(
+                            engine,
+                            &fragments[a],
+                            &fragments[b],
+                            params,
+                            keep,
+                            &cache,
+                        );
+                        tracing::info!(
+                            pair = %format!("{}__{}", fragments[a].name, fragments[b].name),
+                            seconds = started.elapsed().as_secs_f64(),
+                            candidates = cs.len(),
+                            accepted = cs.iter().filter(|c| c.accepted).count(),
+                            at = done.fetch_add(1, Ordering::Relaxed) + 1,
+                            of = pairs.len(),
+                            "pair matched"
+                        );
+                        watch.advance("matching", done.load(Ordering::Relaxed), pairs.len());
+                        Ok((k, cs))
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
     for (k, cs) in found.into_iter().flatten() {
         out[k] = cs;
     }
@@ -632,7 +720,7 @@ fn match_all(
         pass = tag.unwrap_or("first"),
         "match data cache"
     );
-    out
+    Ok(out)
 }
 
 /// R §4.3's partner search: the pairs worth matching, in the order they were given.

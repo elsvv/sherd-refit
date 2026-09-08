@@ -119,6 +119,21 @@ pub trait Executor: Send + Sync + fmt::Debug {
 
     /// R §6.4's inside test, with the depth of every point that is inside.
     fn inside(&self, batch: &InsideBatch<'_>) -> Vec<InsideOutcome>;
+
+    /// How many worker threads the matching stage should run **beyond** `--threads`, because a
+    /// call into this executor parks its caller on something that is not a core (D §6.4).
+    ///
+    /// Zero for [`CpuExecutor`], which finishes a batch on the thread that brought it. A device
+    /// executor returns a positive number, and it is the whole of D §6.4's software pipeline as
+    /// this port can express it: a worker whose batch is on the device is a worker that is not
+    /// preparing the next block, and the pool has to be deep enough that some other worker is.
+    ///
+    /// It changes no result — every parallel section of the matching stage collects by index, so
+    /// the schedule cannot move a candidate — and it does not change the *schedule* either: R
+    /// §4.2's block size is computed from `--workers`, which this does not touch.
+    fn device_slack(&self) -> usize {
+        0
+    }
 }
 
 /// The process-wide CPU executor.

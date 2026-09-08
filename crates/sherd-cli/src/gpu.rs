@@ -89,7 +89,34 @@ impl Resolved {
             self.executor.map_or_else(Vec::new, |executor| {
                 let stats = executor.stats();
                 let mut lines = stats.lines();
-                lines.push(format!("gpu busy {:.2} s in total", stats.gpu_busy().as_secs_f64()));
+                let occupancy = executor.gpu().occupancy();
+                let allocations = executor.gpu().allocations();
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "byte counts far below 2^53, printed to the megabyte"
+                )]
+                lines.push(format!(
+                    "device memory: {:.0} MB at the peak of a {} budget, {} batches refused",
+                    allocations.peak() as f64 / (1024.0 * 1024.0),
+                    if allocations.budget() == u64::MAX {
+                        "no".to_owned()
+                    } else {
+                        format!(
+                            "{:.2} GB",
+                            allocations.budget() as f64 / (1024.0 * 1024.0 * 1024.0)
+                        )
+                    },
+                    allocations.refused(),
+                ));
+                lines.push(format!(
+                    "device: {:.2} s with work outstanding over {} submissions, {} deep at the \
+                     peak (the per-thread sum below counts one submission once per waiter: \
+                     {:.2} s)",
+                    occupancy.busy().as_secs_f64(),
+                    occupancy.submissions(),
+                    occupancy.peak_in_flight(),
+                    stats.gpu_busy().as_secs_f64(),
+                ));
                 lines
             })
         }
@@ -106,7 +133,11 @@ impl Resolved {
 /// outlive every batch of the run, the run *is* the process, and `Engine<'static>` is what the
 /// pipeline's signature wants. One leak per process, of one device.
 #[cfg(feature = "gpu")]
-pub(crate) fn resolve(backend: Backend, adapter: Option<&str>) -> Result<Resolved> {
+pub(crate) fn resolve(
+    backend: Backend,
+    adapter: Option<&str>,
+    memory: Option<f64>,
+) -> Result<Resolved> {
     use std::sync::Arc;
 
     use sherd_gpu::{AdapterChoice, Gpu, GpuExecutor, Selection, SelfTest};
@@ -121,6 +152,17 @@ pub(crate) fn resolve(backend: Backend, adapter: Option<&str>) -> Result<Resolve
     }
     let choice = adapter.map_or(AdapterChoice::Default, AdapterChoice::parse);
     let opened = Gpu::open(&choice).and_then(|gpu| {
+        // D §1's ceiling, or whatever `--gpu-memory` puts in its place, before the self-test runs
+        // its own batches through the same accounting.
+        if let Some(gigabytes) = memory {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a byte count from a gigabyte flag"
+            )]
+            let bytes = (gigabytes.max(0.0) * 1024.0 * 1024.0 * 1024.0) as u64;
+            gpu.allocations().set_budget(bytes);
+        }
         let test = SelfTest::run(&gpu)?;
         Ok((gpu, test))
     });

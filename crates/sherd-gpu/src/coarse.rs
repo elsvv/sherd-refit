@@ -142,6 +142,11 @@ impl CoarseKernel {
         let Some(grid) = HashGrid::build(batch.target.points, batch.radius) else {
             return Ok(None);
         };
+        // D §1's device-memory ceiling, taken **before** the first buffer exists: what does not
+        // fit is the CPU's, and it is counted as a refusal rather than allocated anyway.
+        let Some(_held) = gpu.allocations().reserve(device_bytes(&grid, points, poses)) else {
+            return Ok(None);
+        };
 
         // The device side of the batch (D §6.3): the grid's three arrays, the target cloud and the
         // probe interleaved with their normals, and the poses as three `vec4<f32>` rows each.
@@ -174,6 +179,9 @@ impl CoarseKernel {
         let by_binding = Chunking::of(poses, 3 * 16, DEFAULT_BINDING_CAP).per_chunk;
         let split = Chunking::of(poses, 1, by_queries.min(by_binding) as u64);
 
+        let staging = buffers::staging(gpu, (poses * 4) as u64);
+        let mut encoder = self.kernel.encoder(gpu);
+        let mut binds = Vec::with_capacity(split.chunks);
         let mut run = CoarseRun { dispatches: 0, gpu: Duration::ZERO, queries: poses * points };
         for range in split.ranges() {
             let chunk = &rows[range.start * 3..range.end * 3];
@@ -206,14 +214,39 @@ impl CoarseKernel {
                     BindingResource::Buffer(out.as_entire_buffer_binding()),
                 ],
             );
-            let started = Instant::now();
-            self.kernel.dispatch(gpu, &bind, grid_shape)?;
-            run.gpu += started.elapsed();
+            // The bind group and the two per-chunk buffers have to outlive the recording, so
+            // they are parked here until the whole command buffer is submitted.
+            binds.push((params_buffer, pose_buffer, bind));
+            let (_, _, bind) = binds.last().expect("just pushed");
+            self.kernel.record(&mut encoder, bind, grid_shape);
             run.dispatches += 1;
         }
-        let counts = buffers::read_back::<u32>(gpu, "coarse agree", &out, poses)?;
+        encoder.copy_buffer_to_buffer(&out, 0, &staging, 0, (poses * 4) as u64);
+        let started = Instant::now();
+        let counts =
+            buffers::submit_and_read::<u32>(gpu, "coarse agree", encoder.finish(), staging, poses)?;
+        run.gpu = started.elapsed();
         Ok(Some((counts, run)))
     }
+}
+
+/// What one call of this kernel puts on the device (D §1, `--gpu-memory`).
+///
+/// Every buffer the call creates, in the order [`CoarseKernel::run`] creates them: the grid's
+/// three arrays, the interleaved target cloud, the probe, the agreement array and the staging
+/// buffer it is copied into, and the per-chunk parameter and pose buffers — which are counted at
+/// their whole size, because every chunk's buffers are alive at once until the submission
+/// returns.
+fn device_bytes(grid: &HashGrid, points: usize, poses: usize) -> u64 {
+    let cell = |n: usize, stride: usize| (n as u64) * (stride as u64);
+    cell(grid.slots().len(), 16)
+        + cell(grid.counts().len(), 4)
+        + cell(grid.sorted_idx().len(), 4)
+        + cell(grid.points().len(), 32)
+        + cell(points, 32)
+        + cell(poses, 4) * 2
+        + cell(poses, 48)
+        + 256
 }
 
 /// The `f32` a threshold becomes on the way to the device (D §6.8: `Scales` are computed in `f64`

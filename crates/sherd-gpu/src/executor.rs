@@ -66,6 +66,13 @@ impl MethodStats {
         self.delegated.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A delegated call, with the work it carried — how big the batches the CPU is answering are
+    /// is the measurement that decides whether a kernel for them would pay (task G3, item 2).
+    fn delegate_items(&self, items: usize) {
+        self.delegate();
+        self.items.fetch_add(items as u64, Ordering::Relaxed);
+    }
+
     fn device(&self, dispatches: usize, gpu: Duration, items: usize) {
         self.on_device.fetch_add(1, Ordering::Relaxed);
         self.dispatches.fetch_add(dispatches as u64, Ordering::Relaxed);
@@ -224,6 +231,31 @@ impl GpuExecutor {
     /// D §6.8's bar is 1.5× and the honest measurement is 1.0×.
     pub const AUTO_ELIGIBLE: bool = false;
 
+    /// How many worker threads the matching stage runs beyond `--threads`: **half as many again**
+    /// (D §6.4, `Executor::device_slack`).
+    ///
+    /// A worker that hands a batch to `pipeline::Submitter` waits on a channel, and a waiting
+    /// worker is a block that is not being prepared. Measured on `synthetic_20`, matching-stage
+    /// seconds, two runs each, with the submitting thread already in place:
+    ///
+    /// | `--threads` | pool without slack | pool with it | matching, no slack | with slack |
+    /// |---|---|---|---|---|
+    /// | 1 | 1 | 2 | 71.5 s | **37.1 s (1.93×)** |
+    /// | 4 | 4 | 6 | 18.7 s | **13.7 s (1.36×)** |
+    /// | 9 (the default here) | 9 | 14 | 13.0 s | 13.1 s (1.00×) |
+    ///
+    /// So it pays exactly where the pool is smaller than the machine and is free where the pool
+    /// already fills it — which is what a knob for *covering a wait* should do. Nine of ten cores
+    /// is this machine's default and the row that gains nothing; a four-core laptop is the row
+    /// that gains a third.
+    ///
+    /// A fraction rather than a constant, because what it covers scales with the number of
+    /// workers. Half is the measured shape: at `--threads 9` the pool then holds 14, and the
+    /// profile that motivated it showed 4.9 of ten cores working with 18.
+    pub const SLACK_NUMERATOR: usize = 1;
+    /// The denominator of [`GpuExecutor::SLACK_NUMERATOR`]'s fraction.
+    pub const SLACK_DENOMINATOR: usize = 2;
+
     /// Wraps an open device whose self-test has already run, compiling the kernels.
     ///
     /// The compilation happens **here**, not on the first batch: Metal compiles a shader when the
@@ -282,6 +314,11 @@ impl GpuExecutor {
 }
 
 impl Executor for GpuExecutor {
+    fn device_slack(&self) -> usize {
+        let threads = rayon::current_num_threads();
+        (threads * Self::SLACK_NUMERATOR).div_ceil(Self::SLACK_DENOMINATOR).max(1)
+    }
+
     fn name(&self) -> &'static str {
         // R §6's two methods are still the CPU's, and the name reaches the log lines.
         "gpu (matching on device, verification on cpu)"
@@ -326,15 +363,16 @@ impl Executor for GpuExecutor {
     }
 
     fn bounded_distance(&self, batch: &DistBatch<'_>) -> Vec<f64> {
-        // Phase 2c: the BVH kernels. Counted, not pretended.
+        // R §6.1 is still the CPU's, and task G3 measured why rather than assuming it: the size of
+        // the batches that arrive here is the whole argument, so they are counted.
         self.stats.distance.call();
-        self.stats.distance.delegate();
+        self.stats.distance.delegate_items(batch.points.len());
         CPU.bounded_distance(batch)
     }
 
     fn inside(&self, batch: &InsideBatch<'_>) -> Vec<InsideOutcome> {
         self.stats.inside.call();
-        self.stats.inside.delegate();
+        self.stats.inside.delegate_items(batch.points.len());
         CPU.inside(batch)
     }
 }

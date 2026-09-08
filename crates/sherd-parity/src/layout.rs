@@ -73,6 +73,20 @@ impl FixtureDir {
         self.root.join("outputs")
     }
 
+    /// `DIR/_run` — the *pipeline's* own output directory of the run that wrote the dump, which
+    /// `tools/dump_fixtures.py` passes as `out` and the manifest deliberately ignores.
+    ///
+    /// Everything the fixture sink writes goes through `fixture.put`, which is
+    /// `json.dumps(..., sort_keys=True)`: a key order is exactly what the dump cannot carry. The
+    /// reference's own `transforms.json` is written by `sherd_refit.report`, not by the sink, and
+    /// R §11.1's key order is a result (V4-D5) — so the one file on disk that has it is
+    /// `_run/transforms.json`, and the `outputs` row reads it from here (V5-D6). It is not in the
+    /// manifest and is absent from the committed slab dump, so every reader must treat it as
+    /// optional.
+    pub fn run_dir(&self) -> PathBuf {
+        self.root.join("_run")
+    }
+
     /// Reads and parses `manifest.json`.
     pub fn load_manifest(&self) -> Result<Manifest> {
         let path = self.manifest_path();

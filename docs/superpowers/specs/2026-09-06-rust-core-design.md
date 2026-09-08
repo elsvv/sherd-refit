@@ -702,7 +702,7 @@ Two more places where the table is narrower than it sounds:
 | pair result | (the `candidates` row above) | — | **a regression alarm, not a parity claim** (see below): share of pairs returning a different candidate count ≤ 0.4; share accepted by one side only ≤ 0.25 each; share of both-accepted pairs placed more than a wall apart ≤ 0.25; on the rest, median rotation ≤ 1° and median displacement of the moving fragment ≤ 0.3 t |
 | assembly (R §8) | groups; joins used; rejections **with the reference's own reason string**; poses, before and after R §8.2; R §8.2's recentring against `transforms.json` | identical; identical; identical; 1e-9 t; 1e-9 t | **PMC-8 alone** — the reference's candidates on the port's own samples: identical, identical, identical, 1e-9 t. Then, from the port's own candidates, **a regression alarm**: **at most 12 joins** used by one side and not the other; largest group within **8** fragments; every used join inside a group |
 | refine (R §9) | the vertex selection `refine/<name>.idx`; the walk's order; the two correspondence radii; the pose after **each** rung; `fitness` and `inlier_rmse`; relative poses within a group | exact; exact; exact; 0.2° / 0.02 t; 1e-4 and 0.02 t; 0.2° / 0.02 t | the same, with one row split: above R §9's 150 000-vertex cap PMC-9 gives the two sides different draws, so the selection is compared as "every index the reference kept is one the port's predicate accepted" (exact) plus an overlap within 0.05 of `150000/|candidates|`, and `fitness` — a Bernoulli fraction *of the cloud* — is gated at 0.008, about 5.6 σ of that sampling noise |
-| outputs (R §11) | `transforms.json` — `thickness`, the groups, every `group` and `placed` flag, `params`, the poses; `report.json` — the whole file through the port's own type, and the candidate list through the port's own serialiser; **`report.md` line for line**; `placed/<name>.ply` and `assembly_<k>.ply`; `preview_*.png` | exact; exact; **1e-9 t**; **exact, down to `## Timing`**; **SHA-256 identical**, with size, both counts and the colour flag compared on every set; **pixel for pixel** | the port's own principal axis against the reference's (PMC-10, 1°); two renders of one input identical; a `transforms.json` written and read back |
+| outputs (R §11) | `transforms.json` — `thickness`, the groups, every `group` and `placed` flag, `params`, the poses, **and the file's own key order, against the reference's own `_run/transforms.json`**; `report.json` — the whole file through the port's own type, and the candidate list through the port's own serialiser; **`report.md` line for line**; `placed/<name>.ply` and `assembly_<k>.ply`; `preview_*.png` | exact; exact; **1e-9 t**; **identical, name for name and place for place**; **exact, down to `## Timing`**; **SHA-256 identical**, with size, both counts and the colour flag compared on every set; **pixel for pixel** | the port's own principal axis against the reference's (PMC-10, 1°); two renders of one input identical; a `transforms.json` written and read back |
 
 The tool exits non-zero on any violation and prints a per-stage table.
 
@@ -726,6 +726,24 @@ tolerance the harness enforces is a tolerance this section states, with its deri
   bit-identical chains; the row is the same `1e-9 t` the `assembly` row's own pose rows carry, and
   it is met by seven orders of magnitude (V4-D10 took the worst of the eight dumps from 7.0e-13 t
   to **0**).
+
+**`outputs`, injected, `transforms.json`'s key order is gated against the reference's own file,
+and it is read from outside the dump** (V5-D6, task Z). R §11.1's `poses` is a Python dict and
+`json.dump` writes a dict in insertion order, so the order of the keys is a *result* of R §8 — each
+group's seed, then its placements in the order the greedy pass took them, then the singletons in
+collection order (V4-D5) — and not a formatting choice. The dump cannot gate it: every JSON file
+the fixture sink writes goes through `json.dumps(..., sort_keys=True)`, its own copy of
+`transforms.json` included, so the file in the dump is alphabetical by construction. The harness
+therefore reads `<dump>/_run/transforms.json`, which is what the *pipeline* wrote in the very run
+that produced the dump, and compares the port's key order against it name for name and place for
+place; the port's own order comes from its own `assemble` over the reference's own candidate list,
+the same run the `assembly` row compares group for group and join for join. The row skips, with the
+reason printed, where there is no `_run` — the committed slab dump, whose two fragments would put
+nothing at stake anyway. Measured, task Z: **0 differing of 66 places on the seven dumps that carry
+one**, and the row is not vacuous — on the terracotta the reference's order
+(`021, 094, 104, 007`) differs from the collection order (`007, 021, 094, 104`) in all four places,
+which is exactly what the harness used to write, since it passed R §8's insertion order as an
+empty slice and every other row of the stage looks its fragment up by name.
 
 `report.md` joins the injected column with task Y: the port renders R §11.3 from the reference's
 own `report.json` and the two files are diffed **line for line**, which gates every heading, every

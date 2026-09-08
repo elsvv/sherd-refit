@@ -45,7 +45,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use nalgebra::Matrix4;
-use sherd_core::assembly::recenter;
+use sherd_core::assembly::{assemble, recenter};
 use sherd_core::error::{Error, Result};
 use sherd_core::fragment::samples::points_from_uniforms;
 use sherd_core::matching::pair::Candidate;
@@ -57,7 +57,7 @@ use sherd_core::report::{self, Outcome, ReportJson};
 use sherd_core::types::FragId;
 
 use super::Collection;
-use super::assembly::{self, piece_views, read_poses, reference_pieces};
+use super::assembly::{self, piece_views, read_poses, reference_candidates, reference_pieces};
 use crate::npy;
 use crate::report::{Check, Mode, StageReport};
 
@@ -157,15 +157,25 @@ fn transforms_rows(collection: &Collection, report: &mut StageReport) -> Result<
     };
     let after = recenter(&before, &views, &groups);
     let thickness = collection.manifest.pairs.thickness_median;
-    // No insertion order to pass: the reference's own `transforms.json` is written into the dump
-    // by the fixture sink with `sort_keys=True`, so the file in the dump says nothing about the
-    // order R §11.1 wrote, and every row below is looked up by name. The order itself is V4-D5's
-    // and is checked against the reference's own `_run/transforms.json` by hand.
+    // R §11.1's key order is a result, so the writer is given the port's own R §8 insertion order
+    // — the seeds and placements in the order the greedy pass took them, then the singletons in
+    // collection order — rather than the empty slice this row used to pass (V5-D6). The order is
+    // the port's own `assemble` over the reference's own candidate list, which is the same run the
+    // `assembly` row compares group for group and join for join; `order` is a function of those
+    // two, so a row that finds it wrong finds the assembly wrong. Without a candidate list in the
+    // dump there is no order to compute and the walk falls back to the collection order, which is
+    // what the file's own rows are looked up by anyway.
+    let order = match reference_candidates(collection, report)? {
+        Some(candidates) => {
+            assemble(&views, &candidates, &collection.manifest.collection.params).order
+        }
+        None => Vec::new(),
+    };
     let ours = report::transforms(
         &names,
         &after,
         &groups,
-        &[],
+        &order,
         thickness,
         &collection.manifest.collection.params,
     );
@@ -202,6 +212,55 @@ fn transforms_rows(collection: &Collection, report: &mut StageReport) -> Result<
         assembly::worst_move(&after, &theirs_poses, &views, thickness),
         0.0,
         POSE_T,
+    ));
+    transforms_order_row(collection, report, &ours, &order)
+}
+
+/// The key order of `transforms.json`, against the reference's own file (V5-D6).
+///
+/// R §11.1's `poses` is a Python dict and `json.dump` writes a dict in insertion order, so the
+/// order of the keys is a result of R §8 and not a formatting choice: the seed of every group and
+/// then each placement in the order the greedy pass took it, then the singletons in collection
+/// order (V4-D5). Nothing in the dump can gate it — every JSON file the fixture sink writes goes
+/// through `json.dumps(..., sort_keys=True)`, the dump's own copy of `transforms.json` included —
+/// so this reads the file the *pipeline* wrote, `<dump>/_run/transforms.json`, which is the output
+/// of the very run that produced the dump. It is not covered by the manifest and the committed
+/// slab dump does not carry it; the row skips with a reason when it is missing rather than
+/// reporting a pass it did not make.
+///
+/// Until task Z the order was checked by hand, once, in the phase-1e verification (V5 §4.3) and
+/// the harness passed an empty insertion order — which made the port's own file come out in
+/// collection order and no row noticed, because every other row of this stage looks its fragment
+/// up by name.
+fn transforms_order_row(
+    collection: &Collection,
+    report: &mut StageReport,
+    ours: &report::Transforms,
+    order: &[FragId],
+) -> Result<()> {
+    let path = collection.dir.run_dir().join("transforms.json");
+    if !path.is_file() {
+        report.skip(SCOPE, "no _run/transforms.json beside the dump (the reference's own output)");
+        return Ok(());
+    }
+    if order.is_empty() {
+        report.skip(SCOPE, "no candidate list in the dump: R §8 has no insertion order to write");
+        return Ok(());
+    }
+    let theirs: report::Transforms = npy::read_json_as(&path)?;
+    let ours_keys: Vec<&str> = ours.fragments.keys().collect();
+    let theirs_keys: Vec<&str> = theirs.fragments.keys().collect();
+    let differing = (0..ours_keys.len().max(theirs_keys.len()))
+        .filter(|&i| ours_keys.get(i) != theirs_keys.get(i))
+        .count();
+    if differing > 0 {
+        tracing::warn!(ours = ?ours_keys, theirs = ?theirs_keys, "transforms.json key order");
+    }
+    report.push(Check::entries(
+        SCOPE,
+        "transforms order",
+        differing,
+        ours_keys.len().max(theirs_keys.len()),
     ));
     Ok(())
 }

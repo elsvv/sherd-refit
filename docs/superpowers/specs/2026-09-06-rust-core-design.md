@@ -670,7 +670,14 @@ could do* (14 365 pairs × 33.4 ms ≈ 8 minutes of GPU time) rather than as a w
 this section's conclusion a second time.** With §6.4's submitting thread the matching stage is
 **1.04–1.40×** over the seven development collections (terracotta 1.11, pot_A 1.25, pot_B 1.40,
 pot_C 1.13, pot_G 1.04, pot_H 1.06, synthetic_20 1.08; three interleaved runs each) and the
-device's occupancy on `synthetic_20` went from at best 41 % to 68 %. **Phase 2e (task G4) tuned the
+device's occupancy on `synthetic_20` went from at best 41 % to 68 % **as G3 left it — a figure
+phase 2e then halved on purpose and no summary said so** (V6-D6; G4's `MAX_QUERIES` paragraph
+below states the halving, 10.2 → 5.8 s outstanding, but every place that quotes the phase's
+occupancy quotes G3's 68 %). Re-measured at task W on the tuned tree, `synthetic_20`, three
+interleaved warm runs: **5.44 s outstanding of an 11.34 s matching stage — 48 %** (48.0/48.3/48.6 %
+over the three), and on `pot_H` 0.70 s of 6.37 s, **11 %**, because not one ICP rung of that
+collection reaches the device and its 1.11× is the coarse kernel alone. Less device time for a
+faster stage is this section's conclusion, not a contradiction of it. **Phase 2e (task G4) tuned the
 two thresholds that decide how much of the envelope the device is given and re-measured the same
 seven the same way: 1.07 / 1.26 / 1.43 / 1.13 / 1.09 / 1.10 / 1.28×, i.e. `1.07–1.43×`, with
 `synthetic_20` — the collection where the device has real work — moving 1.08 → 1.28×.** That range
@@ -741,7 +748,12 @@ G4 swept it at the default `--threads 9`: pool 9 → 12.84 s, 10 → 12.43, **11
 14 (G3's) → 13.80, 17 → 14.05, with device occupancy rising 8.3 → 10.0 s over the same range. Past
 one worker per core the extra workers are not covering a wait, they are adding a concurrent batch
 to a device that gets slower the busier the cores are, so the slack is now
-`min(⌈threads/2⌉, cores + 1 − threads)`. The two changes together are worth **1.10×** of the
+`max(1, min(⌈threads/2⌉, cores + 1 − threads))`. **The outer `max(1)` is deliberate and was
+undocumented until task W** (V6-D5): past `--threads > cores` the inner expression is zero, and a
+slack of zero would leave *no* worker to occupy the cores while one waits on the device — the
+single thing this pool exists for. One is the floor, so a `--threads 12` run on ten cores gets a
+pool of 13 rather than 12. It never fires at the default (`--threads 9` on ten cores gives 2 either
+way), and §7's thread-count row is what keeps it from mattering to a result. The two changes together are worth **1.10×** of the
 matching stage on `synthetic_20` (median of twelve paired rounds) and nothing measurable on the
 collections where neither fires; neither clears a 3 % bar alone.
 
@@ -818,15 +830,62 @@ actually true, measured twice:
   index" cannot fix that, since the tie is not exact on one side. A cross-check therefore gates on
   the *rate* and on every disagreement being a genuine near-tie, never on a count of zero.
 
-**Phase 2b measured the agreement on the two matching kernels** (task G2's note, §3.3 and §5):
-R §5.2's score is bit-identical on 2 934 052 of 2 934 122 hypotheses and one probe point away on
-the other 70; R §5.4's rungs are inside §10.2's 0.05° row on seven development sets of eight and
-inside its translation row, read at the cloud, on all eight; R §5.6's rungs are inside on four of
-eight, with a tail the note separates into "the ladder amplifies any `f32` input" (three sets,
-shown by re-running the same `f64` rungs from the device's own starting pose) and "the kernel"
-(one set, one candidate of forty, at 2.1°). End to end the two backends produce **the same used
-joins, the same groups and the same `tools/evaluate.py` scores on all seven development
-collections**, and two GPU runs are byte-identical.
+**Phase 2b measured the agreement on the two matching kernels, and §12's 2b exit criterion —
+"CPU/GPU cross-check within §10.2" — is met on one development set of eight.** That is the plain
+statement task W was asked for (V6-D2); what follows is the whole measurement rather than the part
+of it that passes. `gpu-check --stage all --pairs 4 --chaos`, every set, at the tolerances §10.2
+writes (0.05°, **0.01 t of the origin**, 1e-4), with the chaotic candidates excused as §10.2's own
+row asks and counted in the last column:
+
+| set | s1 `deg` | s1 `t` | s1 `fit` | s1 `rmse` | s2 `deg` | s2 `t` | s2 `fit` | s2 `rmse` | excused | exit |
+|---|---|---|---|---|---|---|---|---|---:|---:|
+| terracotta | 2.3e-4 | 2.3e-5 | 0 | 1.3e-6 | **2.113** | **2.0e-1** | **1.6e-3** | **7.7e-4** | 0 / 40 | 1 |
+| pot_A | 2.6e-2 | **4.3e-2** | 0 | 9.7e-5 | 1.1e-2 | **1.8e-2** | **6.0e-4** | **1.5e-4** | 0 / 40 | 1 |
+| pot_B | 4.4e-2 | **7.8e-2** | **3.1e-3** | **1.8e-3** | 1.6e-2 | **1.7e-2** | **5.2e-4** | 8.4e-5 | 0 / 40 | 1 |
+| pot_C | **9.1e-2** | **1.3e-1** | **1.9e-3** | **2.6e-3** | **5.030** | **7.274** | **3.5e-3** | **2.3e-3** | 4 / 40 | 1 |
+| pot_G | 1.7e-4 | 5.6e-4 | 0 | 9.4e-7 | 2.8e-2 | **7.0e-2** | 8.3e-5 | 3.2e-5 | 1 / 40 | 1 |
+| pot_H | 1.9e-4 | 3.4e-4 | 0 | 1.0e-6 | **1.466** | **2.330** | **3.3e-3** | **9.9e-4** | 1 / 40 | 1 |
+| synthetic_20 | 5.0e-4 | 4.6e-4 | 0 | 6.3e-7 | **3.8e-1** | **2.7e-1** | **4.0e-4** | **6.6e-4** | 0 / 40 | 1 |
+| slab | 7.9e-5 | 8.3e-6 | 0 | 4.3e-7 | 4.0e-2 | 4.2e-3 | 0 | 6.0e-7 | 0 / 10 | **0** |
+| **inside the row** | 7/8 | **5/8** | 6/8 | 6/8 | 4/8 | **1/8** | 2/8 | 3/8 | 8/8 | 1/8 |
+
+Read with it, three things that were stated wrongly or not at all before task W:
+
+* **The translation column above is the origin-referenced one, which is the row §10.2 actually
+  writes** (V6-D4). Every earlier summary of this phase quoted the displacement read *at the
+  cloud* — a real and useful number, introduced in §10.4 layer 3 as sitting *beside* §10.2's, not
+  in place of it. At the cloud stage 1 is inside on 8 of 8 and stage 2 on 4 of 8; at the origin,
+  which is the row, 5 of 8 and 1 of 8. These scans sit 100–150 units from the origin, so the two
+  readings differ by more than rounding and the conservative one is the row's.
+* **The tail is the kernel's on four sets, not one** (V6-D3). This section used to attribute the
+  stage-2 tail to "the ladder amplifies any `f32` input" on three sets and to the kernel on "one
+  set, one candidate of forty, at 2.1°". That was read off the *columns*: the worst `ctrl` beside
+  the worst `deg`. Task W measures it **per candidate** — the control chain is per candidate, and
+  so is the exclusion — and the two are not the same candidate. After every candidate whose own
+  `f64` control is outside the row has been excused (4 on pot_C, 1 on pot_G, 1 on pot_H, none
+  anywhere else), terracotta, pot_C, pot_H and synthetic_20 are **still** outside the 0.05° row,
+  at 2.113°, 5.030°, 1.466° and 0.380°, on candidates whose ladders are functions of their input.
+  The ladder is a real effect and it is not the explanation.
+* **Excusing the chaotic candidates changes no set's verdict.** The `chaotic` rows are inside
+  §10.2's per-pair bounds on all eight sets (stage 1: worst pair 8.0e-3 of 0.06; stage 2: worst
+  pair 3.0e-1 of 0.4), and the number of failing rows per set is the same with the exclusion as
+  without it. The gate is honest about what it excuses and it does not depend on it.
+
+End to end this costs nothing measurable: the two backends produce **the same used joins, the same
+groups and the same `tools/evaluate.py` scores on all seven development collections**, the worst
+final pose gap between them is 7.0e-2° and 2.9e-4 t — inside §10.2's `refine` row, which is what a
+placed pose is held to — and two GPU runs are byte-identical (with the adapter to itself; see §7's
+last row).
+
+**What would close it, and what would not.** Task W's own experiment (its note, §2) tried the
+obvious remedy and rejected it on measurements: double-single accumulation of the 27 JTJ/JTr
+partials and of the residual sums, and then the 6×6 solve in double-single as well, both written
+through `fma(-1.0, b, a)` because Metal's fast math folds every other spelling of a compensated
+subtraction to zero. Neither moved the kernel-attributed sets — terracotta stayed at 2.113° and
+synthetic_20 at 0.380° to four digits — while costing up to 1.13× and 1.22× of device time. The
+`f32` loss is not in the accumulation; the remaining candidates are ladders whose *rung count*
+diverges, and the fix, if one is wanted, is a rung the two sides cannot diverge in rather than more
+precision in the one they have.
 
 One more thing fast math takes, which E7 §3's finding does not cover: **Kahan compensation is
 folded away**. E7 measured that the compiler does not *reassociate* a fixed-order addition tree;
@@ -1679,6 +1738,29 @@ seeds each — 15 runs — not derived from the port.
    separates the kernel's arithmetic from a ladder that amplifies an `f32` starting pose — an
    iteration-count row, `p50`/`p90`/`p99` beside every worst case, and a displacement read at the
    cloud beside §10.2's origin-referenced one.
+
+   **Task W made the exit code the criterion and nothing else** (V6-D2). A candidate is excused
+   from the pose rows for either of two *measured* reasons, and §10.2's `chaotic` row then counts
+   and bounds the ones that were:
+
+   * its **control** is already outside §10.2's pose tolerances — the ladder amplifies any `f32`
+     input, so a worst case over it measures the ladder. One extra ladder, so always applied;
+   * or C2's twelve one-ULP neighbours move its own CPU answer out of the row. Thirteen extra
+     climbs, so behind `--chaos`. **The run without the flag is therefore the stricter of the
+     two**, not the laxer, because it excuses fewer candidates.
+
+   The `ctrl` row is reported over *every* candidate with no tolerance of its own — gating the row
+   that defines the exclusion would gate the same fact twice — and the two new `icp sN chaotic`
+   rows carry §10.2's own per-pair bounds (0.06 and 0.4; four pairs are not a dump, and the
+   per-dump bounds are stated over tens of thousands of candidates). `gpu-check` exits non-zero
+   **exactly when** some row is over its tolerance, which is now exactly the criterion §12's 2b
+   row states.
+
+   **The `distance` and `inside` rows read `delegated` on every set, permanently** (V6-D9). Phase
+   2c was decided against on measurements (§12's 2c row), so R §6.1 and R §6.4 have no kernel and
+   half of this layer's table has nothing to compare. That is a label and not a zero, and it is
+   recorded here so that the table is read with it in view rather than as eight rows of which four
+   silently pass.
 4. **Determinism**: two runs, `--threads 1` vs `N`, byte-identical `report.json` per backend.
 5. **Golden fixtures**: `sherd-refit parity` against the stored Python fixtures, injected and
    native, every stage (§10.2).
@@ -1753,9 +1835,10 @@ shorten phase 1+2 to ≈ 14 weeks because GPU work can start once the CPU ICP is
 | 2a, task G1 | done: the `Executor` boundary made real (§6.1) with the CPU path routed through it and byte-identical, `spatial::grid`'s hash grid (§6.2), the `sherd-gpu` crate — device and `--gpu-adapter` (§6.8), buffer chunking and the 2-D dispatch fallback, the 32-slot LRU (§6.3), the self-test on E7's two kernels, `gpu-check` (§10.4 layer 3) | | reduction bit-identical (`0x49a7230c`), bounded NN 1 differing of 384 000 at `max |Δd|` 1.3e-7, 12.2–17.9 ns/query and 3.3–6.3× the ten-core CPU; CPU outputs byte-identical to `9bf35d6` on the four sets (92 files) and parity 23 804 / 0 | lavapipe and WARP are CI's to answer; the discrete-GPU staging path is untestable here (E7 §6) |
 | 2b | hash grid + `icp_rung` (both estimators, in-kernel solves), `coarse_scores` | 2.5 | CPU/GPU cross-check within §10.2 | shared-memory limits; f32 conditioning |
 | 2b, task G2 | done: `kernels/coarse.wgsl` (§6.5, one workgroup per hypothesis, an integer count out) and `kernels/icp.wgsl` (both estimators, every iteration of a rung in one dispatch, the shifted frame with §7's correction, an equilibrated 6×6), the three size thresholds, per-method counters, and `gpu-check --pairs/--chaos/--policy` (§10.4 layer 3) | | coarse **bit-identical on 2 934 052 of 2 934 122 hypotheses**, the other 70 one probe point away; stage 1 inside §10.2's rotation row on 7 of 8 sets and its translation row at the cloud on 8 of 8; stage 2 inside on 4 of 8, the tail separated by a control into ladder and kernel; end to end **the same used joins, groups and `evaluate.py` scores as the CPU on all seven collections**, two GPU runs byte-identical, CPU outputs unmoved | both risks were real: 29 accumulators do not fit one 16 KB reduction, and `f32` needed the shift *and* §7's composition correction *and* an equilibrated solve. The one this row did not name is the one that decided the phase: **the stage is 1.0× because the pipeline blocks ten threads on one queue**, which is 2d's |
+| **2b, exit criterion, task W** | — | — | **Not met, on seven development sets of eight.** `gpu-check --stage all --pairs 4 --chaos` exits 0 on the slab and 1 on the other seven, and that exit code is now the criterion exactly (§10.4 layer 3, V6-D2). At §10.2's own tolerances, with the chaotic candidates excused and counted: stage 1 inside the rotation row on 7 of 8 and the **origin-referenced** translation row on 5 of 8; stage 2 inside on 4 of 8 and **1 of 8**. §6.7 carries the per-set table. It is **not** the ladder: after every candidate whose own `f64` control is outside the row is excused, four sets are still outside on the kernel's account (2.113°, 5.030°, 1.466°, 0.380°) | task W's own experiment — double-single accumulation of the 27 partials, then of the 6×6 solve too — moved none of them and cost up to 1.22× of device time, so more precision in the rung is not the answer; the divergence is in the *rung count*. Nothing about this row moves a decision on any development set: both backends place the same fragments, use the same joins and score the same, and the worst final pose gap is inside §10.2's `refine` row |
 | 2c | BVH kernels (`bounded_distance`, `inside`) | 1.5 | cross-check | traversal stack in WGSL |
 | 2c, task G3 | **not built, and measured rather than deferred.** R §6 is 15.9 % of a GPU-backend run's core time, so the rule to build it fires; the batches are 10 900 (`bounded_distance`) and 20 000 (`inside`) points, which is the size at which `icp.wgsl` already wins | | moving R §6 to the device takes **at most 1.2 s** off a 13.38 s stage and adds 43.7 M BVH queries to a device that has 4.3 s of slack, is 1.6× down on its idle throughput and gets slower the busier the CPU beside it is (§6.6). The hash-grid kernel — no stack, no triangle projection — runs at 55–80 M queries/s on an **idle** device | the decision is against the trigger and rests on §6.6's envelope; a discrete adapter (E8) or a prototype measured against `gpu-check`'s `distance` and `inside` rows would settle it |
-| 2d, task G3 | done: §6.4's software pipeline — one submitting thread, four command buffers in flight, `Executor::device_slack`, one submission per `Executor` call — plus `Occupancy` (the union of the outstanding intervals, not the per-thread sum), `--gpu-memory` and §1's reservation, §5's `Cancel`/`Progress` with Ctrl-C, and the TDR/2-D-dispatch tests | | matching **1.04–1.40×** on the seven development collections (was 1.0×), device occupancy 41 % → 68 %, peak device memory 103 MB of 1 GB; parity 23 804 / 0 and **every used join, group and pose bit-identical to G2's on both backends** | the risk this row named — "overlap efficiency" — is the one that bit, in a form no scheduler addresses: on an integrated part the device loses 1.60× of its throughput as the ten cores fill up, so §6.6's overlap arithmetic does not hold and the stage's minimum is at six workers, not nine |
+| 2d, task G3 | done: §6.4's software pipeline — one submitting thread, four command buffers in flight, `Executor::device_slack`, one submission per `Executor` call — plus `Occupancy` (the union of the outstanding intervals, not the per-thread sum), `--gpu-memory` and §1's reservation, §5's `Cancel`/`Progress` with Ctrl-C, and the TDR/2-D-dispatch tests | | matching **1.04–1.40×** on the seven development collections (was 1.0×), device occupancy 41 % → 68 % **at G3; 48 % after 2e's ceiling halved it deliberately, re-measured at task W** (V6-D6), peak device memory 103 MB of 1 GB, **68 MB at task W**; parity 23 804 / 0 and **every used join, group and pose bit-identical to G2's on both backends** | the risk this row named — "overlap efficiency" — is the one that bit, in a form no scheduler addresses: on an integrated part the device loses 1.60× of its throughput as the ten cores fill up, so §6.6's overlap arithmetic does not hold and the stage's minimum is at six workers, not nine |
 | 2d | scheduler, pipelining, TDR chunking, memory management | 1.5 | the GPU gates of §10.3 **on the development sets** (`mixed_ABG` included, on the same terms: it is roadmap item 4's baseline, not a quality gate), and §5's memory semaphore holding a projected 170-scan preprocessing budget (E1 §7); "synthetic 170 ≤ 30 min" is the final acceptance after phase 2, not a 2d exit (decision 2026-09-07) | overlap efficiency; a projection carried this long can be wrong in a way only the run shows |
 | 2e | vendor matrix (NVIDIA/AMD/Intel/Apple), tuning | 2 | E8 matrix green | Intel/AMD driver quirks |
 | 2e, task G4 | done, on the one adapter this machine has: `coarse::MAX_QUERIES` (a measured **ceiling** beside §6.4's floors), `device_slack` capped at one worker per core plus one, the §10.3 rows measured on both backends cold and warm, §6.6 re-derived from measured throughput, a `sherd-refit-rs info` that runs the self-test and prints **both** ratios with their names on them, and the README's GPU section | | matching **1.07–1.43×** on the seven development collections (was 1.04–1.40×), `synthetic_20` 1.08 → **1.28×**; every §10.3 row inside its gate on both backends, warm and cold; peak device memory 67 MB of 1 GB; parity 23 804 / 0 and **every used join, group and pose bit-identical to G3's on both backends**, two GPU runs byte-identical | **the vendor matrix itself is not done and cannot be done here** — one Metal adapter, no software fallback (E7 §6). Both new constants are consequences of an *integrated* part sharing power and bandwidth with the CPU; a discrete card shares neither and each row of E8 has to re-measure them rather than inherit them. What CI checks without a GPU: the build on four platforms, the chunking and threshold arithmetic, `Selection::decide`'s rule; adapter tests skip with a printed reason |

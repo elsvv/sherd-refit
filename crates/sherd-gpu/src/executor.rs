@@ -225,7 +225,9 @@ impl GpuExecutor {
     ///
     /// — better than G2's 1.0× and still under D §6.8's 1.5× bar. What stops it is not the queue
     /// any more: on `synthetic_20` the device now has work outstanding for 9.1 s of a 13.4 s
-    /// stage. It is that **the device and the ten cores share one envelope**. The same 330
+    /// stage (G3's figure; task G4's query ceiling then halved it on purpose and task W measured
+    /// **5.44 s of 11.34 s, 48 %**, on the tuned tree — V6-D6). It is that **the device and the
+    /// ten cores share one envelope**. The same 330
     /// submissions of the same work take
     ///
     /// | `--threads` | 1 | 2 | 4 | 6 | 9 |

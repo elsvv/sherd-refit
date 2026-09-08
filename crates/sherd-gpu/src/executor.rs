@@ -212,23 +212,36 @@ impl GpuExecutor {
     ///
     /// D §6.8's rule reads the self-test's ratio, and the self-test measures E7 §5's bounded-NN
     /// kernel on an idle device: 3–6× the whole ten-core CPU. That number is real and it is not
-    /// the matching stage's. Measured end to end on `synthetic_20`, matching-stage seconds
-    /// (`notes/2026-09-08-g2-kernels.md`):
+    /// the matching stage's.
     ///
-    /// * **one thread** — 85.4 s on the device against 103.4 s on the CPU, **1.21×**;
-    /// * **ten threads**, five runs each — median 15.92 s against 15.76 s (**0.99×**), best
-    ///   14.70 s against 15.36 s (**1.04×**). Indistinguishable.
+    /// **Task G2 measured the stage at 1.0× and read the cause as an idle device. Task G3 built
+    /// D §6.4's software pipeline and measured the cause, and it is a different one.** With one
+    /// submitting thread and the pool deep enough to cover its waits, the matching stage over the
+    /// seven development collections, three interleaved runs each, is
     ///
-    /// The device is not what ran out: it was **busy for 6.35 s** of that stage — 4.33 s of coarse
-    /// score over 1.65 G point-queries and 2.02 s of ICP rungs — and idle for the rest. The
-    /// pipeline runs one pair per rayon task, so ten tasks submit to one queue and then block on
-    /// it, and each thread that blocks is a core that stops working. The kernels' own 1.6–4.2×
-    /// cannot reach the stage through that. D §6.4 describes the shape that would — "CPU threads
-    /// prepare, one GPU thread submits; double-buffered" — and it is not built.
+    /// | terracotta | pot_A | pot_B | pot_C | pot_G | pot_H | synthetic_20 |
+    /// |---|---|---|---|---|---|---|
+    /// | 1.11× | 1.25× | 1.40× | 1.13× | 1.04× | 1.06× | 1.08× |
+    ///
+    /// — better than G2's 1.0× and still under D §6.8's 1.5× bar. What stops it is not the queue
+    /// any more: on `synthetic_20` the device now has work outstanding for 9.1 s of a 13.4 s
+    /// stage. It is that **the device and the ten cores share one envelope**. The same 330
+    /// submissions of the same work take
+    ///
+    /// | `--threads` | 1 | 2 | 4 | 6 | 9 |
+    /// |---|---|---|---|---|---|
+    /// | device outstanding | 5.66 s | 5.67 s | 6.08 s | 7.62 s | 9.06 s |
+    /// | matching stage | 36.41 s | 23.69 s | 13.84 s | **11.86 s** | 13.38 s |
+    ///
+    /// so the device loses **1.60×** of its own throughput as the CPU fills up, and the stage has
+    /// a minimum at six workers rather than at nine. That is an integrated part sharing power and
+    /// memory bandwidth with the cores it is supposed to be running alongside, and no scheduler
+    /// fixes it.
     ///
     /// So `Auto` keeps the CPU and says why, `--backend gpu` runs the kernels for anyone measuring
-    /// them, and this constant flips when the scheduler lands rather than when a kernel does.
-    /// D §6.8's bar is 1.5× and the honest measurement is 1.0×.
+    /// them, and this constant flips when a *measured* 1.5× exists — which on this machine would
+    /// take a kernel for R §6 that does not have to share, or a discrete GPU that does not share
+    /// at all. D §6.8's bar is 1.5×; the honest measurement is 1.04–1.40×.
     pub const AUTO_ELIGIBLE: bool = false;
 
     /// How many worker threads the matching stage runs beyond `--threads`: **half as many again**
@@ -389,7 +402,7 @@ mod tests {
         const {
             assert!(
                 !GpuExecutor::AUTO_ELIGIBLE,
-                "measured: matching is 1.0x on ten threads, because ten tasks share one queue"
+                "measured: matching is 1.04-1.40x, under D §6.8's 1.5x bar"
             );
         }
     }

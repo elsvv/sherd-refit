@@ -183,9 +183,12 @@ pub(crate) fn resolve(
             }
             let reason = format!(
                 "--backend gpu on {}: the self-test passed ({:.1} ns/query, {:.2}x the CPU on its \
-                 batch). R §5.2's coarse score runs on the device; R §7's ICP rung, R §6.1's \
-                 bounded distance and R §6.4's inside test are still the CPU implementation's \
-                 (D §12: 2b and 2c), and `gpu-check` says which is which.",
+                 batch). R §5.2's coarse score and R §7's ICP rung run on the device, above the \
+                 size thresholds; R §6.1's bounded distance and R §6.4's inside test are still \
+                 the CPU implementation's (D §12: 2c), and `gpu-check` says which is which. The \
+                 self-test's ratio is a kernel on an idle device and not the stage's: the \
+                 matching stage measures 1.04-1.40x, and the device loses 1.6x of its own \
+                 throughput as the ten cores fill up (task G3).",
                 test.adapter.name,
                 test.ns_per_query(),
                 test.speedup,

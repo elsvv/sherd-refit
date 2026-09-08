@@ -482,6 +482,24 @@ under Windows TDR (2 s) the batch is split into dispatches of ≤ 512 candidates
 per-candidate cost at 12 000 points × 30 iterations is expected at 1–3 ms of GPU time, so a
 512-candidate dispatch is ≈ 100 ms at full occupancy.
 
+**Built in phase 2b (task G2), with three things this text did not say.** Steps 2, 4 and 5 are
+`kernels/coarse.wgsl` and `kernels/icp.wgsl`; steps 1, 3 and 6 are the CPU's, as written.
+
+* **A batch has a floor as well as a ceiling.** The 512-candidate ceiling is for TDR; the floor is
+  for the CPU. One workgroup per candidate means a rung of one candidate is one workgroup on a
+  sixteen-core GPU, measured at **0.3×** the ten-core CPU — and R §9's refinement hands the trait
+  exactly that, which made a `--backend gpu` terracotta run's refine stage 2.6× slower than the
+  CPU's before `icp::MIN_CANDIDATES` (16) and `icp::MIN_WORK` (100 000 candidate-points) existed.
+  `coarse::MIN_QUERIES` (200 000 point-queries) is the same floor for step 2. The crossover tables
+  they come from are in `crates/sherd-gpu/tests/adapter.rs` and in the G2 note.
+* **The measured per-candidate cost is 3.25 µs per *iteration*, not per rung** — 621 760
+  candidate-iterations in 2.02 s on `synthetic_20`, at 15 ms per dispatch. A 512-candidate,
+  30-iteration dispatch is therefore ≈ 50 ms, half what this paragraph estimates.
+* **The step-2 kernel needs R §5.2's bounding-box reject**, which this text does not mention and
+  E2 §4 measured as three quarters of the probe. Without it the kernel ran at 13.8 ns/query against
+  the ten-core CPU's 12.6 ns of wall and the matching stage came out *slower* on the GPU; with it,
+  2.63 ns/query.
+
 ### 6.5 Kernel semantics (WGSL sketches; the CPU code mirrors them line by line)
 
 ```wgsl
@@ -521,18 +539,60 @@ for (var it = 0u; it < max_iter && !done; it++) {
 point: AABB reject → parity rays → for inside points, closest-point distance with
 `r_max = pen_cutoff` for `pen_depth` (only needed for the maximum; computed exactly).
 
+**Built in phase 2b (task G2).** Four corrections to the sketches above, all measured.
+
+1. **`coarse_main` returns the count, not the score.** `f64::from(agree) / n_points` is a division
+   in `f64` on the *host*, because step C1 measured that `k · (1/60) ≠ k / 60`; two counts that
+   agree then give two scores that agree bit for bit. Measured over the eight development sets,
+   four pairs each: **70 of 2 934 122 hypotheses differ, all by exactly one probe point**, and the
+   two sets whose fragments carry no near-tie agree on every bit. The lanes are 64 as sketched, and
+   the reduction is integer.
+2. **`centroid` in the rung's sketch is not a parameter, it is a change of frame.** §7's last row
+   is right that shrinking coordinates means translating *both clouds*, and the host does that in
+   `f64`; what it does not say is that R §7 is equivariant under the shift for `PointToPoint` and
+   **not** for `PointToPlane`. Umeyama reads its translation off the two means, which move with the
+   clouds; the point-to-plane step reads its translation off a linearisation about the origin of
+   whatever frame it is in, so composing in the shifted frame is conjugate to composing
+   `p ↦ R p + τ' + (R − I − ω̂)c` in the world frame — which is §7's `Assembly::Centred`, measured
+   at 0.044 t at the median. The kernel adds that residue back, and it is better conditioned than
+   the equivalent `R c − c` because `R − I − ω̂` is formed from `O(1)` entries first.
+3. **The 6×6 is equilibrated before the factorisation.** `JTJ`'s rotational block is `|p|² ≈ 10³`
+   times its translational block, a condition number bought by the units; `D = diag(1/√A_kk)` is an
+   exact reparameterisation and moved the stage-2 pose deviation's p90 from 6.5e-2° to 7.1e-4°.
+   It changes which permutation Eigen's rule picks — after scaling the diagonal is all ones — and
+   that departure from `icp::solve_ldlt` is deliberate and documented in the kernel.
+4. **29 accumulators do not fit one reduction.** 32 × 256 × 4 B is 32 KB against §6.8's portable
+   16 KB, so the tree runs eight components at a time, four times per iteration. And a converged
+   candidate cannot *leave* the loop: WGSL requires `workgroupBarrier` in uniform control flow and
+   a value read from workgroup storage is not uniform to the analysis, so the loop bound is
+   `max_iter` from a uniform buffer and a done candidate pays the barriers and none of the work.
+
 ### 6.6 Expected speedups and their basis
 
-**The GPU column of the table below rests on an assumption experiments E7 and G1 both measured as
-5–10× optimistic, and it has not been re-derived.** The basis it names — "≈ 0.5–1 G bounded NN
-queries/s on the hash grid" — is, on this Metal GPU and on this design's own grid at this design's
-own sizes, **0.105 G queries/s** (9.0–9.5 ns/query at 46 candidate points per query, equivalently
-4.9 G candidate distance tests/s); G1 re-measured 12.2–17.9 ns/query on a smaller batch and
-**3.3–6.3× the whole ten-core CPU**, against the 15–50× the table implies. The GPU still clears
-`Backend::Auto`'s 1.5× bar with room. Re-deriving the column needs `icp_rung`'s own cost, since
-the rung carries the 6×6 solve as well as the correspondence search, and that is phase 2b's
-measurement; until then read the GPU column as an upper bound that is known to be wrong by an
-order of magnitude, and the CPU column — which phase 1e measured — as the real one.
+**The GPU column of the table below was re-derived in phase 2b (task G2), and the answer is that
+the per-pair figures are about right and the stage-level conclusion is not.**
+
+*The assumption.* "≈ 0.5–1 G bounded NN queries/s on the hash grid" is 1–2 ns/query. E7 measured
+9.0–9.5 ns and G1 12.2–17.9 ns, and this section carried a warning that it was 5–10× optimistic.
+Both of those are of a **saturated kernel on a cloud where every query hits**. R §5.2's own
+workload is not: three quarters of the probe is outside the breakline's bounding box, and with that
+reject in the kernel the coarse score runs at **2.63 ns/query** over 1.65 G queries — 0.38 G/s,
+within 1.3–2.6× of the assumption. Both numbers are true; the row has to say which workload it
+means, and it means this one.
+
+*The per-pair total.* The table projects ≈ 0.08 GPU-seconds per mid-size pair. Measured on
+`synthetic_20`, whose pairs are smaller: **33.4 ms of device time per pair** (6.35 s over 190
+pairs, single-threaded so that a poll waits for one submission), of which 4.33 s is the coarse
+score and 2.02 s the ICP rungs. `icp_rung` costs **3.25 µs per candidate-iteration**. The column is
+the right order of magnitude for the first time.
+
+*What is wrong is the sentence after the table.* "The batches keep the GPU busy while the CPU
+prepares the next block" is the whole GPU case, and it describes §6.4's block scheduler, which does
+not exist. With the pipeline as it is — one pair per rayon task — the matching stage measures
+**1.21× on one thread and 1.0× on ten**, because the device is busy 6.35 s of a 15.4 s stage and
+idle for the rest while ten threads take turns blocking on it. `Backend::Auto` therefore does not
+take the GPU (§6.8), and the collection-level estimate below should be read as *what the device
+could do* (14 365 pairs × 33.4 ms ≈ 8 minutes of GPU time) rather than as a wall time.
 
 Per mid-size pair (R§13 cost structure), single-thread Python core-seconds → estimated Rust CPU
 core-seconds → estimated GPU seconds (M2 Pro 16-core GPU, ≈ 0.5–1 G bounded NN queries/s on the
@@ -584,6 +644,21 @@ actually true, measured twice:
   index" cannot fix that, since the tie is not exact on one side. A cross-check therefore gates on
   the *rate* and on every disagreement being a genuine near-tie, never on a count of zero.
 
+**Phase 2b measured the agreement on the two matching kernels** (task G2's note, §3.3 and §5):
+R §5.2's score is bit-identical on 2 934 052 of 2 934 122 hypotheses and one probe point away on
+the other 70; R §5.4's rungs are inside §10.2's 0.05° row on seven development sets of eight and
+inside its translation row, read at the cloud, on all eight; R §5.6's rungs are inside on four of
+eight, with a tail the note separates into "the ladder amplifies any `f32` input" (three sets,
+shown by re-running the same `f64` rungs from the device's own starting pose) and "the kernel"
+(one set, one candidate of forty, at 2.1°). End to end the two backends produce **the same used
+joins, the same groups and the same `tools/evaluate.py` scores on all seven development
+collections**, and two GPU runs are byte-identical.
+
+One more thing fast math takes, which E7 §3's finding does not cover: **Kahan compensation is
+folded away**. E7 measured that the compiler does not *reassociate* a fixed-order addition tree;
+applying the algebraic identity `(a + b) - a - b = 0` is a different licence and Metal takes it. A
+compensated sum added to `icp.wgsl`'s squared error changed no printed digit of any cross-check row.
+
 Three rules follow for every parity-critical WGSL file, and they are enforced by reading rather
 than by a lint: no `dot`/`length`/`distance`/`normalize` (`metal::dot` stays a fused chain even
 with contraction off — write the sum out, and mirror it on the CPU); no `subgroupAdd` and no
@@ -627,9 +702,15 @@ type) as a diagnostic, not a production mode.
      **12.2–17.9 ns/query, 3.3–6.3× the whole ten-core CPU on the same batch**, which brackets
      E7 §5's 12.2 ns at this size and its "4–5× over all ten cores".
 - **`Backend::Auto`** takes the GPU only when the self-test passes, the adapter is not a software
-  implementation of the API, the measured ratio is **≥ 1.5×**, *and* the executor has kernels.
-  The last clause is `GpuExecutor::HAS_KERNELS`, `false` until phase 2b: in phase 2a the device
-  opens, the self-test passes at 4–6× and `Auto` still runs on the CPU, saying so in one line.
+  implementation of the API, the measured ratio is **≥ 1.5×**, *and* the executor is worth using.
+  **Phase 2b split that last clause in two, because the first three are about the device and the
+  question is about the stage.** `GpuExecutor::HAS_KERNELS` is now `true` — `coarse_scores` and
+  `icp_rung` are real kernels and `--backend gpu` runs them — and `GpuExecutor::AUTO_ELIGIBLE` is
+  `false`, carrying the measurement that makes it false: the matching stage is 1.21× on one thread
+  and **1.0× on ten**, while the self-test's own ratio on the same machine is 3–6×. The self-test
+  measures a bounded-NN kernel on an idle device; the stage is ten rayon tasks taking turns
+  blocking on one queue. `Selection::decide` reads `AUTO_ELIGIBLE`, and it flips when §6.4's block
+  scheduler lands (phase 2d), not when a kernel does.
 - **`--backend gpu`** opens the device and runs the self-test, and **fails** — with the adapter
   list, the unmet limits or the failed checks — when either step fails, rather than falling back
   silently. A macOS self-test failure means the CPU with no second opinion: there is no software
@@ -671,7 +752,7 @@ type) as a diagnostic, not a production mode.
 | thread count | results must be identical for `--threads 1` and `--threads N` (CI test) |
 | CPU vs GPU | within §10.2; not bit-identical (different ULP behaviour); the report records the backend |
 | platforms | same backend, same binary → identical; across OS/compilers → f32 ULP-level differences are possible in `libm` calls (`acos`, `sin`); tolerance-based |
-| ill-conditioning | **measured in task C2 and not adopted.** Assembling the point-to-plane system about the target centroid and re-expressing the update about the origin is an exact re-parameterisation of the *linear* Gauss–Newton step but not of the finite update, which differs by `(R − I − ω̂)c = O(|ω|²·|c|)` per iteration. That was estimated at 1e-6 t; on terracotta it is 0.044 t at the median of stage 2 and 0.61 t at p90 (`|c| ≈ 100–150` units, `|ω| ≈ 0.1` rad, thirty unconverged iterations), so the poses of §10.2 are computed in world coordinates as R §7 writes them. Shrinking coordinates for an `f32` path means translating **both clouds** by `−c` — a rigid change of frame R §7 is equivariant under — not re-parameterising the Jacobian alone. `icp::Assembly` keeps both forms because it is what measured this |
+| ill-conditioning | **measured in task C2 and not adopted.** Assembling the point-to-plane system about the target centroid and re-expressing the update about the origin is an exact re-parameterisation of the *linear* Gauss–Newton step but not of the finite update, which differs by `(R − I − ω̂)c = O(|ω|²·|c|)` per iteration. That was estimated at 1e-6 t; on terracotta it is 0.044 t at the median of stage 2 and 0.61 t at p90 (`|c| ≈ 100–150` units, `|ω| ≈ 0.1` rad, thirty unconverged iterations), so the poses of §10.2 are computed in world coordinates as R §7 writes them. Shrinking coordinates for an `f32` path means translating **both clouds** by `−c` — a rigid change of frame R §7 is equivariant under — not re-parameterising the Jacobian alone. `icp::Assembly` keeps both forms because it is what measured this. **Phase 2b then measured the other half of the row.** Translating both clouds by `−c` is indeed what the `f32` path needs — and it is *not* sufficient, because R §7 is equivariant under it only for the point-to-point estimator. Umeyama's translation is `mean_q − R·mean_p` and moves with the clouds; the point-to-plane step's comes from a linearisation about the origin of whatever frame it is in, so a rung run entirely in the shifted frame *is* `Centred`, with the same `|c|` and the same 0.044 t. `kernels/icp.wgsl` adds `(R − I − ω̂)·c` to the update, which makes the shifted composition the world composition exactly; with that and an equilibrated 6×6 the `f32` rung is inside §10.2's stage-1 row on seven development sets of eight |
 
 ## 8. Memory budget (170 scans)
 
@@ -1362,6 +1443,17 @@ seeds each — 15 runs — not derived from the port.
    `GpuExecutor` routes every method to the CPU until 2b and 2c, and a row that printed a deviation
    of zero would be a lie; the batches are still formed from a real collection and fed to both
    executors, which is what exercises §6.3's formation path before the kernels exist.
+   **Phase 2b filled the coarse and ICP rows and found the same trap from the other side**: on
+   terracotta every one of four pairs' rungs is under `icp::MIN_CANDIDATES`, so the executor sent
+   them all to the CPU and the harness compared the CPU with itself. The harness therefore forces
+   the kernels on by default (`--policy` asks for the thresholds a run applies) and **every row
+   that compares a kernel reports how many of its calls reached the device**. It also gains
+   `--pairs N` (four is what the note's tables use), `--chaos` (task C2's twelve one-ULP re-climbs,
+   so a chaotic ladder is counted and excluded rather than reported as a kernel deviation), a
+   *control* row — the same `f64` rungs from the poses the device actually starts from, which
+   separates the kernel's arithmetic from a ladder that amplifies an `f32` starting pose — an
+   iteration-count row, `p50`/`p90`/`p99` beside every worst case, and a displacement read at the
+   cloud beside §10.2's origin-referenced one.
 4. **Determinism**: two runs, `--threads 1` vs `N`, byte-identical `report.json` per backend.
 5. **Golden fixtures**: `sherd-refit parity` against the stored Python fixtures, injected and
    native, every stage (§10.2).
@@ -1415,6 +1507,7 @@ shorten phase 1+2 to ≈ 14 weeks because GPU work can start once the CPU ICP is
 | 2a | wgpu device/adapter/self-test, buffers, slots, batch structs; E7, E8 | 1.5 | self-test passes on Metal + lavapipe | naga/driver issues |
 | 2a, task G1 | done: the `Executor` boundary made real (§6.1) with the CPU path routed through it and byte-identical, `spatial::grid`'s hash grid (§6.2), the `sherd-gpu` crate — device and `--gpu-adapter` (§6.8), buffer chunking and the 2-D dispatch fallback, the 32-slot LRU (§6.3), the self-test on E7's two kernels, `gpu-check` (§10.4 layer 3) | | reduction bit-identical (`0x49a7230c`), bounded NN 1 differing of 384 000 at `max |Δd|` 1.3e-7, 12.2–17.9 ns/query and 3.3–6.3× the ten-core CPU; CPU outputs byte-identical to `9bf35d6` on the four sets (92 files) and parity 23 804 / 0 | lavapipe and WARP are CI's to answer; the discrete-GPU staging path is untestable here (E7 §6) |
 | 2b | hash grid + `icp_rung` (both estimators, in-kernel solves), `coarse_scores` | 2.5 | CPU/GPU cross-check within §10.2 | shared-memory limits; f32 conditioning |
+| 2b, task G2 | done: `kernels/coarse.wgsl` (§6.5, one workgroup per hypothesis, an integer count out) and `kernels/icp.wgsl` (both estimators, every iteration of a rung in one dispatch, the shifted frame with §7's correction, an equilibrated 6×6), the three size thresholds, per-method counters, and `gpu-check --pairs/--chaos/--policy` (§10.4 layer 3) | | coarse **bit-identical on 2 934 052 of 2 934 122 hypotheses**, the other 70 one probe point away; stage 1 inside §10.2's rotation row on 7 of 8 sets and its translation row at the cloud on 8 of 8; stage 2 inside on 4 of 8, the tail separated by a control into ladder and kernel; end to end **the same used joins, groups and `evaluate.py` scores as the CPU on all seven collections**, two GPU runs byte-identical, CPU outputs unmoved | both risks were real: 29 accumulators do not fit one 16 KB reduction, and `f32` needed the shift *and* §7's composition correction *and* an equilibrated solve. The one this row did not name is the one that decided the phase: **the stage is 1.0× because the pipeline blocks ten threads on one queue**, which is 2d's |
 | 2c | BVH kernels (`bounded_distance`, `inside`) | 1.5 | cross-check | traversal stack in WGSL |
 | 2d | scheduler, pipelining, TDR chunking, memory management | 1.5 | the GPU gates of §10.3 **on the development sets** (`mixed_ABG` included, on the same terms: it is roadmap item 4's baseline, not a quality gate), and §5's memory semaphore holding a projected 170-scan preprocessing budget (E1 §7); "synthetic 170 ≤ 30 min" is the final acceptance after phase 2, not a 2d exit (decision 2026-09-07) | overlap efficiency; a projection carried this long can be wrong in a way only the run shows |
 | 2e | vendor matrix (NVIDIA/AMD/Intel/Apple), tuning | 2 | E8 matrix green | Intel/AMD driver quirks |

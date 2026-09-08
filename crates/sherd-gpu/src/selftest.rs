@@ -5,7 +5,7 @@
 //!
 //! | check | what it proves | expectation |
 //! |---|---|---|
-//! | adapters and limits | the device can run D §6's kernels at all | the wgpu defaults of [`Requirements`](crate::device::Requirements) |
+//! | adapters and limits | the device can run D §6's kernels at all | the wgpu defaults of [`crate::device::Requirements`] |
 //! | a fixed-order reduction of 1e7 `f32` terms | the shape D §6.4 specifies survives the compiler | **bit-identical** to the CPU mirror (E7 §3) |
 //! | D §6.2's bounded-NN kernel on a synthetic cloud | the grid, the traversal order and the tie rule agree | 0 differing neighbours, `max |Δd|` ≤ 1e-6 of the cloud (E7 §5.1: 56 in 24.6 M, 2.4e-7) |
 //! | host wall time of that kernel, GPU against all CPU cores | whether the GPU is worth using | ≥ 1.5× for `Backend::Auto` (D §6.8) |

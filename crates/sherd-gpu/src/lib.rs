@@ -10,7 +10,7 @@
 //! **Phase 2a (task G1) builds the trust, not the kernels.** What is here is the device
 //! ([`device`]), the buffer and dispatch arithmetic ([`buffers`]), the fragment-slot LRU
 //! ([`slots`]), the self-test of D §6.8 as E7 §8 corrects it ([`selftest`]) and a
-//! [`GpuExecutor`](executor::GpuExecutor) that **routes every method to the CPU executor** and says
+//! [`GpuExecutor`] that **routes every method to the CPU executor** and says
 //! so. The four kernels arrive in phases 2b and 2c; when they do, the self-test, the cross-check
 //! harness (`sherd-refit-rs gpu-check`) and the slot table are already there to measure them.
 //! Nothing here silently pretends to be a GPU result: [`selftest::SelfTest`] reports which kernels
@@ -36,7 +36,7 @@
 //!
 //! Metal compiles every shader with fast math on and wgpu does not turn it off (E7 §4). The team
 //! decision is to accept it — not to patch or vendor `wgpu-hal` — which makes three rules binding
-//! on every WGSL file in [`kernels`](self):
+//! on every WGSL file under `src/kernels/`:
 //!
 //! 1. **Addition-only reductions, in a fixed order.** Those are bit-exact (E7 §3). Never
 //!    `subgroupAdd`, never a floating-point atomic: neither has a defined order.

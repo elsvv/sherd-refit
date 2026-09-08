@@ -9,7 +9,7 @@
 //! # Two layouts, and why the CPU one is `f64`
 //!
 //! D §6.3 says the device arrays are SoA `vec4<f32>`, 16-byte aligned and `bytemuck::Pod`, and
-//! they are — [`CoarseBatch::device_points`], [`HashGrid`](crate::spatial::grid::HashGrid) and
+//! they are — [`CoarseBatch::device_points`], [`crate::spatial::grid::HashGrid`] and
 //! [`PoseGpu`] below produce exactly that. But the batch *itself* carries `f64` slices and the
 //! CPU's own structures, because the CPU executor is the reference implementation of every method
 //! (D §6.1) and experiment E5 measured `f32` point loops far outside D §10.2 — the median stage-2

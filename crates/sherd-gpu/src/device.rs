@@ -9,7 +9,8 @@
 //! * **One Metal adapter, and no software fallback of any kind** (E7 §6): `enumerate_adapters`
 //!   returns a single entry and `force_fallback_adapter: true` fails with "metal had no fallback
 //!   adapters". So a self-test failure on macOS means the CPU path with no second opinion —
-//!   [`Selection::reason`] says so out loud rather than leaving the operator to infer it.
+//!   [`Selection::reason`](crate::selftest::Selection::reason) says so out loud rather than
+//!   leaving the operator to infer it.
 //! * **Metal reports no vendor, device id, driver or driver_info** (E7 §7.6), so `--gpu-adapter
 //!   NAME` can only match on the adapter name and a run report cannot record a driver version.
 //! * **The adapter's own limits are accepted verbatim** (E7 §2), and they are far above the wgpu

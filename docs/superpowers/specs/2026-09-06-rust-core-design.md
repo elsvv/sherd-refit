@@ -53,7 +53,8 @@ sherd-refit/                      (this repo; Python package stays at the root d
       src/matching/  scales.rs hypotheses.rs coarse.rs nms.rs icp.rs verify.rs pair.rs screen.rs
       src/assembly/  greedy.rs consistency.rs groups.rs constraints.rs
       src/refine.rs  src/report.rs src/render.rs src/pipeline.rs src/executor.rs src/rng.rs src/fixture.rs
-    sherd-gpu/                    wgpu executor: device.rs buffers.rs slots.rs kernels/*.wgsl scheduler.rs selftest.rs
+    sherd-gpu/                    wgpu executor: device.rs buffers.rs slots.rs selftest.rs executor.rs kernels/*.wgsl
+                                  (scheduler.rs is phase 2d; the kernels are 2b and 2c)
     sherd-cli/                    binary `sherd-refit`: run, segment, parity, bench, info
     sherd-py/                     pyo3 module `sherd_refit_core` (maturin, its own pyproject.toml)
     sherd-parity/                 fixture reader/writer + stage runners used by `sherd-refit parity`
@@ -64,7 +65,8 @@ sherd-refit/                      (this repo; Python package stays at the root d
 ```
 
 `sherd-core` has no GPU dependency and compiles on every target; `sherd-gpu` is an optional
-feature of `sherd-cli` (`--features gpu`, on by default in release builds).
+feature of `sherd-cli` (`gpu`, in `default`), so `--no-default-features` builds a CPU-only binary
+with no wgpu in the tree at all. Both shapes are built by the `check` and `test` jobs of §10.5.
 
 ## 3. Dependencies
 
@@ -72,8 +74,8 @@ feature of `sherd-cli` (`--features gpu`, on by default in release builds).
 `Cargo.lock` resolves at the head of `rust-core`; the phase-0 experiments moved several of them and
 deleted two rows outright, and the table was re-synchronised with the tree after the phase-1a
 verification (S1 open issue 2). Rows for crates that are *not* in the workspace yet say so: their
-members (`sherd-gpu`, `sherd-py`, the desktop app) join in phases 2a and 3a, and pinning their
-dependencies before then would be guessing.
+members (`sherd-py`, the desktop app) join in phase 3a, and pinning their dependencies before then
+would be guessing. `sherd-gpu` joined in phase 2a and its row is now the tree's.
 
 | need | crate, as pinned | why | what phase 0 changed | experiment |
 |---|---|---|---|---|
@@ -92,7 +94,7 @@ dependencies before then would be guessing.
 | images | `image` 0.25.10, `default-features = false, features = ["png"]` + an embedded 5×7 bitmap font | preview PNGs without a font stack | — | — |
 | CLI / logging / errors | `clap` 4.6.6 (`derive`), `tracing` 0.1.44, `tracing-subscriber` 0.3.23 (`env-filter`), `anyhow` 1.0.104, `thiserror` 2.0.20 | — | thiserror 1 → 2 | — |
 | tests | `proptest` 1.11.0, `approx` 0.5.1, `cargo nextest` in CI | — | `criterion` is not in the workspace: the benchmark harness is phase 1e | — |
-| GPU | `wgpu` 24 (pin the minor), `bytemuck`, `pollster` | Metal/Vulkan/DX12 from one WGSL source | **not in the workspace yet** — `sherd-gpu` is phase 2a. E7/E8 measured the feasibility, not the pin | E7, E8 |
+| GPU | `wgpu` **`=30.0.1`** (`default-features = false`, features `metal`, `vulkan`, `dx12`, `wgsl` — no GL, D §6.8), `bytemuck` 1.25.2, `pollster` 0.4.0, `rayon` | Metal/Vulkan/DX12 from one WGSL source | **in the workspace since phase 2a (task G1)**, and the pin is exact rather than a floor: E7 read the shader-compile path of this `wgpu-hal` (`src/metal/device.rs:272`, which never touches `fastMathEnabled`) and measured the arithmetic that follows from it, so a minor bump can move the parity table. D §3 said "wgpu 24", which was six majors stale; 28.0.0 needs Rust 1.92 and will not build here. `sherd-gpu` is an **optional feature of `sherd-cli`, on by default** — `--no-default-features` gives a binary with no wgpu, no naga and no driver dependency, and CI builds both shapes | E7, E8 |
 | Python bindings | `pyo3` 0.23 + `numpy` 0.23, `maturin` | transition and the parity harness | **not in the workspace yet** — `sherd-py` is phase 3a | — |
 | desktop | `tauri` 2 | later | **not in the workspace yet** | — |
 
@@ -350,12 +352,12 @@ CLI wires Ctrl-C, the desktop app wires a button. Progress: a `Progress` trait w
 ### 6.1 The interface
 
 ```rust
-pub trait Executor: Send + Sync {
-    fn coarse_scores(&self, b: &CoarseBatch) -> Vec<f32>;                 // R§5.2, many pairs
-    fn icp_rung(&self, b: &IcpBatch) -> Vec<IcpResult>;                    // R§7, one rung (up to max_iter) for many candidates
-    fn bounded_distance(&self, b: &DistBatch) -> Vec<f32>;                 // point-to-triangle-set distance, exact below `radius`, +inf above
-    fn inside(&self, b: &InsideBatch) -> Vec<InsideResult>;                // (inside: bool, dist: f32 for inside points beyond `pen`)
-    fn cone_cast(&self, b: &ConeBatch) -> Vec<u8>;                         // R§3.4.3 vote counts (phase 2b, optional)
+pub trait Executor: Send + Sync + fmt::Debug {
+    fn name(&self) -> &'static str;
+    fn coarse_scores(&self, b: &CoarseBatch<'_>) -> Vec<f64>;   // R§5.2 and R§5.4, many poses
+    fn icp_rung(&self, b: &IcpBatch<'_>) -> Vec<Registration>;  // R§7, one rung for many candidates
+    fn bounded_distance(&self, b: &DistBatch<'_>) -> Vec<f64>;  // R§6.1, exact below `max_dist`, +inf above
+    fn inside(&self, b: &InsideBatch<'_>) -> Vec<InsideOutcome>;// R§6.4, (inside, depth) per point
 }
 ```
 
@@ -365,6 +367,34 @@ Everything else in the pipeline — hypotheses, NMS, seam/continuity via `kiddo`
 arithmetic, assembly — stays on the CPU and is written once. `Backend::Auto` picks the GPU only
 if an adapter exists, the self-test passes and its measured throughput beats the CPU by ≥ 1.5×
 (§6.8).
+
+**Built in phase 2a (task G1), with four things the original sketch did not say.**
+
+* **`cone_cast` is not in the trait.** R §3.4.3's cone belongs to preprocessing, not to matching,
+  and it has no CPU caller that would exercise the boundary; it joins the trait with the kernel
+  that needs it (phase 2b, optional).
+* **A batch carries `f64` and the CPU's own structures**, not a narrowing. E5 measured `f32` point
+  loops far outside §10.2 — the *median* stage-2 pose moves 9.8 `t` on pot G (`matching::icp`) —
+  so a batch that narrowed on formation would change what the CPU computes, and G1's contract is
+  that it must not. §6.3's device layouts (SoA `vec4<f32>`, `bytemuck::Pod`, §6.2's hash grid) are
+  produced **from** a batch by the executor that needs them, on the way to the device
+  (`CoarseBatch::device_grid`, `IcpBatch::device_inits`, `Poses::device`, …). The CPU path never
+  builds one: it searches with `kiddo`, and a grid it would not query costs `synthetic_20` real
+  seconds to prove nothing.
+* **The engine travels with the numerics.** `Engine<'e> { exec: &'e dyn Executor, numerics }` is
+  what the pipeline passes down, because §7's two knobs reach the same functions and answer the
+  same question from the other side. `pipeline::run_with` takes it; `pipeline::run` is that with
+  `Engine::REFERENCE`. `sherd-core` cannot build a `GpuExecutor` — it has no GPU dependency — so
+  the CLI resolves `--backend`, `sherd-gpu` builds the device, and the pipeline never learns which
+  of the two it is holding.
+* **Where a batch is a batch of one.** Stage 1 hands R §5.3's whole kept list to one `icp_rung`
+  per rung and one `coarse_scores` for the re-score (§6.4 step 4), and stage 2 does the same over
+  R §5.5's candidates for the two `pc_reg` rungs and then over the survivors of R §5.6's early
+  rejection for the two `pc_frac` rungs. R §9's refinement and every single-pose caller form a
+  batch of one, which the CPU executor answers without a rayon bridge. Each candidate's ladder
+  depends on nothing but its own pose, so the grouping cannot move a result — and it does not:
+  the CPU path's outputs are byte-identical to `9bf35d6`'s on all four development sets, and the
+  parity table is unchanged at 23 804 / 0.
 
 ### 6.2 Spatial structures shared by both executors
 
@@ -377,6 +407,17 @@ each cell in ascending index, keeping the nearest with `d ≤ r`; ties → lowes
 the CPU (counting sort, ≈ 50 µs for 6000 points), uploaded with the batch. Layout:
 `GridHeader { origin: vec4<f32> (w = 1/r), cap, n, pad }`, `slots: array<vec4<i32>>`
 (`ix, iy, iz, start`) + `counts: array<u32>`, `sorted_idx: array<u32>`.
+
+**Built in phase 2a** (`sherd_core::spatial::grid::HashGrid`), in `f32` because the kernels are,
+with the header carrying `1/r` rather than `r` so the kernel multiplies instead of dividing
+(Metal's division is 2 ULP, E7 §4.2) and the squared distance written out rather than a `dot`
+(`metal::dot` stays fused, E7 §4.2). Both radius conventions are provided, because D §6.2's rule is
+inclusive (`d ≤ r`) while R §5.2's bound (scipy's `distance_upper_bound`) and R §7's (FLANN's) are
+strict. **Nothing in the pipeline queries it**: the CPU searches with `kiddo` — E3 measured the
+grid at 0.4–2.0× it, never the ≥ 3× §3 hoped for — and it is built from a batch by the GPU
+executor. Its Rust traversal is the mirror `kernels/nn.wgsl` is cross-checked against, and it is
+tested against brute force in its own `f32` arithmetic on 90 000 queries over three cloud shapes,
+five radii and both conventions.
 
 **Flattened BVH** over triangles (fracture faces only, or all faces): binned SAH build on the
 CPU, leaves of ≤ 4 triangles, nodes `{ bmin: vec3, left_or_first: u32, bmax: vec3, count: u32 }`
@@ -404,6 +445,16 @@ All arrays are SoA `vec4<f32>` (xyz + spare) or `u32`, 16-byte aligned, `bytemuc
 - Uniform/unified memory (Apple): buffers are mapped-at-creation, no staging copies; discrete
   GPUs: staging via `queue.write_buffer`, readback through a mapped `MAP_READ` buffer once per
   batch. Readback volume is tiny (candidate states, scores).
+
+**Built in phase 2a:** `sherd_gpu::slots::SlotTable` is the resident set (32 slots, 400 MB,
+least-recently-used with ties to the lower slot index, a fragment larger than the budget refused
+rather than admitted after emptying the table) and holds no wgpu type, so its eviction rule is
+tested on every platform without an adapter; `sherd_gpu::buffers::{Chunking, Dispatch}` are the
+binding-cap split and the 2-D dispatch fold; `upload`/`read_back` are the two transfer paths, of
+which **only the mapped-at-creation one has ever run** — this machine has one integrated Metal
+adapter and no software fallback (E7 §6). `Chunking` has no consumer until a kernel dispatches a
+batch larger than one binding; the batch structs report `device_bytes()` so a scheduler can size
+itself against it.
 
 ### 6.4 Batch formation and the software pipeline
 
@@ -472,9 +523,20 @@ point: AABB reject → parity rays → for inside points, closest-point distance
 
 ### 6.6 Expected speedups and their basis
 
+**The GPU column of the table below rests on an assumption experiments E7 and G1 both measured as
+5–10× optimistic, and it has not been re-derived.** The basis it names — "≈ 0.5–1 G bounded NN
+queries/s on the hash grid" — is, on this Metal GPU and on this design's own grid at this design's
+own sizes, **0.105 G queries/s** (9.0–9.5 ns/query at 46 candidate points per query, equivalently
+4.9 G candidate distance tests/s); G1 re-measured 12.2–17.9 ns/query on a smaller batch and
+**3.3–6.3× the whole ten-core CPU**, against the 15–50× the table implies. The GPU still clears
+`Backend::Auto`'s 1.5× bar with room. Re-deriving the column needs `icp_rung`'s own cost, since
+the rung carries the 6×6 solve as well as the correspondence search, and that is phase 2b's
+measurement; until then read the GPU column as an upper bound that is known to be wrong by an
+order of magnitude, and the CPU column — which phase 1e measured — as the real one.
+
 Per mid-size pair (R§13 cost structure), single-thread Python core-seconds → estimated Rust CPU
 core-seconds → estimated GPU seconds (M2 Pro 16-core GPU, ≈ 0.5–1 G bounded NN queries/s on the
-hash grid, ≈ 0.1–0.2 G BVH closest-point queries/s):
+hash grid — **not what E7 measured, see above** — ≈ 0.1–0.2 G BVH closest-point queries/s):
 
 | stage | Python | Rust CPU | basis (CPU) | GPU | basis (GPU) |
 |---|---|---|---|---|---|
@@ -506,31 +568,95 @@ over the CPU path; `Backend::Auto` measures rather than assumes (§6.8).
 ### 6.7 CPU fallback with results within tolerance
 
 The CPU executor and the WGSL kernels share: data layouts, the grid/BVH traversal order, the
-per-invocation striding (`i = lane + 256·k`), and the reduction tree (256 → 128 → … → 1). With
-E7 confirming no fast-math and no FMA contraction, the two are expected to agree to a few ULPs
-per iteration and to the §10.2 tolerances after 30 iterations; the CI cross-check (§10.4)
-enforces it. The CPU path additionally offers `--precision f64` for the ICP (generic `Real`
+per-invocation striding (`i = lane + 256·k`), and the reduction tree (256 → 128 → … → 1).
+
+**E7 corrected the sentence that used to stand here** ("no fast-math and no FMA contraction …
+agree to a few ULPs"). Metal compiles every shader with fast math on and wgpu does not turn it
+off, and the team decision is to accept that rather than patch or vendor `wgpu-hal`. What is
+actually true, measured twice:
+
+* an **addition-only reduction in a fixed order is bit-identical** — the self-test asserts the 32
+  bits, not a tolerance, and reproduced `0x49a7230c` on both sides in phase 2a;
+* anything with a multiply-add is not. On the hash-grid kernel that is `max |Δd| = 2.4e-7` of a
+  unit cloud (1.3e-7 in G1's smaller sweep), 400× inside the tightest distance tolerance of
+  §10.2, with **~2.3e-6 of queries choosing a different neighbour** because two candidates are
+  within a ULP of each other and the transformed point already differs. §7's "ties → the lowest
+  index" cannot fix that, since the tie is not exact on one side. A cross-check therefore gates on
+  the *rate* and on every disagreement being a genuine near-tie, never on a count of zero.
+
+Three rules follow for every parity-critical WGSL file, and they are enforced by reading rather
+than by a lint: no `dot`/`length`/`distance`/`normalize` (`metal::dot` stays a fused chain even
+with contraction off — write the sum out, and mirror it on the CPU); no `subgroupAdd` and no
+floating-point atomics (neither has a defined order); no reliance on denormals (Apple GPUs flush
+them in hardware and no compiler option changes that). The shape of a reduction — workgroup count,
+lane stride, loop bound, tree — is *data in the batch descriptor*, never a constant on one side
+and a divide on the other. The CI cross-check (§10.4) enforces the tolerances. The CPU path additionally offers `--precision f64` for the ICP (generic `Real`
 type) as a diagnostic, not a production mode.
 
 ### 6.8 Operational GPU concerns
 
-- **Adapter selection:** `wgpu::Instance` over Metal | Vulkan | DX12 (no GL); default
-  `HighPerformance` power preference; `--gpu-adapter NAME|INDEX`; `sherd-refit info` lists
-  adapters, limits and the self-test result.
-- **Self-test at start:** the slab pair's stage-2 ICPs and verification run on CPU and GPU;
-  results must agree within §10.2; failure → warning + CPU fallback. Also measures throughput
-  for `Backend::Auto`.
-- **Limits:** request `max_storage_buffer_binding_size ≥ 256 MB` when available, else chunk at
-  128 MB; workgroup size 256 (≤ `max_compute_invocations_per_workgroup`); shared memory ≤ 16 KB
-  per workgroup (29 floats × 256 lanes = 29.7 KB → reduce in two passes of 128 lanes or use
-  `f32` pairs; design the reduction for 16 KB from the start).
-- **Timeouts:** dispatches ≤ 100 ms by construction (§6.4); `device.poll` with a watchdog; a
-  device loss mid-run falls back to the CPU for the remaining blocks and is recorded in the
-  report.
-- **Memory:** slots + batches ≤ 1 GB; on adapters reporting < 2 GB the slot count halves and
-  `P` shrinks.
-- **Precision:** f32 only (`f16`/`f64` unused); `Scales` and thresholds computed in f64 on the
-  CPU and passed as f32.
+**Built in phase 2a (task G1); the numbers below are measured on this machine, not planned.**
+`notes/2026-09-08-g1-gpu-foundation.md` carries the run.
+
+- **Adapter selection:** `wgpu::Instance` over Metal | Vulkan | DX12 (no GL: the four backend
+  features are named in `Cargo.toml`); `--gpu-adapter NAME|INDEX`, where an all-digit argument is
+  an index and anything else a case-insensitive substring of the adapter's name or backend;
+  `sherd-refit-rs info` lists adapters and `gpu-check` runs the self-test. On Metal `vendor`,
+  `device`, `driver` and `driver_info` are all empty (E7 §7.6), so a name is all `--gpu-adapter`
+  has to match on and a run report cannot record a driver version.
+- **Self-test at start (`sherd_gpu::SelfTest`), four checks:**
+  1. *limits* — the wgpu **defaults** of `Requirements`, not this adapter's own, because that is
+     what a portable build gets;
+  2. *reduction* — D §6.4's schedule over 1e7 `f32` terms (256 workgroups × 256 lanes, strided
+     accumulate, then a 256 → 1 shared-memory tree, then one pass over the partials), asserted
+     **bit-identical** to a single-threaded Rust mirror of the same WGSL. Measured
+     `0x49a7230c` on both sides;
+  3. *bounded nn* — D §6.2's hash-grid kernel on E7 §5's synthetic sheet, 64 poses × 6000 points.
+     The criterion is **not** "no neighbour differs": E7 §5.1 measured `2.3e-6` of queries picking a
+     different point in stock configuration and called it inherent, because the pose transform is
+     contracted into FMAs and the transformed point already differs. The criterion is that every
+     disagreement is a genuine near-tie (`|Δd|` within the distance tolerance), that neither side
+     found a neighbour the other missed, and that the *rate* stays under `1e-5`. Measured: 1 of
+     384 000 (2.6e-6), a tie to 1.0e-8, 0 hit/miss disagreements, `max |Δd|` 1.3e-7 against a
+     limit of 1e-6;
+  4. *throughput* — **host wall time of the dispatch alone**, `submit` + `poll(Wait)`, with the
+     pipeline built and the buffers uploaded and after a warm-up dispatch. Never timestamp
+     queries: this driver advertises `TIMESTAMP_QUERY`, resolves it without error and returns
+     nonsense (E7 §7.1). The separation is not pedantry — timing the first dispatch includes
+     Metal's shader compile and reported 197 ns/query for a kernel that runs at 14. Measured
+     **12.2–17.9 ns/query, 3.3–6.3× the whole ten-core CPU on the same batch**, which brackets
+     E7 §5's 12.2 ns at this size and its "4–5× over all ten cores".
+- **`Backend::Auto`** takes the GPU only when the self-test passes, the adapter is not a software
+  implementation of the API, the measured ratio is **≥ 1.5×**, *and* the executor has kernels.
+  The last clause is `GpuExecutor::HAS_KERNELS`, `false` until phase 2b: in phase 2a the device
+  opens, the self-test passes at 4–6× and `Auto` still runs on the CPU, saying so in one line.
+- **`--backend gpu`** opens the device and runs the self-test, and **fails** — with the adapter
+  list, the unmet limits or the failed checks — when either step fails, rather than falling back
+  silently. A macOS self-test failure means the CPU with no second opinion: there is no software
+  adapter on this platform at all (E7 §6). When it succeeds in phase 2a it says, once, that every
+  `Executor` method is routed to the CPU implementation and the results are the CPU's;
+  `report.json` records the backend the run *asked* for (D §4.3), which is the only difference
+  between a `--backend gpu` tree and a `--backend cpu` one.
+- **Limits:** the device requests `adapter.limits()` verbatim (accepted as such, E7 §2) and the
+  kernels are written to the wgpu defaults: workgroup 256, ≤ 16 KB of workgroup storage, ≤ 8
+  storage buffers per stage, 128 MB per binding. `Chunking` splits a batch to the binding cap and
+  `Dispatch` folds a grid into two dimensions past `max_compute_workgroups_per_dimension = 65535`,
+  with `wg_x` passed to every kernel as a uniform so that the CPU mirror agrees on the shape
+  (E7 §2, §3). This adapter offers 1024 lanes, 32 KB, 29 buffers and a 4 GiB binding; none of that
+  is used.
+- **Timeouts:** dispatches ≤ 100 ms by construction (§6.4); `device.poll(PollType::wait_indefinitely())`
+  with a watchdog; a device loss mid-run falls back to the CPU for the remaining blocks and is
+  recorded in the report.
+- **Memory:** slots + batches ≤ 1 GB. `SlotTable` is D §6.3's resident set — 32 slots, 400 MB,
+  least-recently-used eviction with ties to the lower slot index, a fragment larger than the whole
+  budget refused rather than admitted after emptying the table. It holds no wgpu type, so its
+  eviction rule is tested on every CI platform without an adapter. On adapters reporting < 2 GB
+  the slot count halves and `P` shrinks (`SlotTable::with_capacity`).
+- **Precision:** f32 only (`f16`/`f64` unused; `SHADER_F64` is not available on Metal anyway);
+  `Scales` and thresholds computed in f64 on the CPU and passed as f32.
+- **Untestable here, and said so rather than assumed:** the staging upload path for discrete GPUs
+  (this machine has one integrated Metal adapter and no software fallback, E7 §6), and every row
+  of E8's vendor matrix but the Metal one.
 
 ## 7. Numerical determinism
 
@@ -1227,8 +1353,15 @@ seeds each — 15 runs — not derived from the port.
 2. **Slab fixture** (`fixtures/slab/`): the synthetic slab pair from `tests/test_synthetic.py`,
    generated once by the Python and committed (≈ 6 MB); the Rust tests reproduce
    `test_synthetic.py`'s assertions (pose error ≤ 2° / 0.1 t, segmentation bounds, acceptance).
-3. **Kernel cross-checks**: every `Executor` method on random inputs and on the slab, CPU vs
-   GPU, tolerances of §10.2; run on software adapters in CI.
+3. **Kernel cross-checks**: `sherd-refit-rs gpu-check [--set DIR] --stage coarse|icp|distance|inside|all`
+   feeds identical batches to both executors and prints one row per stage — items, worst
+   deviation, §10.2's tolerance for that quantity, and the count of differing nearest-neighbour
+   choices (E7 §5.1's form) — above the self-test's own rows. Run on software adapters in CI
+   (`gpu-software` below); on a machine with no adapter it *fails* with "no GPU adapter found"
+   rather than passing silently. **In phase 2a the four stage rows come back `delegated`**, because
+   `GpuExecutor` routes every method to the CPU until 2b and 2c, and a row that printed a deviation
+   of zero would be a lie; the batches are still formed from a real collection and fed to both
+   executors, which is what exercises §6.3's formation path before the kernels exist.
 4. **Determinism**: two runs, `--threads 1` vs `N`, byte-identical `report.json` per backend.
 5. **Golden fixtures**: `sherd-refit parity` against the stored Python fixtures, injected and
    native, every stage (§10.2).
@@ -1280,6 +1413,7 @@ shorten phase 1+2 to ≈ 14 weeks because GPU work can start once the CPU ICP is
 | 1e | profiling and CPU tuning to §10.3 CPU gates | 1.5 | §10.3's CPU gates **on the development sets** — terracotta, pots A/B/C/G/H, `mixed_ABG` (a roadmap-item-4 target: its cross-object joins and group purity are **not** a phase gate, §10.3), synthetic 20 — with every output byte-identical to the one phase 1d wrote; the three large rows are carried as the projection §10.3 states and discharged at the final acceptance (decision 2026-09-07) | the 2 h collection gate is no longer measured here: E1 projects 39–44 min against it from the per-pair cost, which is a projection and not a run |
 | **phase 1 total** | | **11** | | |
 | 2a | wgpu device/adapter/self-test, buffers, slots, batch structs; E7, E8 | 1.5 | self-test passes on Metal + lavapipe | naga/driver issues |
+| 2a, task G1 | done: the `Executor` boundary made real (§6.1) with the CPU path routed through it and byte-identical, `spatial::grid`'s hash grid (§6.2), the `sherd-gpu` crate — device and `--gpu-adapter` (§6.8), buffer chunking and the 2-D dispatch fallback, the 32-slot LRU (§6.3), the self-test on E7's two kernels, `gpu-check` (§10.4 layer 3) | | reduction bit-identical (`0x49a7230c`), bounded NN 1 differing of 384 000 at `max |Δd|` 1.3e-7, 12.2–17.9 ns/query and 3.3–6.3× the ten-core CPU; CPU outputs byte-identical to `9bf35d6` on the four sets (92 files) and parity 23 804 / 0 | lavapipe and WARP are CI's to answer; the discrete-GPU staging path is untestable here (E7 §6) |
 | 2b | hash grid + `icp_rung` (both estimators, in-kernel solves), `coarse_scores` | 2.5 | CPU/GPU cross-check within §10.2 | shared-memory limits; f32 conditioning |
 | 2c | BVH kernels (`bounded_distance`, `inside`) | 1.5 | cross-check | traversal stack in WGSL |
 | 2d | scheduler, pipelining, TDR chunking, memory management | 1.5 | the GPU gates of §10.3 **on the development sets** (`mixed_ABG` included, on the same terms: it is roadmap item 4's baseline, not a quality gate), and §5's memory semaphore holding a projected 170-scan preprocessing budget (E1 §7); "synthetic 170 ≤ 30 min" is the final acceptance after phase 2, not a 2d exit (decision 2026-09-07) | overlap efficiency; a projection carried this long can be wrong in a way only the run shows |

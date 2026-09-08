@@ -172,6 +172,8 @@ fn transforms_rows(collection: &Collection, report: &mut StageReport) -> Result<
         }
         None => Vec::new(),
     };
+    // No `engine`: this value is rebuilt to be compared against the reference's own file, and
+    // D §4.3's block is the one thing in it the reference never wrote.
     let ours = report::transforms(
         &names,
         &after,
@@ -179,6 +181,7 @@ fn transforms_rows(collection: &Collection, report: &mut StageReport) -> Result<
         &order,
         thickness,
         &collection.manifest.collection.params,
+        None,
     );
     let theirs: report::Transforms = npy::read_json_as(&path)?;
 
@@ -984,6 +987,7 @@ fn native(collection: &Collection, report: &mut StageReport) -> Result<()> {
             &[],
             collection.manifest.pairs.thickness_median,
             &collection.manifest.collection.params,
+            None,
         )?;
         let back: report::Transforms = npy::read_json_as(&file)?;
         let differing = names

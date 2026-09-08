@@ -155,6 +155,7 @@ fn main() -> Result<()> {
         &assembly.order,
         thickness,
         &params,
+        Some("cpu"),
     )?;
     let rejected: Vec<(usize, String)> =
         assembly.rejected.iter().map(|r| (r.candidate, r.reason.message(&names))).collect();

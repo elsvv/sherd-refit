@@ -189,8 +189,18 @@ pub struct RunOptions {
     /// How many pairs the machine can work on at once — the reference's `workers`, and here the
     /// size of the one rayon pool. Only the pair schedule reads it.
     pub workers: usize,
-    /// Which executor ran, for `report.json`'s `engine` (D §4.3).
+    /// Which executor ran, for D §4.3's `engine` block.
+    ///
+    /// The **resolved** one: the CLI turns `--backend auto` into `Cpu` or `Gpu` before it gets
+    /// here, because a file that recorded `auto` would say nothing about the arithmetic that
+    /// produced it.
     pub backend: Backend,
+    /// The adapter's own name when the run resolved to a device, for the same block.
+    ///
+    /// D §4.3 spells the field `gpu:Apple M2 Pro`, and the reason is attribution: the two backends
+    /// agree within D §10.2 and not to the bit, so a pose that has to be explained years later
+    /// needs to name the machine and not merely "the GPU".
+    pub adapter: Option<String>,
     /// D §5 step 2's preprocessing memory budget (D §9's `--memory-budget`).
     pub memory: Budget,
     /// D §5's cancellation flag and progress callback; neither by default
@@ -210,8 +220,21 @@ impl Default for RunOptions {
             cache: true,
             workers: 0,
             backend: Backend::Cpu,
+            adapter: None,
             memory: Budget::default_for_machine(),
             watch: Watch::default(),
+        }
+    }
+}
+
+impl RunOptions {
+    /// D §4.3's `backend` field: the resolved executor, with the adapter's name when it was a
+    /// device — `cpu`, or `gpu:Apple M2 Pro`.
+    #[must_use]
+    pub fn backend_label(&self) -> String {
+        match &self.adapter {
+            Some(name) => format!("{}:{name}", self.backend.as_str()),
+            None => self.backend.as_str().to_owned(),
         }
     }
 }
@@ -292,8 +315,9 @@ pub fn run(input: &Path, out_dir: &Path, options: &RunOptions) -> Result<RunSumm
 ///
 /// `sherd-core` has no GPU dependency and cannot build a `GpuExecutor`, so the executor is handed
 /// in: the CLI resolves `--backend`, `sherd-gpu` builds the device, and the pipeline never learns
-/// which of the two it is holding. `options.backend` is what the run *asked* for and is what
-/// `report.json` records; `engine.exec` is what it got.
+/// which of the two it is holding. `options.backend` is what the CLI *resolved* `--backend` to,
+/// and with `options.adapter` it is what both output files record (D §4.3); `engine.exec` is the
+/// executor those batches actually go to.
 #[allow(clippy::too_many_lines, reason = "the reference's `pipeline.run`, stage for stage")]
 pub fn run_with(
     input: &Path,
@@ -508,9 +532,10 @@ pub fn run_with(
         &assembly.order,
         thickness,
         params,
+        Some(&options.backend_label()),
     )?;
     written.push(out_dir.join("transforms.json"));
-    write_report(out_dir, &stats, thickness, &outcome, &timings, params, options.backend.as_str())?;
+    write_report(out_dir, &stats, thickness, &outcome, &timings, params, &options.backend_label())?;
     written.push(out_dir.join("report.json"));
     written.push(out_dir.join("report.md"));
     if options.write_meshes {

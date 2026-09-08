@@ -120,12 +120,14 @@ pub(crate) fn selftest_lines(adapter: Option<&str>) -> Vec<String> {
 /// sentence to log.
 #[derive(Debug)]
 pub(crate) struct Resolved {
-    /// The backend `report.json` records (D §4.3) — what the run asked for, resolved.
+    /// The backend both output files record (D §4.3) — `--backend` **resolved**, never `auto`.
     pub(crate) backend: Backend,
     /// The executor the pipeline actually runs on, and D §7's numerics.
     pub(crate) engine: Engine<'static>,
     /// One sentence naming the deciding fact, for the log and for `--verbose`.
     pub(crate) reason: String,
+    /// The adapter's own name when a device was opened and kept, for D §4.3's `backend` field.
+    pub(crate) adapter: Option<String>,
     /// The GPU executor, when one was built — so that a run can print how much of it was used.
     #[cfg(feature = "gpu")]
     pub(crate) executor: Option<&'static sherd_gpu::GpuExecutor>,
@@ -209,6 +211,7 @@ pub(crate) fn resolve(
             backend: Backend::Cpu,
             engine: Engine::REFERENCE,
             reason: "--backend cpu".to_owned(),
+            adapter: None,
             executor: None,
         });
     }
@@ -257,12 +260,14 @@ pub(crate) fn resolve(
                 sherd_gpu::selftest::STAGE_SPEEDUP.0,
                 sherd_gpu::selftest::STAGE_SPEEDUP.1,
             );
+            let name = test.adapter.name.clone();
             let executor: &'static GpuExecutor =
                 Box::leak(Box::new(GpuExecutor::new(Arc::new(gpu), test)));
             Ok(Resolved {
                 backend: Backend::Gpu,
                 engine: Engine::new(executor, Numerics::default()),
                 reason,
+                adapter: Some(name),
                 executor: Some(executor),
             })
         }
@@ -272,6 +277,7 @@ pub(crate) fn resolve(
             backend: Backend::Cpu,
             engine: Engine::REFERENCE,
             reason: Selection::no_gpu(&e).reason,
+            adapter: None,
             executor: None,
         }),
         (_, Ok((gpu, test))) => {
@@ -282,16 +288,19 @@ pub(crate) fn resolve(
                     backend: Backend::Cpu,
                     engine: Engine::REFERENCE,
                     reason: selection.reason,
+                    adapter: None,
                     executor: None,
                 });
             }
             let test = selection.selftest.expect("a GPU selection carries its self-test");
+            let name = test.adapter.name.clone();
             let executor: &'static GpuExecutor =
                 Box::leak(Box::new(GpuExecutor::new(Arc::new(gpu), test)));
             Ok(Resolved {
                 backend: Backend::Gpu,
                 engine: Engine::new(executor, Numerics::default()),
                 reason: selection.reason,
+                adapter: Some(name),
                 executor: Some(executor),
             })
         }
@@ -319,6 +328,7 @@ pub(crate) fn resolve(
             backend: Backend::Cpu,
             engine: Engine::REFERENCE,
             reason: "built without the `gpu` feature".to_owned(),
+            adapter: None,
         }),
     }
 }

@@ -110,6 +110,15 @@ pub use vec3::Vec3f;
 /// key of `report.json` (D §4.3).
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The commit of this repository the binary was built from, or `"unknown"` when it was built
+/// outside a git checkout (D §4.3, `build.rs`).
+///
+/// The three version constants beside it move once a release, once an algorithm change and once a
+/// cache-layout change; between those, this is the only field that tells two builds apart. It is
+/// stamped at compile time, so it names the tree that produced the binary and not the directory
+/// the binary is standing in.
+pub const GIT_COMMIT: &str = env!("SHERD_GIT_COMMIT");
+
 /// The frozen algorithm this port reproduces: the date of the algorithm reference and the commit
 /// of the Python it was written from (D §4.3). Any algorithmic change bumps this string and
 /// invalidates every cache file that carries an older one.

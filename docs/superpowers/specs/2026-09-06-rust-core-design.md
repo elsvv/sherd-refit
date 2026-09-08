@@ -275,9 +275,36 @@ pointed at Rust caches during the transition; the reverse (Rust reading `.npz`) 
 
 `algo_ref` names the frozen algorithm; any algorithmic change bumps it and invalidates caches.
 `cache_version` covers the file layout. `core_version` is informational. Reports carry all
-three plus the git commit and the backend used (`"engine": {"core": "...", "algo_ref": "...", "backend": "gpu:Apple M2 Pro"}`),
-added as a new top-level key in `report.json` and `transforms.json` (additive; the Python
-readers ignore unknown keys).
+three plus the git commit and the backend used, as a new top-level `engine` key in **both**
+`report.json` and `transforms.json` (additive; the Python readers ignore unknown keys).
+
+**Written out in full, because task W found four of the five fields missing or wrong** (V6-D7 —
+the key was `core_version` alone, there was no commit and no adapter name, and `transforms.json`
+carried no block at all):
+
+```json
+"engine": {
+  "core_version": "0.1.0",
+  "algo_ref": "2026-09-06/9d4b9d3",
+  "cache_version": 5,
+  "commit": "55238b111ccb194915d466b8e32df9f158aac092",
+  "backend": "gpu:Apple M2 Pro"
+}
+```
+
+* `commit` is stamped **at build time** by `crates/sherd-core/build.rs`, and is `"unknown"` when
+  the crate is built outside a git checkout — a source tarball, a vendored crate, a CI export.
+  Reading it at run time would report whichever repository the binary happened to be standing in.
+  It claims `HEAD` at compile time and does not claim the tree was clean: a build script cannot
+  see an edit in another crate without being re-run by it, so a `-dirty` suffix would be a promise
+  it could not keep. `info` prints the same field.
+* `backend` is the **resolved** executor, never `auto`: a file that recorded `auto` would say
+  nothing about the arithmetic that produced it. With a device it carries the adapter's own name,
+  which is what makes a GPU-side deviation attributable to a machine rather than to "the GPU".
+* Both files carry it because both are read downstream. The poses a tool applies live in
+  `transforms.json`, and "which build produced them, on which backend" belongs beside them.
+* It is the one key the port adds to R §11's schema, and `sherd-parity`'s `outputs` stage skips it
+  by name on both sides, so the byte-level comparison against the reference is unaffected.
 
 ## 5. Pipeline and threading model
 
@@ -868,8 +895,11 @@ type) as a diagnostic, not a production mode.
   silently. A macOS self-test failure means the CPU with no second opinion: there is no software
   adapter on this platform at all (E7 §6). When it succeeds in phase 2a it says, once, that every
   `Executor` method is routed to the CPU implementation and the results are the CPU's;
-  `report.json` records the backend the run *asked* for (D §4.3), which is the only difference
-  between a `--backend gpu` tree and a `--backend cpu` one.
+  `report.json` and `transforms.json` record the backend the run **resolved to** (§4.3) — never
+  `auto`, and with the adapter's own name when it was a device — which is the only structural
+  difference between a `--backend gpu` tree and a `--backend cpu` one. *This sentence used to say
+  "the backend the run asked for", which is neither what §4.3 asks for nor what the code did*
+  (V6-D7).
 - **Limits:** the device requests `adapter.limits()` verbatim (accepted as such, E7 §2) and the
   kernels are written to the wgpu defaults: workgroup 256, ≤ 16 KB of workgroup storage, ≤ 8
   storage buffers per stage, 128 MB per binding. `Chunking` splits a batch to the binding cap and

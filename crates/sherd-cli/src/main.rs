@@ -21,7 +21,9 @@ use clap::{Args, Parser, Subcommand};
 use sherd_core::fragment::cache;
 use sherd_core::matching::icp::{Assembly, Numerics, Precision};
 use sherd_core::memory::Budget;
-use sherd_core::{ALGO_REF, Backend, CACHE_VERSION, CORE_VERSION, Params, collection, pipeline};
+use sherd_core::{
+    ALGO_REF, Backend, CACHE_VERSION, CORE_VERSION, GIT_COMMIT, Params, collection, pipeline,
+};
 use sherd_parity::FixtureDir;
 use sherd_parity::report::{Mode, StageReport};
 use sherd_parity::stages::{Collection, Stage};
@@ -514,6 +516,9 @@ fn info(args: &InfoArgs) {
     println!("sherd-refit-rs {CORE_VERSION}");
     println!("  algorithm reference: {ALGO_REF}");
     println!("  cache version:       {CACHE_VERSION}");
+    // The same four fields every report's `engine` block carries (D §4.3), so that a file and the
+    // binary that wrote it can be matched up without reading JSON.
+    println!("  git commit:          {GIT_COMMIT}");
     let mut backends = gpu::info_lines().into_iter();
     println!("  backends:            {}", backends.next().unwrap_or_default());
     for line in backends {
@@ -698,6 +703,7 @@ fn run(args: &RunArgs) -> Result<()> {
         cache: !args.no_cache,
         workers: schedule_workers(args.workers),
         backend: resolved.backend,
+        adapter: resolved.adapter.clone(),
         memory: budget(args.memory_budget),
         watch: watch_signals(),
     };
@@ -766,6 +772,7 @@ fn bench(args: &BenchArgs) -> Result<()> {
         cache: !args.no_cache,
         workers: schedule_workers(args.workers),
         backend: resolved.backend,
+        adapter: resolved.adapter.clone(),
         ..pipeline::RunOptions::default()
     };
     let started = std::time::Instant::now();

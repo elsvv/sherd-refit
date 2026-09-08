@@ -2,8 +2,9 @@
 //!
 //! Same file names, same JSON keys and the same section order as the reference, so that
 //! `tools/evaluate.py` scores a Rust run without knowing which implementation wrote it, plus the
-//! additive `engine` key that records `core_version`, `algo_ref` and the backend that actually ran
-//! (D §4.3); the Python readers ignore keys they do not know.
+//! additive `engine` key of D §4.3 — the three version constants, the git commit of the build and
+//! the backend that actually ran, in **both** `transforms.json` and `report.json`; the Python
+//! readers ignore keys they do not know.
 //!
 //! Three things are worth saying about the fidelity of each file.
 //!
@@ -41,7 +42,7 @@ use crate::memory::{self, Budget, MemorySemaphore, reservation};
 use crate::mesh::Mesh;
 use crate::params::Params;
 use crate::types::{FragId, apply_transform_fused};
-use crate::{ALGO_REF, CORE_VERSION};
+use crate::{ALGO_REF, CACHE_VERSION, CORE_VERSION, GIT_COMMIT};
 
 /// A JSON object that keeps the order it was built in.
 ///
@@ -256,6 +257,15 @@ pub struct Transforms {
     pub fragments: Ordered<Placement>,
     /// The groups, as name lists, in R §8's final order.
     pub groups: Vec<Vec<String>>,
+    /// Which build wrote the file (D §4.3; not in the reference).
+    ///
+    /// The poses in this file are the ones a downstream tool applies, so "which build produced
+    /// them, on which backend" belongs here as much as it does in `report.json` — D §4.3 names
+    /// both files and only `report.json` had it (V6-D7). Absent from a file the reference wrote,
+    /// which is why it is optional on the way in, and last in the struct so that R §11.1's own
+    /// four keys keep their order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<Engine>,
 }
 
 /// One candidate as `report.json` writes it: the reference's `Candidate.to_json()`.
@@ -300,23 +310,41 @@ impl CandidateJson {
     }
 }
 
-/// D §4.3's additive block: which build wrote the file.
+/// D §4.3's additive block: which build wrote the file, and what it ran on.
+///
+/// D §4.3 asks for "all three plus the git commit and the backend used", in `report.json` **and**
+/// `transforms.json`. All five are here, and each answers a question the others cannot (V6-D7).
+///
+/// * `core_version` moves once a release, `algo_ref` once the algorithm changes and
+///   `cache_version` once the cache layout does — so between those three nothing distinguishes two
+///   builds, which is what `commit` is for. It is `"unknown"` outside a git checkout.
+/// * `backend` is the **resolved** executor, not what `--backend` asked for: `auto` never appears
+///   here, because a file that says `auto` says nothing about the arithmetic that produced it.
+///   With a device it carries the adapter's own name — `gpu:Apple M2 Pro` — which is the field
+///   that makes a GPU-side deviation attributable to a machine rather than to "the GPU".
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Engine {
     /// `sherd-core`'s crate version.
     pub core_version: String,
     /// The frozen algorithm this port reproduces.
     pub algo_ref: String,
-    /// The executor that ran.
+    /// The layout version of the fragment caches this build reads and writes.
+    pub cache_version: u32,
+    /// The commit this binary was built from, or `"unknown"`.
+    pub commit: String,
+    /// The executor that ran, with the adapter's name when it was a device.
     pub backend: String,
 }
 
 impl Engine {
-    /// The block for a run on `backend`.
+    /// The block for a run on `backend`, which is already resolved and already carries its
+    /// adapter (see [`Backend::label`](crate::executor::Backend::label)).
     pub fn of(backend: &str) -> Self {
         Self {
             core_version: CORE_VERSION.to_owned(),
             algo_ref: ALGO_REF.to_owned(),
+            cache_version: CACHE_VERSION,
+            commit: GIT_COMMIT.to_owned(),
             backend: backend.to_owned(),
         }
     }
@@ -375,6 +403,9 @@ pub fn rows(m: &Matrix4<f64>) -> [[f64; 4]; 4] {
 /// the seed's two fragments, then every placement in the order it happened, then the singletons in
 /// collection order ([`Assembly::order`](crate::assembly::Assembly::order)). Anything `order`
 /// leaves out follows in collection order.
+/// `backend` is the resolved executor's label (D §4.3); `None` writes no `engine` key, which is
+/// what a harness rebuilding the file for a comparison wants.
+#[allow(clippy::too_many_arguments, reason = "R §11.1's four keys, plus how they were produced")]
 pub fn write_transforms(
     path: impl AsRef<Path>,
     names: &[String],
@@ -383,11 +414,13 @@ pub fn write_transforms(
     order: &[FragId],
     thickness: f64,
     params: &Params,
+    backend: Option<&str>,
 ) -> Result<()> {
-    write_json(path.as_ref(), &transforms(names, poses, groups, order, thickness, params))
+    write_json(path.as_ref(), &transforms(names, poses, groups, order, thickness, params, backend))
 }
 
 /// The value [`write_transforms`] serialises, for callers that want it in memory.
+#[allow(clippy::too_many_arguments, reason = "R §11.1's four keys, plus how they were produced")]
 pub fn transforms(
     names: &[String],
     poses: &[Matrix4<f64>],
@@ -395,6 +428,7 @@ pub fn transforms(
     order: &[FragId],
     thickness: f64,
     params: &Params,
+    backend: Option<&str>,
 ) -> Transforms {
     let mut group_of = vec![0_usize; names.len()];
     let mut placed = vec![false; names.len()];
@@ -426,6 +460,7 @@ pub fn transforms(
             .iter()
             .map(|g| g.iter().map(|&n| names[n as usize].clone()).collect())
             .collect(),
+        engine: backend.map(Engine::of),
     }
 }
 
@@ -897,7 +932,15 @@ mod tests {
         let groups = vec![vec![0_u32, 1], vec![2]];
         // R §8's insertion order: the seed's two, then the singleton — deliberately not the
         // collection order, so that the file's own key order is the thing under test.
-        let value = transforms(&names(), &poses, &groups, &[1, 0, 2], 3.75, &Params::default());
+        let value = transforms(
+            &names(),
+            &poses,
+            &groups,
+            &[1, 0, 2],
+            3.75,
+            &Params::default(),
+            Some("gpu:Apple M2 Pro"),
+        );
         assert_eq!(value.fragments.keys().collect::<Vec<&str>>(), ["two", "one", "three"]);
         let text = serde_json::to_string(&value).expect("transforms serialise");
         let back: Transforms = serde_json::from_str(&text).expect("transforms parse");
@@ -913,6 +956,29 @@ mod tests {
         assert_eq!(
             back.fragments["three"].matrix[3].map(f64::to_bits),
             [0.0_f64, 0.0, 0.0, 1.0].map(f64::to_bits)
+        );
+
+        // D §4.3's block, in this file as well as in `report.json` (V6-D7): the resolved backend
+        // with its adapter, and every version this build carries.
+        let engine = back.engine.expect("transforms.json carries D §4.3's engine block");
+        assert_eq!(engine.backend, "gpu:Apple M2 Pro");
+        assert_eq!(engine.algo_ref, crate::ALGO_REF);
+        assert_eq!(engine.core_version, crate::CORE_VERSION);
+        assert_eq!(engine.cache_version, crate::CACHE_VERSION);
+        assert_eq!(engine.commit, crate::GIT_COMMIT);
+        // A file the *reference* wrote has no `engine`, and this type has to read those too.
+        let without = serde_json::json!({
+            "thickness": 1.0,
+            "params": Params::default(),
+            "fragments": {},
+            "groups": [],
+        });
+        let back: Transforms =
+            serde_json::from_value(without).expect("a reference file parses without `engine`");
+        assert!(back.engine.is_none());
+        assert!(
+            !serde_json::to_string(&back).expect("serialise").contains("engine"),
+            "and comes back out without one",
         );
     }
 
@@ -990,6 +1056,9 @@ mod tests {
         assert_eq!(value["candidates"].as_array().expect("candidates").len(), 3);
         assert_eq!(value["engine"]["backend"], "cpu");
         assert_eq!(value["engine"]["algo_ref"], crate::ALGO_REF);
+        assert_eq!(value["engine"]["core_version"], crate::CORE_VERSION);
+        assert_eq!(value["engine"]["cache_version"], crate::CACHE_VERSION);
+        assert_eq!(value["engine"]["commit"], crate::GIT_COMMIT);
 
         // And it parses back into the typed form the harness reads.
         let back: ReportJson = serde_json::from_str(&text).expect("report round-trips");

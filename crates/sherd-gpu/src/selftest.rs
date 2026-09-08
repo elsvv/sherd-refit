@@ -19,6 +19,14 @@
 //! * **An explicit `BindGroupLayout` and `PipelineLayout`, never `get_bind_group_layout`.** Auto
 //!   layouts are exclusive to one pipeline and only contain the bindings that entry point uses
 //!   (E7 §7.3).
+//! * **The throughput row is only meaningful in a release build.** The GPU side is a compiled
+//!   kernel either way, while the CPU side is `sherd-core` — a workspace member, so `-O0` in a
+//!   debug build (the `opt-level = 2` of `[profile.dev.package."*"]` covers dependencies, not
+//!   members). Measured on this machine: 22.8 ms release against 131.2 ms debug for the same
+//!   384 000 queries, i.e. a ratio of 4.2× or 12.6× depending only on how the *CPU* was compiled.
+//!   `Backend::Auto` therefore decides on what the release binary measures; a debug run will
+//!   over-report the GPU, and the row prints both wall times so that is visible rather than
+//!   hidden inside the ratio.
 //! * **A failure here means the CPU with no second opinion.** This machine exposes one Metal
 //!   adapter and no software fallback of any kind (E7 §6), so there is no third implementation to
 //!   break the tie. The report says which check failed, and by how much.

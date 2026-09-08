@@ -416,6 +416,14 @@ struct BenchArgs {
     /// Neither read nor write the fragment cache; D §10.3's gates are stated for a warm one.
     #[arg(long)]
     no_cache: bool,
+    /// Executor: `auto`, `cpu` or `gpu` (D §6.8). D §10.3's GPU gates are phase 2d's, and this is
+    /// the flag they will be measured with; `gpu` fails rather than falling back, so a timing
+    /// cannot be attributed to the wrong backend.
+    #[arg(long, default_value_t = Backend::Cpu)]
+    backend: Backend,
+    /// Which GPU adapter to use, by index or by a substring of its name (D §9).
+    #[arg(long, value_name = "NAME|INDEX")]
+    gpu_adapter: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -647,17 +655,21 @@ fn bench(args: &BenchArgs) -> Result<()> {
     if let Err(e) = pipeline::set_threads(threads) {
         bail!("--threads {threads}: {e}");
     }
+    // As on `run`, and for the same reason: the self-test times a rayon batch, and a rayon call
+    // initialises the global pool at its default size.
+    let resolved = gpu::resolve(args.backend, args.gpu_adapter.as_deref())?;
+    tracing::info!(backend = %resolved.backend, "{}", resolved.reason);
     let options = pipeline::RunOptions {
         target_faces: args.target_faces as usize,
         preview: false,
         write_meshes: args.meshes,
         cache: !args.no_cache,
         workers: schedule_workers(args.workers),
-        backend: Backend::Cpu,
+        backend: resolved.backend,
         ..pipeline::RunOptions::default()
     };
     let started = std::time::Instant::now();
-    let summary = pipeline::run(&args.input, &args.out, &options)
+    let summary = pipeline::run_with(&args.input, &args.out, &options, resolved.engine)
         .with_context(|| format!("timing {}", args.input.display()))?;
     let wall = started.elapsed().as_secs_f64();
     println!(

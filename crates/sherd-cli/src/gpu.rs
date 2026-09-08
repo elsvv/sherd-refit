@@ -34,10 +34,18 @@ pub(crate) fn info_lines() -> Vec<String> {
                     .to_owned(),
             ];
         }
+        // Which of D §6.1's four methods have a kernel is the thing an operator reading `info`
+        // wants, and it is not the same question as "is there an adapter".
         let mut lines = vec![format!(
-            "cpu, gpu (wgpu 30.0.1, {} adapter{}; kernels arrive in phase 2b)",
+            "cpu, gpu (wgpu 30.0.1, {} adapter{}; {})",
             adapters.len(),
-            if adapters.len() == 1 { "" } else { "s" }
+            if adapters.len() == 1 { "" } else { "s" },
+            if sherd_gpu::GpuExecutor::HAS_KERNELS {
+                "R §5.2's coarse score and R §7's ICP rung on the device, R §6's two methods on \
+                 the CPU (phase 2c)"
+            } else {
+                "no kernels yet"
+            }
         )];
         lines.extend(adapters.iter().map(|a| format!("  {a}")));
         lines

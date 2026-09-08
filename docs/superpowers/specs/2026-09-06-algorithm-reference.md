@@ -1157,6 +1157,73 @@ and the points moved by `apply_transform_fused`, the `assembly` row's `recentre`
 compares the port's §8.2 against the reference's own `transforms.json`, is **exactly 0** on all
 eight dumps where it stood at 7.0e-13 t.
 
+**2026-09-08, task Z — the second `column_mean` call site, and the three filters task E2 put in
+front of R §3.5, §5.2 and §6 (V5-D7).** §12.1's rule, from task X: anything the port does
+differently that is not on §12 or here is an undeclared deviation, however small its measured
+effect. Four such changes were made in phase 1e while both notes stated that R was untouched.
+
+**The mean of `render::principal_axes`.** Task Y's addendum above records `column_mean` for §8.2
+alone; step Y4 changed the same summation in the renderer's own PCA, where the reference computes
+`X = V - V.mean(0)` over a C-contiguous `(N, 3)` array (`render.principal_views`) — the same shape
+and the same reduction as §8.2's, so the same measurement covers it: `a.mean(0)` of such an array
+is bit-identical to a left-to-right accumulation per column and up to 8 ULP from the pairwise form
+the port used before. The call site is inside PMC-10's own licence, since the eigenvector signs are
+library-defined either way, and D §10.2's `outputs` `axis` row is what measures it: fed the
+**reference's own** preview points at the reference's own poses, the angle between the port's first
+principal axis and the reference's own first view is **0.000° on seven of the eight dumps and
+8.5e-7° on pot_C**, against a gate of 1°. `XᵀX` is still accumulated per entry with `pairwise_sum`,
+which is neither the reference's blocked `dgemm` nor anything numpy does for this shape; that
+remains PMC-10's, and the row above is what bounds it.
+
+**Three filters in front of bounded queries (task E2).** None of the three answers a query, resolves
+a tie or changes an array the algorithm reads out; each is licensed by the same argument the
+task-X addendum gives for the bounded search itself, and each has its own proof. They are recorded
+here because they are on the critical path of §5.2, §6.2, §6.3, §7 and §3.5 and because the port's
+arithmetic, not only its speed, is what this document is the licence for.
+
+* **A bounding-box reject in front of every bounded query** (`spatial/kdtree.rs::beyond_the_box`,
+  commit `f5f25a2`). `PointTree` carries the cloud's box and tests it before the traversal: every
+  point of the cloud is inside the box, so the distance from the query to the box is a lower bound
+  on the distance to any of them, and a box further than the radius means there is nothing to find.
+  The argument holds whatever the tie rules are, because the filter never resolves a tie — a query
+  it lets through is answered by exactly the code that answered it before — and the comparison is
+  widened by `16 ε` so that the *true* box distance clears the radius even if every rounding in it
+  went the other way, which makes the filter reject slightly less often than it could and never
+  once too often. Test:
+  `the_box_filter_never_rejects_a_neighbour_the_traversal_would_have_found`, 400 queries walking
+  onto the box and 2 000 random ones at four radii each, including the exact distance and one ULP
+  either side. It sits inside every bounded query in the port: §5.2, §5.4's re-score, §6.2's seam,
+  §6.3's continuity, §7's correspondence search and §3.4's ball queries.
+* **`spatial::grid::NearMask` as a near mask in front of §5.2** (`matching/coarse.rs`, commit
+  `114455a`). One dilated bit per cell of a ≤ 64³ grid over A's breakline, built once per pair:
+  `may_be_near` returns `false` **only** when nothing is within the radius, and `true` means "ask
+  the tree", so `agreeing` falls through to the same `nearest_below` and computes the same count.
+  A cell is never narrower than the radius and the mask is dilated once at build time, so a
+  neighbour within the radius is inside the query cell's own 3×3×3 block; a query outside the grid
+  is clamped to the boundary cell, whose block is a superset of the true one, so clamping only ever
+  makes the answer more permissive. Test: `the_mask_never_hides_a_neighbour`, 60 000 queries over
+  three cloud shapes — random, a curve, a plane — at five radii from a twentieth of a cell to
+  larger than the cloud.
+* **The two bounded centroid sweeps of §3.5** (`fragment/breakline.rs`, `fragment/samples.rs`,
+  commit `77ce026`). This one is **not** the same class, and the distinction is the reason it is
+  written out here: it does not filter a query, it changes an *array*. §3.5.4's `distance` and
+  §3.5.6's `d_brk` now hold `∞` wherever the true distance is at or beyond the one threshold that
+  reads them — `nearest_below(q, r)` answers `Some(d)` exactly when `d < r` — so the equality is of
+  the **predicates** `distance[i] >= 0.15 t` and `0.12 t < d_brk[i] < 1.5 t`, not of the arrays.
+  Nothing else in the port reads either array. Both halves are gated: the injected `breakline` row
+  compares `ns`/`nf`, which read `distance` only through that predicate, and D §10.2's `samples`
+  row gains a `margin bound` check in task Z that compares the bounded array against the unbounded
+  one directly — bit for bit below the bound, `∞` at or above it — measured **0 differing of
+  1 360 000 entries** on the eight dumps in each mode (V5-D5). The unit test is
+  `the_bounded_breakline_distance_is_the_exact_one_under_its_bound`, 2 000 queries at five bounds
+  against the exact sweep.
+
+The empirical check that covers all four at once is task E2's own and the phase-1e verification
+re-derived it against a freshly built phase-1d binary: **70 output files on three collections —
+35 `cache/*.sherd` rebuilt cold through the box and both bounded sweeps, 15 `placed/*.ply`, 3
+merged meshes, 8 PNGs and 3 `transforms.json` — 64 byte-identical outright and the six
+`report.json`/`report.md` identical once the wall clock is taken out** (`notes/2026-09-07-phase1e-verification.md` §5.2).
+
 ## 13. Reference results and parity gates
 
 Numbers the port must reproduce on the benchmark sets, with the defaults above (from the notes

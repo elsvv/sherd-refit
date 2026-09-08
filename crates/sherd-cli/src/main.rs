@@ -81,7 +81,8 @@ struct RunArgs {
     #[arg(long)]
     workers: Option<usize>,
     /// Threads per matching worker. One process here, so this sizes the same pool `--workers`
-    /// does and wins when both are given (default: one per core).
+    /// does and wins when both are given (default: one per core minus one, the same number
+    /// `--workers` defaults to and the one `cli.py` resolves an unset flag to).
     #[arg(long)]
     threads: Option<usize>,
     /// Candidates refined with full ICP per pair.
@@ -222,7 +223,7 @@ struct SegmentArgs {
     #[arg(long)]
     workers: Option<usize>,
     /// Worker threads. One process here, so this sizes the same pool `--workers` does and wins
-    /// when both are given; 0 means one per core.
+    /// when both are given (default: one per core minus one; an explicit 0 means one per core).
     #[arg(long)]
     threads: Option<usize>,
     /// Recompute every fragment and overwrite its cache, even when the cache is valid.
@@ -243,6 +244,25 @@ struct SegmentArgs {
 /// a machine with a known-good amount of memory and a very large scan wants.
 fn budget(gb: Option<f64>) -> Budget {
     gb.map_or_else(Budget::default_for_machine, Budget::gigabytes)
+}
+
+/// The size of the one `rayon` pool (D §5), from `--threads` and `--workers` as every subcommand
+/// resolves them.
+///
+/// `--threads` is the port's own flag and wins; `--workers` is the reference's process count and
+/// sizes the pool when it is the only one given; an unset pair is `cli.py`'s own
+/// `max(1, cpu_count() - 1)`. `run`, `segment` and `bench` share this function rather than three
+/// copies of the same two lines, because two of the three copies had already drifted apart
+/// (V4-D8 on `run` and `segment`, V5-D3 on `bench`).
+fn pool_threads(threads: Option<usize>, workers: Option<usize>) -> usize {
+    threads.or(workers).unwrap_or_else(pipeline::default_workers)
+}
+
+/// R §4.2's block schedule, which reads `--workers` alone: `block_size(workers, n_pairs)` decides
+/// whether the pairs are walked one at a time or in 3×3 blocks, so an unset flag has to resolve to
+/// the reference's own number and not to the machine's core count.
+fn schedule_workers(workers: Option<usize>) -> usize {
+    workers.unwrap_or_else(pipeline::default_workers)
 }
 
 /// Arguments of `parity`.
@@ -315,6 +335,13 @@ impl ParityArgs {
 }
 
 /// Arguments of `bench`: a run with the previews and the meshes off, timed against D §10.3.
+///
+/// `--workers` and `--threads` mean here exactly what they mean on `run`, and are resolved by the
+/// same two lines. They used not to be (V5-D3): `bench` passed `threads.unwrap_or(0)` to the pool
+/// and `workers: 0` to the pipeline, so an unset flag gave it ten threads and a block schedule
+/// computed at ten where `run` uses nine. No result of the eight development sets moves —
+/// `block_size(9, n) == block_size(10, n)` on every one of their pair counts — but the tool D §10.3
+/// names for its gates has to be the tool that produced its numbers.
 #[derive(Debug, Args)]
 struct BenchArgs {
     /// Directory of fragment files to time the pipeline on.
@@ -325,7 +352,12 @@ struct BenchArgs {
     /// Working-mesh face budget per fragment.
     #[arg(long, default_value_t = 200_000)]
     target_faces: u32,
-    /// Worker threads; unset means one per core.
+    /// Parallel workers, as on `run`: the reference's process count, which also fixes R §4.2's
+    /// block schedule (default: one per core minus one, `cli.py`'s own default).
+    #[arg(long)]
+    workers: Option<usize>,
+    /// Threads per matching worker, as on `run`: one process here, so this sizes the same pool
+    /// `--workers` does and wins when both are given (default: one per core minus one).
     #[arg(long)]
     threads: Option<usize>,
     /// D §10.3's wall-clock gate for this set, in seconds; without it the timings are only
@@ -381,7 +413,7 @@ fn info() {
 /// R §3.1–3.5 for a whole collection, with the cache of R §3.7 (plan steps S4, B1, B2 and B3).
 #[allow(clippy::cast_precision_loss, reason = "counts printed in a table")]
 fn segment(args: &SegmentArgs) -> Result<()> {
-    let threads = args.threads.or(args.workers).unwrap_or_else(pipeline::default_workers);
+    let threads = pool_threads(args.threads, args.workers);
     if let Err(e) = pipeline::set_threads(threads) {
         bail!("--threads {threads}: {e}");
     }
@@ -492,7 +524,7 @@ fn run(args: &RunArgs) -> Result<()> {
         );
     }
     let backend = resolve_backend(args.backend)?;
-    let threads = args.threads.or(args.workers).unwrap_or_else(pipeline::default_workers);
+    let threads = pool_threads(args.threads, args.workers);
     if let Err(e) = pipeline::set_threads(threads) {
         bail!("--threads {threads}: {e}");
     }
@@ -504,7 +536,7 @@ fn run(args: &RunArgs) -> Result<()> {
         refine: !args.no_refine,
         write_meshes: !args.no_meshes,
         cache: !args.no_cache,
-        workers: args.workers.unwrap_or_else(pipeline::default_workers),
+        workers: schedule_workers(args.workers),
         backend,
         memory: budget(args.memory_budget),
     };
@@ -551,15 +583,17 @@ fn run(args: &RunArgs) -> Result<()> {
 
 /// D §10.3's timing gate: a run with the previews and the meshes off, timed stage by stage.
 fn bench(args: &BenchArgs) -> Result<()> {
-    if let Err(e) = pipeline::set_threads(args.threads.unwrap_or(0)) {
-        bail!("--threads: {e}");
+    // The two functions `run` uses, so that the timed run is the run (V5-D3).
+    let threads = pool_threads(args.threads, args.workers);
+    if let Err(e) = pipeline::set_threads(threads) {
+        bail!("--threads {threads}: {e}");
     }
     let options = pipeline::RunOptions {
         target_faces: args.target_faces as usize,
         preview: false,
         write_meshes: args.meshes,
         cache: !args.no_cache,
-        workers: 0,
+        workers: schedule_workers(args.workers),
         backend: Backend::Cpu,
         ..pipeline::RunOptions::default()
     };
@@ -735,7 +769,7 @@ fn requested_stages(requested: &[String]) -> Result<Vec<Stage>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Backend, Cli, Params, requested_stages};
+    use super::{Backend, Cli, Params, pipeline, pool_threads, requested_stages, schedule_workers};
     use clap::{CommandFactory, Parser};
     use sherd_parity::stages::Stage;
 
@@ -812,6 +846,46 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// `bench` resolves `--workers` and `--threads` exactly as `run` does (V5-D3).
+    ///
+    /// The two flags decide two different things — the pool's size and R §4.2's block schedule —
+    /// and `bench` used to resolve neither: it passed `threads.unwrap_or(0)` to the pool, which
+    /// rayon reads as one thread per core, and a literal `workers: 0` to the pipeline, which
+    /// `pipeline::run` reads as `rayon::current_num_threads()`. Both came out ten on this machine
+    /// where `run` uses nine. D §10.3 states its gates for `bench`, so the tool that reports them
+    /// has to schedule the pairs the way the tool that is being timed does.
+    #[test]
+    fn bench_resolves_the_two_flags_the_way_run_does() {
+        let cli = Cli::try_parse_from(["sherd-refit-rs", "bench", "in", "--out", "out"]).unwrap();
+        match cli.command {
+            super::Command::Bench(args) => {
+                assert_eq!(args.workers, None, "unset, like `run`'s");
+                assert_eq!(args.threads, None);
+                assert_eq!(pool_threads(args.threads, args.workers), pipeline::default_workers());
+                assert_eq!(schedule_workers(args.workers), pipeline::default_workers());
+            }
+            other => panic!("{other:?}"),
+        }
+        // `--workers` alone sizes both; `--threads` wins over it for the pool alone; both given,
+        // each takes its own; and every one of these answers is `run`'s, computed by `run`'s own
+        // two functions.
+        assert_eq!(pool_threads(None, Some(4)), 4);
+        assert_eq!(schedule_workers(Some(4)), 4);
+        assert_eq!(pool_threads(Some(2), None), 2);
+        assert_eq!(
+            schedule_workers(None),
+            pipeline::default_workers(),
+            "an unset --workers is the reference's own count, not the machine's core count"
+        );
+        assert_eq!(pool_threads(Some(2), Some(4)), 2);
+        assert_eq!(schedule_workers(Some(4)), 4);
+        // R §4.2 reads the second number, and the schedule really is a function of it: pot H's
+        // 55 pairs are walked one per block at nine workers and in 3x3 blocks at one. The eight
+        // development sets happen not to separate nine from ten (V5-D3), which is why the old
+        // `bench` moved no result — but "happens not to" is not a resolution rule.
+        assert_ne!(pipeline::block_size(1, 55), pipeline::block_size(9, 55));
     }
 
     /// Every flag of `sherd_refit/cli.py` is here, spelled the same, and every default is the

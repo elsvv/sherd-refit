@@ -279,7 +279,12 @@ readers ignore unknown keys).
 
 ## 5. Pipeline and threading model
 
-One process, one `rayon` pool sized `--threads` (default: all cores). Stages:
+One process, one `rayon` pool sized `--threads` (default: **cores − 1**, which is what `cli.py`
+resolves an unset `--workers`/`--threads` to — `workers or max(1, (os.cpu_count() or 2) - 1)`, nine
+on this ten-core machine; corrected in task Z from "all cores", which the port stopped doing at
+step Y4 and this line went on saying). `run`, `segment` and `bench` all resolve the two flags
+through the same two lines: the pool takes `--threads` or, failing that, `--workers`, and R §4.2's
+block schedule takes `--workers`; both fall back to `pipeline::default_workers()`. Stages:
 
 1. **Discover** files, names, pair order (R§2, R§4.1).
 2. **Preprocess** (R§3): a `par_iter` over fragments **bounded by a memory-aware semaphore**:

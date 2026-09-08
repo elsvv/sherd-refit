@@ -21,7 +21,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use wgpu::{
@@ -252,20 +252,49 @@ pub const DEFAULT_MEMORY_BUDGET: u64 = 1024 * 1024 * 1024;
 /// different is that there is nothing to evict — a batch's buffers live exactly as long as the
 /// call that made them — so the reservation is an RAII guard and the "eviction" is the guard going
 /// out of scope.
+///
+/// # A shortfall waits; only an impossible batch is refused (V6-D8)
+///
+/// [`reserve`](Self::reserve) used to refuse whenever `live + bytes` crossed the ceiling, and
+/// `live` is *whatever else is in flight*. That made the device/CPU split a function of the
+/// schedule: with nine workers forming batches at once, which call found the budget full depended
+/// on thread timing, so two runs of the same collection could put different calls on the device
+/// and D §7's byte-identical gate would stop holding. It never fired on a development set (peak
+/// 74 MB of 1 000, 0 refusals), which is why it survived phase 2 — the large collections are
+/// exactly where it would have bitten first.
+///
+/// The rule now has two branches and only one of them is a decision:
+///
+/// * `bytes > budget` — the batch cannot fit **on an empty device**. Refused, delegated, counted.
+///   That decision reads the batch's own size and the machine's ceiling and nothing else, so it is
+///   the same in every run of the same batch on the same machine.
+/// * `bytes <= budget` — the batch fits, and any shortfall is other calls in flight. The caller
+///   **waits** on [`Condvar`] until they release. Progress is guaranteed: a shortfall means at
+///   least one reservation is live, every reservation is an RAII guard held for the length of one
+///   `Executor` call, and no call reserves twice, so no waiter can be holding what it waits for.
+///
+/// Waiting changes *when* a batch reaches the device, never *whether* it does, and the wall clock
+/// was never part of a result. [`waited`](Self::waited) counts the calls that had to.
 #[derive(Debug)]
 pub struct Allocations {
-    live: AtomicU64,
+    /// Bytes reserved right now, and the lock every waiter sleeps on.
+    live: Mutex<u64>,
+    /// Signalled by [`Reservation::drop`] and by [`Allocations::set_budget`].
+    space: Condvar,
     peak: AtomicU64,
     refused: AtomicU64,
+    waited: AtomicU64,
     budget: AtomicU64,
 }
 
 impl Default for Allocations {
     fn default() -> Self {
         Self {
-            live: AtomicU64::new(0),
+            live: Mutex::new(0),
+            space: Condvar::new(),
             peak: AtomicU64::new(0),
             refused: AtomicU64::new(0),
+            waited: AtomicU64::new(0),
             budget: AtomicU64::new(DEFAULT_MEMORY_BUDGET),
         }
     }
@@ -273,8 +302,11 @@ impl Default for Allocations {
 
 impl Allocations {
     /// Sets the ceiling; `0` removes it, as `--memory-budget 0` does for the host (D §9).
+    ///
+    /// Raising it can make room for a waiter, so every waiter is woken to re-test.
     pub fn set_budget(&self, bytes: u64) {
         self.budget.store(if bytes == 0 { u64::MAX } else { bytes }, Ordering::Relaxed);
+        self.space.notify_all();
     }
 
     /// The ceiling in force.
@@ -286,7 +318,7 @@ impl Allocations {
     /// Bytes reserved right now.
     #[must_use]
     pub fn live(&self) -> u64 {
-        self.live.load(Ordering::Relaxed)
+        *self.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The most that were ever reserved at once — what a run reports and what D §1's 1 GB row is
@@ -296,38 +328,43 @@ impl Allocations {
         self.peak.load(Ordering::Relaxed)
     }
 
-    /// How many batches the budget sent to the CPU.
+    /// How many batches the budget sent to the CPU — batches larger than the whole budget, and
+    /// nothing else (V6-D8).
     #[must_use]
     pub fn refused(&self) -> u64 {
         self.refused.load(Ordering::Relaxed)
     }
 
-    /// Reserves `bytes`, or `None` when they would cross the ceiling.
+    /// How many reservations had to wait for another call to release its bytes.
     ///
-    /// The compare-and-swap is what makes it right under D §6.4's pool: several workers form
-    /// batches at once and the budget is the device's, not a thread's.
+    /// Zero on every development set. It is not a failure and not a delegation: the batch reached
+    /// the device, later than it would have on an idle one.
+    #[must_use]
+    pub fn waited(&self) -> u64 {
+        self.waited.load(Ordering::Relaxed)
+    }
+
+    /// Reserves `bytes`, waiting for room, or `None` when `bytes` exceed the whole budget.
+    ///
+    /// `None` is the only decision this function makes and it reads `bytes` and the budget alone —
+    /// see the type's own documentation for why that matters to D §7.
     pub fn reserve(&self, bytes: u64) -> Option<Reservation<'_>> {
-        let budget = self.budget();
-        let mut live = self.live.load(Ordering::Relaxed);
-        loop {
-            let wanted = live.saturating_add(bytes);
-            if wanted > budget {
-                self.refused.fetch_add(1, Ordering::Relaxed);
-                return None;
-            }
-            match self.live.compare_exchange_weak(
-                live,
-                wanted,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    self.peak.fetch_max(wanted, Ordering::Relaxed);
-                    return Some(Reservation { owner: self, bytes });
-                }
-                Err(now) => live = now,
-            }
+        if bytes > self.budget() {
+            self.refused.fetch_add(1, Ordering::Relaxed);
+            return None;
         }
+        let mut live = self.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut waited = false;
+        while live.saturating_add(bytes) > self.budget() {
+            waited = true;
+            live = self.space.wait(live).unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *live = live.saturating_add(bytes);
+        self.peak.fetch_max(*live, Ordering::Relaxed);
+        if waited {
+            self.waited.fetch_add(1, Ordering::Relaxed);
+        }
+        Some(Reservation { owner: self, bytes })
     }
 }
 
@@ -348,7 +385,14 @@ impl Reservation<'_> {
 
 impl Drop for Reservation<'_> {
     fn drop(&mut self) {
-        self.owner.live.fetch_sub(self.bytes, Ordering::Relaxed);
+        {
+            let mut live =
+                self.owner.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            *live = live.saturating_sub(self.bytes);
+        }
+        // Whoever is waiting re-tests its own `bytes`, so all of them are woken and the one that
+        // fits proceeds. There is at most one waiter per worker thread.
+        self.owner.space.notify_all();
     }
 }
 
@@ -659,16 +703,30 @@ mod tests {
         assert_eq!(allocations.live(), 900);
         assert_eq!(allocations.peak(), 900);
 
-        // The one that does not fit is refused, and nothing about the live total changes.
-        assert!(allocations.reserve(200).is_none(), "1100 is over the budget");
-        assert_eq!((allocations.live(), allocations.refused()), (900, 1));
-        // A request larger than the whole budget is refused rather than admitted after everything
-        // else has gone — `SlotTable`'s rule, one level down.
-        drop(b);
+        // A shortfall that is only what else is in flight **waits** (V6-D8): the reservation is
+        // made on another thread, which cannot finish until `b` is dropped here.
+        let waiting = std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let held = allocations.reserve(200).expect("200 fits once `b` has gone");
+                held.bytes()
+            });
+            // `b` is 300 of the 1000 and 900 are live, so the spawned reservation cannot be made
+            // until this drop; the assertion is that it is made *at all*, not when.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            assert_eq!(allocations.refused(), 0, "a shortfall is not a refusal");
+            drop(b);
+            handle.join().expect("the waiting thread finished")
+        });
+        assert_eq!(waiting, 200);
+        assert_eq!(allocations.waited(), 1, "and it is counted as a wait");
+        assert_eq!(allocations.live(), 600, "only `a` is left");
+
+        // A request larger than the whole budget is refused rather than waited on: no release can
+        // ever make room for it, and the decision reads the batch's size alone.
         drop(a);
         assert_eq!(allocations.live(), 0, "a reservation is released when it goes out of scope");
         assert!(allocations.reserve(1001).is_none(), "bigger than the budget on an empty device");
-        assert_eq!(allocations.refused(), 2);
+        assert_eq!(allocations.refused(), 1);
         assert_eq!(allocations.peak(), 900, "the peak is the high-water mark, not the current");
 
         // `0` is `--memory-budget 0`'s spelling of "no bound" (D §9).

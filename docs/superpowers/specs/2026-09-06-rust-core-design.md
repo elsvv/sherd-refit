@@ -675,6 +675,28 @@ of 2.93 M hypotheses (task G2), a schedule-dependent split would put a different
 the device in every run and §7's byte-identical gate would stop holding. **The 1.37× is not
 available in that form, and `--gpu-memory` must not be used as a work-splitting knob.**
 
+**Task W closed the hole that paragraph describes** (V6-D8). Saying "must not be used as a
+work-splitting knob" left the split *available* to anyone who set the flag low, and the flag has a
+default, so on a large enough collection it would have been reached without anyone choosing it.
+`Allocations::reserve` no longer refuses on a shortfall. It has two branches and only one of them
+is a decision:
+
+* `bytes > budget` — the batch would not fit **on an empty device**. Answered by the CPU, counted
+  as a refusal. That decision reads the batch's own size and the machine's ceiling and nothing
+  else, so it is the same in every run of the same batch on the same machine — which is what §7
+  needs of it.
+* `bytes ≤ budget` — the batch fits and the shortfall is other calls in flight. The caller
+  **waits** on a condition variable until they release, and is counted in a `waited` column that
+  `run -v` prints beside the refusals. Progress is guaranteed: a shortfall means at least one
+  reservation is live, every reservation is an RAII guard held for exactly one `Executor` call,
+  and no call reserves twice, so no waiter can hold what it waits for.
+
+Waiting changes *when* a batch reaches the device, never *whether* it does, and the wall clock was
+never part of a result. Measured on `synthetic_20` at `--gpu-memory 0.05` — a ceiling of 50 MB
+under a 74 MB peak, so the old rule refused there — two runs are byte-identical to each other and
+place the same joins and groups as the default budget, with **0 refusals** and the delegations that
+remain being the size thresholds' own (task W's note, §4).
+
 What *is* available is a ceiling that is a function of the batch, and task G4 measured one:
 §6.4's three size thresholds are a **floor**, and `coarse::MAX_QUERIES` = 12 M point-queries is the
 ceiling beside them — past it a batch is answered by the CPU, whose own answer is `into_par_iter`
@@ -865,9 +887,10 @@ type) as a diagnostic, not a production mode.
   the slot count halves and `P` shrinks (`SlotTable::with_capacity`).
   **Enforced in phase 2d (task G3)** by `sherd_gpu::device::Allocations` and `--gpu-memory GB`
   (default 1 GB, `0` removes the bound): each kernel adds up the buffers it is about to create and
-  **reserves them before the first one exists**; what does not fit is answered by the CPU executor
-  and counted as a refusal rather than allocated anyway, and the reservation is an RAII guard so a
-  call's bytes are released when the call returns. Measured peaks at the default: **103 MB** on
+  **reserves them before the first one exists**; a batch larger than the whole budget is answered
+  by the CPU executor and counted as a refusal rather than allocated anyway, a batch that fits but
+  finds the budget occupied **waits for room** rather than being refused (§6.6, V6-D8), and the
+  reservation is an RAII guard so a call's bytes are released when the call returns. Measured peaks at the default: **103 MB** on
   `synthetic_20`, 21 MB on pot_H, no refusals — an order of magnitude under the row. `SlotTable`
   still has **no consumer**: what a kernel uploads is a *pair's* target at a *rung's* radius, not a
   fragment, so there is nothing per-fragment to keep resident until §6.5's multi-pair batch exists,
@@ -918,7 +941,7 @@ with the same name, default and meaning (R§1.4), plus:
 |---|---|
 | `--backend auto|cpu|gpu` (default `auto`) | executor selection (§6.8) |
 | `--gpu-adapter NAME|INDEX` | override adapter |
-| `--gpu-memory GB` (default 1) | what the kernels may hold on the device at once (§1, §6.8); `0` removes the bound, and a batch that does not fit is answered by the CPU and counted |
+| `--gpu-memory GB` (default 1) | what the kernels may hold on the device at once (§1, §6.8); `0` removes the bound. A batch **larger than the whole budget** is answered by the CPU and counted as a refusal; one that merely finds the budget occupied waits for room, so the split is a function of the batch and the machine and not of the schedule (§6.6) |
 | `--memory-budget GB` | preprocessing budget (§5) |
 | `--dump-fixtures DIR` | write the Rust-side fixture (§10.1) |
 | `--inject-from DIR --inject-stages a,b,…` | parity mode: take the listed stage inputs from a Python fixture |

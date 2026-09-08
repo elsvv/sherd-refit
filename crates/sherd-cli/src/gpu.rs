@@ -156,7 +156,8 @@ impl Resolved {
                     reason = "byte counts far below 2^53, printed to the megabyte"
                 )]
                 lines.push(format!(
-                    "device memory: {:.0} MB at the peak of a {} budget, {} batches refused",
+                    "device memory: {:.0} MB at the peak of a {} budget, {} batches refused (too \
+                     big for the whole budget), {} waited for room",
                     allocations.peak() as f64 / (1024.0 * 1024.0),
                     if allocations.budget() == u64::MAX {
                         "no".to_owned()
@@ -167,6 +168,7 @@ impl Resolved {
                         )
                     },
                     allocations.refused(),
+                    allocations.waited(),
                 ));
                 lines.push(format!(
                     "device: {:.2} s with work outstanding over {} submissions, {} deep at the \

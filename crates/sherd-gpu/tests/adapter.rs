@@ -861,6 +861,92 @@ fn the_device_memory_budget_sends_what_it_cannot_hold_to_the_cpu() {
     assert_eq!(generous.len(), cpu.len());
 }
 
+/// A shortfall that is only what else is in flight **waits**, and the answer is the device's
+/// (V6-D8).
+///
+/// The defect this closes is not a wrong answer, it is a schedule-dependent one: the old
+/// `Allocations::reserve` refused whenever `live + bytes` crossed the ceiling, and `live` is
+/// whatever other workers happen to hold at that instant. Which call went to the CPU was then a
+/// function of thread timing, and D §7's byte-identical gate rests on it not being.
+///
+/// Two threads submit the same batch under a ceiling of exactly one batch. One of them must wait
+/// for the other. The assertions are that **both** reach the device, that neither is refused, that
+/// at least one waited, and that both answers are bit-identical to the same batch's answer on an
+/// empty device — the wait moved the batch in time and in nothing else.
+#[test]
+fn a_shortfall_that_is_other_calls_in_flight_waits_rather_than_delegating() {
+    let Some(gpu) = device("device memory shortfall") else { return };
+    let Some(test) = selftest("device memory shortfall", &gpu) else { return };
+    let executor = GpuExecutor::new(std::sync::Arc::new(gpu), test);
+
+    let (source, target, inits) = icp_batch(4000, 64);
+    let options = Options {
+        estimation: Estimation::PointToPlane,
+        max_correspondence_distance: 1.0,
+        max_iteration: 5,
+        numerics: sherd_core::matching::icp::Numerics::REFERENCE,
+    };
+    let batch = IcpBatch { source: &source, target: &target, inits: &inits, options };
+
+    // One call on an empty device fixes both the reference answer and the batch's own size.
+    let alone = executor.icp_rung(&batch);
+    let one_batch = executor.gpu().allocations().peak();
+    assert!(one_batch > 0, "the reservation has to have been made");
+    assert_eq!(executor.stats().icp.snapshot().delegated, 0, "it fits under the default budget");
+
+    // A ceiling of exactly one batch, with one batch's worth already held here. The shortfall is
+    // therefore certain rather than raced: the spawned call cannot proceed until this thread
+    // releases, and the only question the test asks is what it does in the meantime.
+    let allocations = executor.gpu().allocations();
+    allocations.set_budget(one_batch);
+    let held = allocations.reserve(one_batch).expect("one batch fits in a budget of one batch");
+    let finished = std::sync::atomic::AtomicBool::new(false);
+    let waited = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            let answer = executor.icp_rung(&batch);
+            finished.store(true, std::sync::atomic::Ordering::SeqCst);
+            answer
+        });
+        // Nothing can release but this thread, so the call is still inside `reserve`.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            !finished.load(std::sync::atomic::Ordering::SeqCst),
+            "the call cannot have answered while the whole budget is held here",
+        );
+        assert_eq!(allocations.refused(), 0, "a shortfall is not a refusal");
+        assert_eq!(executor.stats().icp.snapshot().delegated, 0, "nor a delegation");
+        drop(held);
+        worker.join().expect("the waiting call finished once the budget was released")
+    });
+    let after = executor.stats().icp.snapshot();
+    println!(
+        "  budget {one_batch} B (one batch), one held: {} on device, {} delegated, {} refused, \
+         {} waited",
+        after.on_device,
+        after.delegated,
+        allocations.refused(),
+        allocations.waited(),
+    );
+    assert_eq!(after.on_device, 2, "both calls reached the device");
+    assert_eq!(after.delegated, 0, "a shortfall is not a delegation");
+    assert_eq!(allocations.refused(), 0, "and it is not a refusal");
+    assert_eq!(allocations.waited(), 1, "the one that could not fit waited, and is counted");
+    assert_eq!(allocations.live(), 0, "both reservations were released");
+
+    assert_eq!(waited.len(), alone.len());
+    for (a, b) in waited.iter().zip(&alone) {
+        for i in 0..4 {
+            for j in 0..4 {
+                assert_eq!(
+                    a.transform[(i, j)].to_bits(),
+                    b.transform[(i, j)].to_bits(),
+                    "waiting for room moved the batch in time and in nothing else",
+                );
+            }
+        }
+    }
+}
+
 /// D §5's cancellation on the GPU path: the run stops, and the device is still there afterwards
 /// (task G3, item 6).
 ///

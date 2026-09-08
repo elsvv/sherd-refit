@@ -1630,6 +1630,26 @@ seeds each — 15 runs — not derived from the port.
    native, every stage (§10.2).
 6. **Benchmark gates** (§10.3) on a self-hosted M2 Pro runner, manual/nightly.
 
+**Local gates, run before every commit.** Layers 1, 2 and 4 above are what `cargo nextest` runs,
+and a default `cargo build`/`cargo clippy` compiles neither shape of `sherd-cli` — the
+`#[cfg(not(feature = "gpu"))]` arms of `cli/src/gpu.rs` are not type-checked by the default
+feature set at all. The list is therefore, in both feature shapes:
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy -p sherd-cli --no-default-features --all-targets --locked -- -D warnings
+cargo build  -p sherd-cli --no-default-features --locked
+cargo nextest run --workspace            # and once more with --release
+cargo test --doc --workspace
+```
+
+The two `--no-default-features` lines are the ones the CI `check` and `test` jobs already run
+(`.github/workflows/rust.yml`), and the ones that went red for two whole steps in phase 2 because
+nothing local ran them: the CPU-only `resolve` stub kept a two-argument signature after G3.1 gave
+its callers a third (`--gpu-memory`), and `E0061` was invisible to every default-feature command
+(V6-D1, fixed in task W). Running them locally costs one incremental `check` of one crate.
+
 ### 10.5 CI matrix (GitHub Actions)
 
 | job | runners | what |

@@ -1153,9 +1153,13 @@ mod tests {
         assert!("metal".parse::<Backend>().is_err());
         #[cfg(not(feature = "gpu"))]
         {
-            let err = super::gpu::resolve(Backend::Gpu, None).unwrap_err().to_string();
+            let err = super::gpu::resolve(Backend::Gpu, None, None).unwrap_err().to_string();
             assert!(err.contains("without the `gpu` feature"), "{err}");
-            assert_eq!(super::gpu::resolve(Backend::Auto, None).unwrap().backend, Backend::Cpu);
+            assert_eq!(
+                super::gpu::resolve(Backend::Auto, None, Some(1.0)).unwrap().backend,
+                Backend::Cpu,
+                "and `--gpu-memory` is accepted and ignored, so the two builds take the same flags"
+            );
         }
     }
 

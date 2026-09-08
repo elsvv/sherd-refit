@@ -321,6 +321,13 @@ CC BY 4.0 (автор моделей: LWL-Archäologie für Westfalen / Florian 
 cargo build --workspace
 cargo test --workspace                                    # или cargo nextest run --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+
+# CPU-only сборка — те же две команды, что гоняет CI (job `check` и job `test`).
+# Обе входят в локальный список гейтов перед коммитом (D §10.4): дефолтная сборка
+# не компилирует ветки `#[cfg(not(feature = "gpu"))]`, и без этих двух команд
+# расхождение сигнатур в них живёт до первого прогона CI.
+cargo build -p sherd-cli --no-default-features --locked
+cargo clippy -p sherd-cli --no-default-features --all-targets --locked -- -D warnings
 ```
 
 Готово (шаги S1–S4 плана — фаза 1a; B1–B3 — фаза 1b; C1–C3 — сопоставление пары, фаза 1c;

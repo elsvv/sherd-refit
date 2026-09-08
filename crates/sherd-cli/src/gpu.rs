@@ -297,8 +297,18 @@ pub(crate) fn resolve(
 }
 
 /// [`resolve`] for a build without the `gpu` feature: `auto` is the CPU, `gpu` is an error.
+///
+/// The signature is the one the callers use, argument for argument — that is the whole contract
+/// this stub has, and when it drifted from it (`--gpu-memory` added to the callers in G3.1 and not
+/// here) the CPU-only build stopped compiling for two whole steps without anyone noticing, because
+/// nothing local ran it. D §10.4's local gate list now runs both `--no-default-features` commands
+/// before every commit (V6-D1).
 #[cfg(not(feature = "gpu"))]
-pub(crate) fn resolve(backend: Backend, _adapter: Option<&str>) -> Result<Resolved> {
+pub(crate) fn resolve(
+    backend: Backend,
+    _adapter: Option<&str>,
+    _memory: Option<f64>,
+) -> Result<Resolved> {
     match backend {
         Backend::Gpu => {
             bail!("--backend gpu: this binary was built without the `gpu` feature (D §2)")

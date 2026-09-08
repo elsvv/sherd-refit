@@ -12,6 +12,7 @@
 //! opinion (E7 §6): a self-test failure there means the CPU path and nothing else.
 
 use sherd_core::executor::CPU;
+use sherd_core::executor::Engine;
 use sherd_core::executor::Executor;
 use sherd_core::executor::batch::IcpBatch;
 use sherd_core::executor::batch::{CoarseBatch, Poses};
@@ -19,6 +20,8 @@ use sherd_core::matching::coarse::Target;
 use sherd_core::matching::icp::{
     Estimation, IcpTarget, Options, Pose, Rotation, Translation, homogeneous,
 };
+use sherd_core::pipeline::RunOptions;
+use sherd_core::progress::{Cancel, Watch};
 use sherd_core::spatial::kdtree::PointTree;
 use sherd_gpu::device::{AdapterChoice, Requirements};
 use sherd_gpu::selftest::AUTO_SPEEDUP;
@@ -610,5 +613,296 @@ fn the_coarse_crossover_is_a_query_count() {
                 "{n} × {points} went the wrong way"
             );
         }
+    }
+}
+
+/// The coarse chunking test's poses repeat with this period, which is what makes the fold
+/// checkable across a chunk boundary and across a two-dimensional grid.
+const PERIOD: usize = 200;
+
+/// D §6.4's TDR bound and E7 §2's two-dimensional dispatch, both on one batch (task G3, item 4).
+///
+/// The coarse kernel has two caps and this batch crosses both at once: 400 000 poses on a
+/// sixty-point probe is **24 M point-queries**, past `coarse::MAX_POINT_QUERIES`, so the call
+/// becomes two dispatches; and the first of those is 333 333 workgroups, past
+/// `MAX_WORKGROUPS_PER_DIM`, so its grid folds into two dimensions and the kernel has to recover
+/// its pose index from `params.wg_x` (E7 §3: the shape is data, never a constant on one side).
+///
+/// Two assertions, and the second is the one that would catch a wrong fold:
+///
+/// * the call is **two** dispatches, so the chunking really ran;
+/// * the poses repeat with period 200, so score `p` must equal score `p % 200` — across the
+///   65 535-workgroup boundary, across the chunk boundary and across `first_pose` — and the first
+///   200 of them must be exactly what the CPU executor computes.
+#[test]
+fn the_coarse_kernel_chunks_past_the_dispatch_caps_and_folds_the_grid() {
+    let Some(gpu) = device("coarse chunking") else { return };
+    let Some(test) = selftest("coarse chunking", &gpu) else { return };
+    let executor = GpuExecutor::new(std::sync::Arc::new(gpu), test);
+
+    let mut target = Vec::new();
+    for i in 0..12 {
+        for j in 0..12 {
+            for k in 0..12 {
+                target.push([f64::from(i) * 0.5, f64::from(j) * 0.5, f64::from(k) * 0.5]);
+            }
+        }
+    }
+    let target_normals = vec![[0.0, 0.0, 1.0]; target.len()];
+    let tree = PointTree::build(&target).expect("a non-empty lattice");
+    let view = Target { points: &target, normals: &target_normals, tree: &tree };
+
+    let mut points = Vec::new();
+    let mut normals = Vec::new();
+    for k in 0..60 {
+        let base = [f64::from(k % 5) * 0.5 + 2.0, f64::from(k % 3) * 0.5 + 2.0, 2.0];
+        points.push([base[0] + 0.05, base[1], base[2]]);
+        normals.push(if k % 2 == 0 { [0.0, 0.0, 1.0] } else { [0.0, 0.0, -1.0] });
+    }
+
+    let pose_of = |p: usize| {
+        let step = f64::from(u32::try_from(p % PERIOD).unwrap_or(0));
+        let angle = step * 0.0007;
+        let (s, c) = angle.sin_cos();
+        let r = Rotation::new(c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0);
+        let tau = Translation::new(step * 0.0001, 0.0, 0.0);
+        homogeneous(&r, &tau)
+    };
+    let poses: Vec<_> = (0..400_000).map(pose_of).collect();
+    let batch = CoarseBatch {
+        target: view,
+        mask: None,
+        points: &points,
+        normals: &normals,
+        poses: Poses::Homogeneous(&poses),
+        radius: 0.2,
+        normal_agree: 0.7,
+    };
+    let expect_dispatches = poses.len().div_ceil(sherd_gpu::coarse::MAX_POINT_QUERIES / 60);
+    let scores = executor.coarse_scores(&batch);
+    let snapshot = executor.stats().coarse.snapshot();
+    println!(
+        "  {} poses × {} points = {} queries in {} dispatches ({} on device)",
+        poses.len(),
+        points.len(),
+        poses.len() * points.len(),
+        snapshot.dispatches,
+        snapshot.on_device,
+    );
+    assert_eq!(snapshot.on_device, 1, "one call");
+    assert_eq!(
+        usize::try_from(snapshot.dispatches).unwrap_or(0),
+        expect_dispatches,
+        "the query cap has to have split it"
+    );
+    assert!(expect_dispatches > 1, "the batch is meant to cross the cap");
+
+    // The head, against the reference implementation, on its own batch so that it is a comparison
+    // of answers and not of schedules.
+    let head: Vec<_> = poses[..PERIOD].to_vec();
+    let head_batch = CoarseBatch { poses: Poses::Homogeneous(&head), ..batch };
+    let cpu = CPU.coarse_scores(&head_batch);
+    let differing =
+        cpu.iter().zip(&scores[..PERIOD]).filter(|(c, g)| c.to_bits() != g.to_bits()).count();
+    assert!(cpu.iter().any(|&s| s > 0.0), "the batch has to score something");
+    assert_eq!(differing, 0, "the first chunk's head is the CPU's, to the bit");
+
+    // And every pose is its own residue's score, which is what a wrong `first_pose` or a wrong
+    // `gid.x + gid.y · wg_x` would break.
+    let wrong = (0..poses.len())
+        .filter(|&p| scores[p].to_bits() != scores[p % PERIOD].to_bits())
+        .take(4)
+        .collect::<Vec<_>>();
+    assert!(wrong.is_empty(), "poses {wrong:?} do not match their own period-200 residue");
+}
+
+/// D §6.4's 512-candidate ceiling for Windows TDR, on the ICP kernel (task G3, item 4).
+///
+/// 600 candidates is two dispatches; the initial poses repeat with period 100, so candidate `k`
+/// and candidate `k % 100` are the same problem and must come back the same registration — and
+/// candidate 512, the first of the second dispatch, has a twin in the first. That is what checks
+/// that a chunk's state buffer, its `first` and its slice of the one staging buffer line up.
+///
+/// The ICP grid never folds into two dimensions: one workgroup is one candidate and a dispatch is
+/// capped at 512 of them, three orders below `MAX_WORKGROUPS_PER_DIM`. The fold is the coarse
+/// kernel's, and the test above is where it is exercised.
+/// Candidates in the ICP chunking test — past D §6.4's 512 ceiling, so it is two dispatches.
+const CANDIDATES: usize = 600;
+/// How often the ICP chunking test's initial poses repeat.
+const ICP_PERIOD: usize = 100;
+
+#[test]
+fn the_icp_kernel_chunks_at_the_tdr_ceiling() {
+    let Some(gpu) = device("icp chunking") else { return };
+    let Some(test) = selftest("icp chunking", &gpu) else { return };
+    let executor = GpuExecutor::new(std::sync::Arc::new(gpu), test);
+
+    let (source, target, seed) = icp_batch(2000, ICP_PERIOD);
+    let inits: Vec<Pose> = (0..CANDIDATES).map(|k| seed[k % ICP_PERIOD]).collect();
+    let options = Options {
+        estimation: Estimation::PointToPlane,
+        max_correspondence_distance: 1.0,
+        max_iteration: 5,
+        numerics: sherd_core::matching::icp::Numerics::REFERENCE,
+    };
+    let batch = IcpBatch { source: &source, target: &target, inits: &inits, options };
+    let out = executor.icp_rung(&batch);
+    let snapshot = executor.stats().icp.snapshot();
+    println!(
+        "  {CANDIDATES} candidates × {} points in {} dispatches ({} on device)",
+        source.len(),
+        snapshot.dispatches,
+        snapshot.on_device,
+    );
+    assert_eq!(snapshot.on_device, 1, "one call");
+    assert_eq!(
+        usize::try_from(snapshot.dispatches).unwrap_or(0),
+        CANDIDATES.div_ceil(sherd_gpu::icp::MAX_CANDIDATES),
+        "600 candidates is two dispatches at a ceiling of 512",
+    );
+    assert_eq!(out.len(), CANDIDATES);
+    for k in 0..CANDIDATES {
+        let (a, b) = (&out[k], &out[k % ICP_PERIOD]);
+        assert_eq!(a.iterations, b.iterations, "candidate {k} took a different path");
+        for i in 0..4 {
+            for j in 0..4 {
+                assert!(
+                    (a.transform[(i, j)] - b.transform[(i, j)]).abs() < 1e-12,
+                    "candidate {k} and its twin {} differ at ({i},{j})",
+                    k % ICP_PERIOD,
+                );
+            }
+        }
+    }
+}
+
+/// D §1's device-memory ceiling, exercised from both sides (task G3, item 5).
+///
+/// A batch that fits under the default 1 GB runs on the device; the *same* batch under a ceiling
+/// of one megabyte is refused before a single buffer is created, answered by the CPU executor and
+/// counted — as a delegation, which it is, and as a refusal, which says why. The two answers are
+/// then compared, because a budget that changed a result would be a bug and not a policy.
+#[test]
+fn the_device_memory_budget_sends_what_it_cannot_hold_to_the_cpu() {
+    let Some(gpu) = device("device memory budget") else { return };
+    let Some(test) = selftest("device memory budget", &gpu) else { return };
+    let executor = GpuExecutor::new(std::sync::Arc::new(gpu), test);
+
+    let (source, target, inits) = icp_batch(4000, 64);
+    let options = Options {
+        estimation: Estimation::PointToPlane,
+        max_correspondence_distance: 1.0,
+        max_iteration: 5,
+        numerics: sherd_core::matching::icp::Numerics::REFERENCE,
+    };
+    let batch = IcpBatch { source: &source, target: &target, inits: &inits, options };
+
+    let generous = executor.icp_rung(&batch);
+    let after = executor.stats().icp.snapshot();
+    let peak = executor.gpu().allocations().peak();
+    println!(
+        "  under the default budget: {} on device, {} delegated, peak {} bytes",
+        after.on_device, after.delegated, peak,
+    );
+    assert_eq!(after.on_device, 1, "the batch fits under D §1's 1 GB");
+    assert!(peak > 0, "the reservation has to have been made");
+    assert_eq!(executor.gpu().allocations().live(), 0, "and released when the call returned");
+
+    executor.gpu().allocations().set_budget(1024 * 1024);
+    let starved = executor.icp_rung(&batch);
+    let after = executor.stats().icp.snapshot();
+    println!(
+        "  under 1 MB: {} on device, {} delegated, {} refused",
+        after.on_device,
+        after.delegated,
+        executor.gpu().allocations().refused(),
+    );
+    assert_eq!(after.on_device, 1, "no second call reached the device");
+    assert_eq!(after.delegated, 1, "the starved call was answered by the CPU");
+    assert_eq!(executor.gpu().allocations().refused(), 1);
+
+    // The CPU's answer is the reference implementation's, so the starved call is the CPU's own
+    // output to the bit — and the device's is inside D §10.2, which its own test asserts.
+    let cpu = CPU.icp_rung(&batch);
+    assert_eq!(starved.len(), cpu.len());
+    for (a, b) in starved.iter().zip(&cpu) {
+        for i in 0..4 {
+            for j in 0..4 {
+                assert_eq!(
+                    a.transform[(i, j)].to_bits(),
+                    b.transform[(i, j)].to_bits(),
+                    "a refused batch is the CPU executor's own answer",
+                );
+            }
+        }
+    }
+    assert_eq!(generous.len(), cpu.len());
+}
+
+/// D §5's cancellation on the GPU path: the run stops, and the device is still there afterwards
+/// (task G3, item 6).
+///
+/// The claim being tested is the one that could not be checked on the CPU: *"Ctrl-C mid-batch
+/// leaves no device hang."* The run is cancelled from its own progress callback — deterministic,
+/// no sleep — and then a real batch is put through the same device. If a cancelled run had left a
+/// submission unretired, an unmapped buffer or a submitting thread waiting on a fence, that batch
+/// would hang or fail; it does neither, because a dispatch is bounded by D §6.4's chunking and
+/// `pipeline::Submitter` retires every command buffer it submitted.
+#[test]
+fn a_cancelled_gpu_run_leaves_the_device_usable() {
+    let Some(gpu) = device("cancellation on the gpu path") else { return };
+    let Some(test) = selftest("cancellation on the gpu path", &gpu) else { return };
+    let executor = GpuExecutor::new(std::sync::Arc::new(gpu), test);
+
+    let input = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/slab/input");
+    let out = std::env::temp_dir().join(format!("sherd-gpu-cancel-{}", std::process::id()));
+    std::fs::remove_dir_all(&out).ok();
+
+    let cancel = Cancel::new();
+    let progress = std::sync::Arc::new(CancelAtOnce(cancel.clone()));
+    let watch = Watch { cancel: Some(cancel), progress: Some(progress) };
+    let options = RunOptions {
+        preview: false,
+        write_meshes: false,
+        cache: false,
+        watch,
+        ..RunOptions::default()
+    };
+    let engine = Engine::new(&executor, sherd_core::matching::icp::Numerics::REFERENCE);
+    let result = sherd_core::pipeline::run_with(&input, &out, &options, engine);
+    assert!(
+        matches!(result, Err(sherd_core::error::Error::Cancelled)),
+        "expected Cancelled, got {result:?}",
+    );
+
+    // And now the device, on a batch big enough to reach it.
+    let before = executor.stats().icp.snapshot().on_device;
+    let (source, target, inits) = icp_batch(4000, 64);
+    let options = Options {
+        estimation: Estimation::PointToPlane,
+        max_correspondence_distance: 1.0,
+        max_iteration: 5,
+        numerics: sherd_core::matching::icp::Numerics::REFERENCE,
+    };
+    let batch = IcpBatch { source: &source, target: &target, inits: &inits, options };
+    let out_poses = executor.icp_rung(&batch);
+    assert_eq!(out_poses.len(), 64);
+    assert_eq!(
+        executor.stats().icp.snapshot().on_device,
+        before + 1,
+        "the device answered a batch after the cancelled run",
+    );
+    assert_eq!(executor.gpu().allocations().live(), 0, "nothing is still reserved");
+    println!("  the run stopped and the device answered {} candidates afterwards", out_poses.len());
+    std::fs::remove_dir_all(&out).ok();
+}
+
+/// A `Progress` whose only act is to raise the flag on the first unit it is told about.
+#[derive(Debug)]
+struct CancelAtOnce(Cancel);
+
+impl sherd_core::progress::Progress for CancelAtOnce {
+    fn advance(&self, _stage: &str, _done: usize, _total: usize) {
+        self.0.cancel();
     }
 }

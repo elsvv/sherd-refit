@@ -1122,8 +1122,10 @@ is a choice about memory and Python's GIL rather than a within-pair scaling limi
 ### 10.3 Benchmark gates
 
 Quality: **within the reference's own spread as R §13 states it** on every listed set, with
-cross-object joins 0 and group purity 1.000 everywhere and R §13's terracotta row met exactly; run
-natively (no injection), CPU and GPU. The gate used to read "exactly R §13", and R §13 used to
+cross-object joins 0 and group purity 1.000 **on R §13's seven single-object collections** and
+R §13's terracotta row met exactly; run natively (no injection), CPU and GPU. The clause used to
+read "everywhere", which is wider than anything R §13 measures and wider than either implementation
+achieves: see the `mixed_ABG` paragraph below (decision 2026-09-08, V5-D1). The gate used to read "exactly R §13", and R §13 used to
 print one draw of a randomised search: task Y measured the reference at five seeds and at ±5 % of
 the working-mesh budget and found three of its seven rows moving, pot_G's prohibition included
 (`notes/2026-09-07-y-phase1d-findings.md` §3). Runtime (M2 Pro 10-core / 16-core GPU, warm cache,
@@ -1140,8 +1142,9 @@ the working-mesh budget and found three of its seven rows moving, pot_G's prohib
 | `mixed_all` (12 589 pairs) | ≤ 2 h | ≤ 30 min | **final acceptance only** (decision 2026-09-07); projected **28 min** CPU |
 
 The last three rows are the team's decision of 2026-09-07: the large collections are not run
-during development — the development sets are the terracotta, pots A/B/C/G/H, `mixed_ABG` and
-synthetic 20, and nothing above 27 fragments is started — and the three large rows are checked
+during development — the development sets are the terracotta, pots A/B/C/G/H, `mixed_ABG` (a
+roadmap-item-4 target, not a phase gate; see below) and synthetic 20, and nothing above 27
+fragments is started — and the three large rows are checked
 once, as the final acceptance after phase 2 and roadmap items 3–4. Until then they are carried as
 a **projection from the measured per-pair cost**. E1 measured that cost and E2 halved it
 (`notes/2026-09-07-e2-tuning.md` §10): one pair costs **0.523 core-s** on 200 000-face working
@@ -1178,6 +1181,32 @@ files of those four sets — caches, placed meshes, merged meshes, PNGs, `transf
 criterion (§12). Against the reference, cold on both sides: 52.7 → **4.5 s** on the terracotta,
 130.9 → **8.2 s** on pot H, 426.7 → **27.5 s** on synthetic 20. The three large sets have not been
 run and will not be until the final acceptance.
+
+**`mixed_ABG` is a roadmap-item-4 target, not a phase-1 or phase-2 quality gate** (team decision
+2026-09-08, from V5-D1). It is the one *mixed* development set — 24 fragments of three pots, 276
+pairs — and the phase-1e verification was the first time anybody ran it, on either side. Neither
+implementation meets "cross-object joins 0 and group purity 1.000" on it, and the port is the
+cleaner of the two on the figure that measures the damage:
+
+| `mixed_ABG`, 24 fragments | **the port** | **the reference** (seed 0, `workers=5`, `OMP_NUM_THREADS=1`) |
+|---|---|---|
+| fragment accuracy | 14 / 24 = **58.3 %** | 14 / 24 = **58.3 %** |
+| per object | A 75.0 %, B 88.9 %, G 0 % | A 62.5 %, B 100 %, G 0 % |
+| precision | 0.667 | 0.750 |
+| joins used | **18** — 12 correct, 3 wrong pose, **3 cross-object** | **16** — 12 correct, 3 wrong pose, **1 cross-object** |
+| groups | 10 + 8 + 2 + 2 + 2×1 | 14 + 3 + 7×1 |
+| **group purity** | **0.864** (0.80 and 0.88) | **0.706** (0.64 and 1.00) |
+| matching stage | **64.0 s** | 613.7 s (**9.6×**) |
+
+Cross-object joins are what §11's roadmap item 4 (*object separation*) exists to remove — cycle
+consistency over whole groups, and per-fragment `Features` with a group consensus — and none of
+that is in phase 1 or phase 2. Holding a port of a frozen algorithm to a standard the algorithm
+itself does not meet would mean either failing a gate for reproducing the reference or changing
+the algorithm to pass it, and both are outside the port's licence (R §12). So the row above is the
+**baseline item 4 is measured against**, and the phase gate on this set is the one every other
+development set carries: the same decisions as the reference, inside D §10.2's tolerances, at the
+runtime §10.3 states. Fragment accuracy is already identical to the fragment, and the port's own
+purity is 0.158 above the reference's.
 
 Quality, task Y, all seven collections run natively: R §13's terracotta row **exactly** (the two
 joins, 007 unplaced, both `pen` 0, tight 0.56/0.67 and 0.54/0.56, seams 20.667 t and 12.333 t);
@@ -1223,7 +1252,7 @@ only the slab is committed.
 | item | architectural place | what phase 1 already provides |
 |---|---|---|
 | 3 confidence tiers, review images, constraints | `Tier` on `Candidate`; a second `Thresholds` set (`confirmed`, `probable`) in `Params`; `report.rs` gains "Probable joins" and per-join `tier`; `render.rs` gets `render_pair(a, b, T)` (both fragments, three views, seam highlighted) used by `--review-images`; `assembly/constraints.rs` reads `constraints.json` `{must_join, must_not_join}`: `must_not_join` removes pairs before matching and rejects candidates, `must_join` forces the pair through the second-pass budget and accepts its best candidate that passes the *probable* thresholds; the desktop app writes this file from the review screen | the types and the file format; `tier` = `Confirmed ⇔ accepted` |
-| 4 object separation | `assembly/consistency.rs`: cycle consistency is evaluated for every candidate join against all paths in the group (the reference checks only direct alternatives); `Features` per fragment computed in preprocessing and stored in the cache: `shell_radius` (quadric fit on the shell samples), `colour_lab_mean/std` (from vertex colours when present; the PLY reader keeps them), `thick`; `GroupFeatures` = medians + MAD; `groups.rs` reports every group as an object with its consensus and flags a join whose fragment deviates > k·MAD | `Features` struct and cache slots (empty in phase 1), the PLY colour path |
+| 4 object separation (**measured on `mixed_ABG`**, whose baseline both implementations set in §10.3: port 3 cross-object joins at purity 0.864, reference 1 at 0.706, fragment accuracy 58.3 % on both) | `assembly/consistency.rs`: cycle consistency is evaluated for every candidate join against all paths in the group (the reference checks only direct alternatives); `Features` per fragment computed in preprocessing and stored in the cache: `shell_radius` (quadric fit on the shell samples), `colour_lab_mean/std` (from vertex colours when present; the PLY reader keeps them), `thick`; `GroupFeatures` = medians + MAD; `groups.rs` reports every group as an object with its consensus and flags a join whose fragment deviates > k·MAD | `Features` struct and cache slots (empty in phase 1), the PLY colour path |
 | 5 group-level matching | `matching::Matchable` trait implemented by `MatchData` (one fragment) and `GroupMatchData` (members with poses): breakline = union minus points within `seam` of another member's breakline; fracture samples = union minus points within `2·tight` of another member's fracture surface; BVH = two-level (member BVHs + transforms, no rebuild); `Executor` batches carry per-member transforms; the pipeline's block scheduler treats a group as one entity | the trait boundary; the BVH designed with a top level from day one |
 | 6 special parts, memory | `FaceLabel::Solid` from a volume test in `segment.rs` (cone rays that hit no far wall but whose centroid is enclosed at > 2 t depth); `Rim` from the thickness estimator's second mode; both excluded from the fracture mask and from breaklines; memory-bounded preprocessing is §5 step 2; streaming decimation (out-of-core) remains an open question (§13) | u8 labels, the semaphore |
 
@@ -1245,12 +1274,12 @@ shorten phase 1+2 to ≈ 14 weeks because GPU work can start once the CPU ICP is
 | 1c, step C2 | done: Open3D's ICP (R §7), the two refinement ladders (R §5.4–5.6), R §5.5's suppression and the `stage1`/`stage2` parity rows, with experiment E5 | | injected 3 654 (stage 1) and 3 400 (stage 2) with no failure on 358 pairs of eight sets — median pose deviation 0.000° / 1e-13 t, worst 5.4e-3 t of 0.01 t; no native column (§10.2) | 48 candidates of 74 090 have ladders neither implementation can reproduce, measured on Open3D itself; E5 answered: `f32` point loops and the centred assembly are both outside §10.2 (§3, §7) |
 | 1c, step C3 | done: R §6's five verification scores and R §6.5's rule, R §5.7's ranking, the whole of `match_pair`, R §4.3's screening, and the `verify` and `candidates` parity rows | | injected 2 508 of 2 508 on 256 pairs of eight sets — `tight` and `seam` bit-identical on every candidate, `gap` ≤ 3e-6 t, `cont` ≤ 2.7e-14 t, `accepted` identical, the returned five in the reference's own order; natively the accepted sets differ and the row becomes an alarm (§10.2) | Open3D's own signed distance is self-contradictory on a mesh that `closed_enough` accepts (R §6.4); the native accepted set cannot be identical and is measured against the ground truth instead |
 | 1d | assembly, refinement, recentre, report/transforms/meshes, renderer, CLI, determinism tests | 2 | R§13 gates natively; CI green on 4 OSs | none major |
-| 1e | profiling and CPU tuning to §10.3 CPU gates | 1.5 | §10.3's CPU gates **on the development sets** — terracotta, pots A/B/C/G/H, `mixed_ABG`, synthetic 20 — with every output byte-identical to the one phase 1d wrote; the three large rows are carried as the projection §10.3 states and discharged at the final acceptance (decision 2026-09-07) | the 2 h collection gate is no longer measured here: E1 projects 39–44 min against it from the per-pair cost, which is a projection and not a run |
+| 1e | profiling and CPU tuning to §10.3 CPU gates | 1.5 | §10.3's CPU gates **on the development sets** — terracotta, pots A/B/C/G/H, `mixed_ABG` (a roadmap-item-4 target: its cross-object joins and group purity are **not** a phase gate, §10.3), synthetic 20 — with every output byte-identical to the one phase 1d wrote; the three large rows are carried as the projection §10.3 states and discharged at the final acceptance (decision 2026-09-07) | the 2 h collection gate is no longer measured here: E1 projects 39–44 min against it from the per-pair cost, which is a projection and not a run |
 | **phase 1 total** | | **11** | | |
 | 2a | wgpu device/adapter/self-test, buffers, slots, batch structs; E7, E8 | 1.5 | self-test passes on Metal + lavapipe | naga/driver issues |
 | 2b | hash grid + `icp_rung` (both estimators, in-kernel solves), `coarse_scores` | 2.5 | CPU/GPU cross-check within §10.2 | shared-memory limits; f32 conditioning |
 | 2c | BVH kernels (`bounded_distance`, `inside`) | 1.5 | cross-check | traversal stack in WGSL |
-| 2d | scheduler, pipelining, TDR chunking, memory management | 1.5 | the GPU gates of §10.3 **on the development sets**, and §5's memory semaphore holding a projected 170-scan preprocessing budget (E1 §7); "synthetic 170 ≤ 30 min" is the final acceptance after phase 2, not a 2d exit (decision 2026-09-07) | overlap efficiency; a projection carried this long can be wrong in a way only the run shows |
+| 2d | scheduler, pipelining, TDR chunking, memory management | 1.5 | the GPU gates of §10.3 **on the development sets** (`mixed_ABG` included, on the same terms: it is roadmap item 4's baseline, not a quality gate), and §5's memory semaphore holding a projected 170-scan preprocessing budget (E1 §7); "synthetic 170 ≤ 30 min" is the final acceptance after phase 2, not a 2d exit (decision 2026-09-07) | overlap efficiency; a projection carried this long can be wrong in a way only the run shows |
 | 2e | vendor matrix (NVIDIA/AMD/Intel/Apple), tuning | 2 | E8 matrix green | Intel/AMD driver quirks |
 | **phase 2 total** | | **9** | | |
 | 3a | pyo3 module, numpy interop, `SHERD_REFIT_BACKEND=rust` routing in the Python package, A/B on the fixtures | 2 | Python pipeline with Rust kernels reproduces the Rust CLI | packaging on Windows |

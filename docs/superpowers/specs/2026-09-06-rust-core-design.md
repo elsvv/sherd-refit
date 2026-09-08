@@ -347,6 +347,19 @@ Cancellation: every stage checks an `AtomicBool` between units of work (a pair, 
 CLI wires Ctrl-C, the desktop app wires a button. Progress: a `Progress` trait with
 `(stage, done, total)` callbacks; the CLI prints, the app emits events.
 
+**Built in phase 2d (task G3)** as `sherd_core::progress::{Cancel, Progress, Watch}`, with `Watch`
+— the pair of them, both optional — held by `RunOptions` and defaulting to neither, so a run that
+asks for nothing pays nothing. The checks are between units and **never inside one**: a fragment in
+preprocessing, a pair in matching. That is what makes cancellation safe rather than nearly safe —
+a stage either produced a whole fragment or produced none of it, so nothing half-built is written
+or cached, and `run` on a cancelled collection leaves an empty output directory (tested). The CLI
+wires Ctrl-C through the `ctrlc` crate (`std` has no signal API on any platform); a **second**
+Ctrl-C aborts, because the first can take as long as the pair in flight. On the GPU path there is
+nothing to unwind: a dispatch is bounded by §6.4's chunking and `sherd_gpu::pipeline`'s submitting
+thread retires every command buffer it submitted, so a cancelled run leaves the device exactly as a
+finished one does — `a_cancelled_gpu_run_leaves_the_device_usable` cancels from the run's own
+progress callback and then puts a real rung through the same device.
+
 ## 6. Executor abstraction and the GPU plan
 
 ### 6.1 The interface
@@ -500,6 +513,38 @@ per-candidate cost at 12 000 points × 30 iterations is expected at 1–3 ms of 
   the ten-core CPU's 12.6 ns of wall and the matching stage came out *slower* on the GPU; with it,
   2.63 ns/query.
 
+**Built in phase 2d (task G3), and the clause that mattered is "one submitting thread".** G2 read
+its 1.0× as an idle device; G3 measured it and the queue in front of the device is a *host* queue.
+`wgpu::Device::poll` is not a per-thread wait: every worker that hands a batch to the device calls
+`poll(Wait { submission_index })`, all of them take the device's own locks, and the device idles
+while they take turns. Three measurements, one collection (`notes/2026-09-08-g3-pipeline.md` §2):
+the stage stopped improving at **four** worker threads (16.08 s against 15.97 s at nine); at
+eighteen threads the profile showed **4.9 of ten cores** doing anything; and the same 330
+submissions that take **6.4 s** on one thread took 14 s of wall to drain through nine.
+
+`sherd_gpu::pipeline::Submitter` is the fix, and it is this paragraph's own sentence: one thread
+owns every `submit`, every `poll` and every `map_async` for the life of the device, workers record
+their command buffer on their own thread and then wait on a channel. Three sizings, all measured
+rather than taken from this text:
+
+* **`DEPTH` is 4, not "double".** `synthetic_20`'s stage at depth 2 / 4 / 8: 12.75–14.62 s /
+  **12.05–12.79 s** / 12.79–14.05 s. Two is not enough because the submitter has host work between
+  two retires — the map, the copy out, the reply — and the device drains a queue of one while it
+  does that; eight is worse because a worker then waits behind seven other jobs.
+* **`Executor::device_slack` is half the pool again** — "CPU threads prepare block k+1" needs
+  threads that are not waiting. Worth **1.93×** at `--threads 1`, **1.36×** at four and 1.00× at
+  nine, which is what a knob for covering a wait should look like: it pays where the pool is
+  smaller than the machine and is free where the pool already fills it.
+* **One submission per `Executor` call**, not one per dispatch plus one for the readback:
+  `Kernel::record` records into a caller-owned encoder and the readback copy goes into the same
+  command buffer. `synthetic_20` went from 658 submissions to 330.
+
+And one thing this section assumed that is false on an integrated part: **the CPU and the GPU are
+not independent resources.** The same 330 submissions of the same work take 5.66 s of device time
+with one worker thread and 9.06 s with nine — the device loses **1.60×** of its own throughput as
+the ten cores fill up — so the matching stage has a minimum at *six* workers (11.86 s) rather than
+at nine (13.38 s). §6.6 carries the consequence.
+
 ### 6.5 Kernel semantics (WGSL sketches; the CPU code mirrors them line by line)
 
 ```wgsl
@@ -593,6 +638,32 @@ not exist. With the pipeline as it is — one pair per rayon task — the matchi
 idle for the rest while ten threads take turns blocking on it. `Backend::Auto` therefore does not
 take the GPU (§6.8), and the collection-level estimate below should be read as *what the device
 could do* (14 365 pairs × 33.4 ms ≈ 8 minutes of GPU time) rather than as a wall time.
+
+**Phase 2d (task G3) built the scheduler and measured what was behind it, and the answer changes
+this section's conclusion a second time.** With §6.4's submitting thread the matching stage is
+**1.04–1.40×** over the seven development collections (terracotta 1.11, pot_A 1.25, pot_B 1.40,
+pot_C 1.13, pot_G 1.04, pot_H 1.06, synthetic_20 1.08; three interleaved runs each) and the
+device's occupancy on `synthetic_20` went from at best 41 % to 68 %. It is not 2× and it will not
+become 2× on this machine, for a reason that has nothing to do with scheduling: **the device and
+the ten cores share one power and memory-bandwidth envelope.** The same 330 submissions of the same
+work take
+
+| `--threads` | 1 | 2 | 4 | 6 | 9 |
+|---|---|---|---|---|---|
+| device with work outstanding | 5.66 s | 5.67 s | 6.08 s | 7.62 s | 9.06 s |
+| matching stage | 36.41 s | 23.69 s | 13.84 s | **11.86 s** | 13.38 s |
+
+so the arithmetic "78 core-seconds of CPU work over ten cores, overlapped with 6.4 s of device
+work, is an 8-second stage" is wrong in its premise: overlapping them makes each of them slower.
+The collection-level estimate should be read with the same correction — the GPU column of the table
+above is a device that has the machine to itself, and a run does not.
+
+*Where the CPU time goes in a GPU-backend run*, which this section never had (task G3 §2,
+`synthetic_20`, core-seconds over a 16.9 s wall): R §5.4/5.6's ICP rungs on the CPU 34.75 (the ones
+under the size thresholds), pair setup 14.47, **R §6's verification 12.45**, stage 1 4.91, rayon
+idle 3.86, refinement 3.32, and **device-side preparation — grids, uploads, bind groups — 1.31, or
+1.7 %**. That last figure is the one to remember before optimising anything on the host side of a
+dispatch.
 
 Per mid-size pair (R§13 cost structure), single-thread Python core-seconds → estimated Rust CPU
 core-seconds → estimated GPU seconds (M2 Pro 16-core GPU, ≈ 0.5–1 G bounded NN queries/s on the
@@ -711,6 +782,11 @@ type) as a diagnostic, not a production mode.
   measures a bounded-NN kernel on an idle device; the stage is ten rayon tasks taking turns
   blocking on one queue. `Selection::decide` reads `AUTO_ELIGIBLE`, and it flips when §6.4's block
   scheduler lands (phase 2d), not when a kernel does.
+  **Phase 2d landed the scheduler and the constant did not flip.** The stage is now 1.04–1.40× over
+  the seven development collections and the bar is 1.5×; what holds it there is §6.6's envelope —
+  the device losing 1.60× of its own throughput as the ten cores fill up — and not a queue. The
+  constant now carries that table, and what would move it is a device that does not share the
+  envelope (E8's discrete rows), not more work on this one.
 - **`--backend gpu`** opens the device and runs the self-test, and **fails** — with the adapter
   list, the unmet limits or the failed checks — when either step fails, rather than falling back
   silently. A macOS self-test failure means the CPU with no second opinion: there is no software
@@ -733,6 +809,16 @@ type) as a diagnostic, not a production mode.
   budget refused rather than admitted after emptying the table. It holds no wgpu type, so its
   eviction rule is tested on every CI platform without an adapter. On adapters reporting < 2 GB
   the slot count halves and `P` shrinks (`SlotTable::with_capacity`).
+  **Enforced in phase 2d (task G3)** by `sherd_gpu::device::Allocations` and `--gpu-memory GB`
+  (default 1 GB, `0` removes the bound): each kernel adds up the buffers it is about to create and
+  **reserves them before the first one exists**; what does not fit is answered by the CPU executor
+  and counted as a refusal rather than allocated anyway, and the reservation is an RAII guard so a
+  call's bytes are released when the call returns. Measured peaks at the default: **103 MB** on
+  `synthetic_20`, 21 MB on pot_H, no refusals — an order of magnitude under the row. `SlotTable`
+  still has **no consumer**: what a kernel uploads is a *pair's* target at a *rung's* radius, not a
+  fragment, so there is nothing per-fragment to keep resident until §6.5's multi-pair batch exists,
+  and task G3 §2 measured device-side preparation at 1.7 % of a run, so a resident set would be
+  optimising a rounding error.
 - **Precision:** f32 only (`f16`/`f64` unused; `SHADER_F64` is not available on Metal anyway);
   `Scales` and thresholds computed in f64 on the CPU and passed as f32.
 - **Untestable here, and said so rather than assumed:** the staging upload path for discrete GPUs
@@ -778,6 +864,7 @@ with the same name, default and meaning (R§1.4), plus:
 |---|---|
 | `--backend auto|cpu|gpu` (default `auto`) | executor selection (§6.8) |
 | `--gpu-adapter NAME|INDEX` | override adapter |
+| `--gpu-memory GB` (default 1) | what the kernels may hold on the device at once (§1, §6.8); `0` removes the bound, and a batch that does not fit is answered by the CPU and counted |
 | `--memory-budget GB` | preprocessing budget (§5) |
 | `--dump-fixtures DIR` | write the Rust-side fixture (§10.1) |
 | `--inject-from DIR --inject-stages a,b,…` | parity mode: take the listed stage inputs from a Python fixture |
@@ -1509,6 +1596,8 @@ shorten phase 1+2 to ≈ 14 weeks because GPU work can start once the CPU ICP is
 | 2b | hash grid + `icp_rung` (both estimators, in-kernel solves), `coarse_scores` | 2.5 | CPU/GPU cross-check within §10.2 | shared-memory limits; f32 conditioning |
 | 2b, task G2 | done: `kernels/coarse.wgsl` (§6.5, one workgroup per hypothesis, an integer count out) and `kernels/icp.wgsl` (both estimators, every iteration of a rung in one dispatch, the shifted frame with §7's correction, an equilibrated 6×6), the three size thresholds, per-method counters, and `gpu-check --pairs/--chaos/--policy` (§10.4 layer 3) | | coarse **bit-identical on 2 934 052 of 2 934 122 hypotheses**, the other 70 one probe point away; stage 1 inside §10.2's rotation row on 7 of 8 sets and its translation row at the cloud on 8 of 8; stage 2 inside on 4 of 8, the tail separated by a control into ladder and kernel; end to end **the same used joins, groups and `evaluate.py` scores as the CPU on all seven collections**, two GPU runs byte-identical, CPU outputs unmoved | both risks were real: 29 accumulators do not fit one 16 KB reduction, and `f32` needed the shift *and* §7's composition correction *and* an equilibrated solve. The one this row did not name is the one that decided the phase: **the stage is 1.0× because the pipeline blocks ten threads on one queue**, which is 2d's |
 | 2c | BVH kernels (`bounded_distance`, `inside`) | 1.5 | cross-check | traversal stack in WGSL |
+| 2c, task G3 | **not built, and measured rather than deferred.** R §6 is 15.9 % of a GPU-backend run's core time, so the rule to build it fires; the batches are 10 900 (`bounded_distance`) and 20 000 (`inside`) points, which is the size at which `icp.wgsl` already wins | | moving R §6 to the device takes **at most 1.2 s** off a 13.38 s stage and adds 43.7 M BVH queries to a device that has 4.3 s of slack, is 1.6× down on its idle throughput and gets slower the busier the CPU beside it is (§6.6). The hash-grid kernel — no stack, no triangle projection — runs at 55–80 M queries/s on an **idle** device | the decision is against the trigger and rests on §6.6's envelope; a discrete adapter (E8) or a prototype measured against `gpu-check`'s `distance` and `inside` rows would settle it |
+| 2d, task G3 | done: §6.4's software pipeline — one submitting thread, four command buffers in flight, `Executor::device_slack`, one submission per `Executor` call — plus `Occupancy` (the union of the outstanding intervals, not the per-thread sum), `--gpu-memory` and §1's reservation, §5's `Cancel`/`Progress` with Ctrl-C, and the TDR/2-D-dispatch tests | | matching **1.04–1.40×** on the seven development collections (was 1.0×), device occupancy 41 % → 68 %, peak device memory 103 MB of 1 GB; parity 23 804 / 0 and **every used join, group and pose bit-identical to G2's on both backends** | the risk this row named — "overlap efficiency" — is the one that bit, in a form no scheduler addresses: on an integrated part the device loses 1.60× of its throughput as the ten cores fill up, so §6.6's overlap arithmetic does not hold and the stage's minimum is at six workers, not nine |
 | 2d | scheduler, pipelining, TDR chunking, memory management | 1.5 | the GPU gates of §10.3 **on the development sets** (`mixed_ABG` included, on the same terms: it is roadmap item 4's baseline, not a quality gate), and §5's memory semaphore holding a projected 170-scan preprocessing budget (E1 §7); "synthetic 170 ≤ 30 min" is the final acceptance after phase 2, not a 2d exit (decision 2026-09-07) | overlap efficiency; a projection carried this long can be wrong in a way only the run shows |
 | 2e | vendor matrix (NVIDIA/AMD/Intel/Apple), tuning | 2 | E8 matrix green | Intel/AMD driver quirks |
 | **phase 2 total** | | **9** | | |

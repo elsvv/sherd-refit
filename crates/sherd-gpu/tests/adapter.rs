@@ -545,6 +545,14 @@ fn the_icp_rung_crossover_is_a_candidate_count() {
 /// The same shape as the ICP crossover, and the same conclusion in a different place:
 /// `sherd_gpu::coarse::MIN_QUERIES` is set from this table, and the rows below it read ≈ 1.0×
 /// because the executor sent them to the CPU.
+///
+/// Since task G4 the table has a **second** boundary in it, and the two are measured under
+/// different conditions on purpose. This test runs on an idle device, and on an idle device the
+/// biggest cell — 40 000 poses on 800 points, 32 M queries — is the *best* one, 3.6×. In a run it
+/// is not, because the ten cores are busy beside the device (D §6.6), and `coarse::MAX_QUERIES`
+/// is set from runs rather than from this table. So the assertion below reads both thresholds,
+/// and the printed ratio of the last row is the measurement that says why a ceiling could never
+/// have been derived here.
 #[test]
 fn the_coarse_crossover_is_a_query_count() {
     // Not in a debug build, for the reason the ICP crossover gives.
@@ -605,11 +613,19 @@ fn the_coarse_crossover_is_a_query_count() {
                 "  {n:>5}  {points:>6}  {:>7}  {cpu_time:>6.1}   {gpu_time:>6.1}   {:>5.2}x  {}",
                 n * points,
                 cpu_time / gpu_time,
-                if on_device { "device" } else { "cpu (below the threshold)" }
+                if on_device {
+                    "device"
+                } else if n * points < sherd_gpu::coarse::MIN_QUERIES {
+                    "cpu (under MIN_QUERIES)"
+                } else {
+                    "cpu (over MAX_QUERIES)"
+                }
             );
+            let queries = n * points;
             assert_eq!(
                 on_device,
-                n * points >= sherd_gpu::coarse::MIN_QUERIES,
+                (sherd_gpu::coarse::MIN_QUERIES..=sherd_gpu::coarse::MAX_QUERIES)
+                    .contains(&queries),
                 "{n} × {points} went the wrong way"
             );
         }
@@ -634,11 +650,17 @@ const PERIOD: usize = 200;
 /// * the poses repeat with period 200, so score `p` must equal score `p % 200` — across the
 ///   65 535-workgroup boundary, across the chunk boundary and across `first_pose` — and the first
 ///   200 of them must be exactly what the CPU executor computes.
+///
+/// The executor is put in `force_device` mode because 24 M queries is over `coarse::MAX_QUERIES`,
+/// the batch **policy** task G4 measured: in a run a batch this size is the CPU's. This test is
+/// about the *kernel*, so it asks for the kernel, exactly as `gpu-check` does — which is what
+/// `force_device` exists for. The policy has its own test in `coarse.rs`.
 #[test]
 fn the_coarse_kernel_chunks_past_the_dispatch_caps_and_folds_the_grid() {
     let Some(gpu) = device("coarse chunking") else { return };
     let Some(test) = selftest("coarse chunking", &gpu) else { return };
     let executor = GpuExecutor::new(std::sync::Arc::new(gpu), test);
+    executor.force_device(true);
 
     let mut target = Vec::new();
     for i in 0..12 {

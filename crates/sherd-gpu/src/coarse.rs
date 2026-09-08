@@ -57,6 +57,43 @@ pub const MAX_POINT_QUERIES: usize = 20_000_000;
 /// poses on `brk_sub`, which lands near it and goes either way by collection.
 pub const MIN_QUERIES: usize = 200_000;
 
+/// The **largest** batch worth a dispatch, in point-queries — the ceiling [`MIN_QUERIES`] is the
+/// floor of, and measured the same way.
+///
+/// D §6.6 predicted this one before it was measured: *"§6.4's three size thresholds are a floor;
+/// what this says is that there is also a ceiling, a batch large enough that running it on the
+/// device costs the machine more than it saves."* The reason is task G3 §5's envelope — the device
+/// and the ten cores share one power and memory-bandwidth budget, so a worker that hands the
+/// device a very large batch both waits a long time and slows down the nine cores it is waiting
+/// beside, while the CPU executor's own answer to that batch is `into_par_iter` over the whole
+/// pool.
+///
+/// Measured on `synthetic_20`, whose 190 coarse calls carry 1.65 G queries at a median of 8.1 M
+/// per call — three warm runs per cap, interleaved with a CPU control (task G4 §3):
+///
+/// | ceiling | calls refused | matching stage, median | against the CPU |
+/// |---|---|---|---|
+/// | 4 M | 165 of 190 | 15.19 s | 1.03× |
+/// | 6 M | 132 | 14.11 s | 1.11× |
+/// | 8 M | 98 | 13.03 s | 1.20× |
+/// | **12 M** | **41** | **12.16 s** | **1.29×** |
+/// | 16 M | 12 | 12.23 s | 1.28× |
+/// | none | 0 | 12.78 s | 1.23× |
+///
+/// The curve is flat between 12 M and 16 M and falls away below 8 M, so the constant is the middle
+/// of the flat part rather than its best single median. `pot_H`'s largest coarse batch is 3.6 M
+/// queries and every other development collection's is smaller still, so on all of them this
+/// threshold is a no-op — it is the ceiling of the *large* collections, which is where it will
+/// matter and where it cannot be measured yet (D §10.3's decision of 2026-09-07).
+///
+/// It is a **deterministic function of the batch**, which the thing that suggested it was not:
+/// task G3 §8 read `--gpu-memory 0.05`'s gain as "refusing the seventeen largest batches", and
+/// task G4 §2 measured that the largest single request on that run is 20.7 MB against a 100 MB
+/// peak — the memory cap was refusing whatever *arrived while the device was busy*, which is a
+/// property of the schedule and not of the batch, and would make two runs of the same collection
+/// disagree in their last bits. This does not.
+pub const MAX_QUERIES: usize = 12_000_000;
+
 /// The WGSL source: D §6.2's grid, then the kernel that queries it.
 const SOURCE: &str =
     concat!(include_str!("kernels/grid.wgsl"), include_str!("kernels/coarse.wgsl"));
@@ -119,7 +156,8 @@ impl CoarseKernel {
     /// `None` is not a failure: an empty probe, an empty breakline or a radius the grid cannot be
     /// built at are the cases the CPU executor answers with zeros, and the caller falls through to
     /// it rather than inventing an answer here.
-    /// `force` ignores [`MIN_QUERIES`] — the cross-check harness's switch, never a run's.
+    /// `force` ignores [`MIN_QUERIES`] and [`MAX_QUERIES`] — the cross-check harness's switch and
+    /// the chunking test's, never a run's.
     pub fn run(
         &self,
         gpu: &Gpu,
@@ -137,6 +175,11 @@ impl CoarseKernel {
         }
         // Too small to be worth a submission and a readback (see `MIN_QUERIES`).
         if !force && poses * points < MIN_QUERIES {
+            return Ok(None);
+        }
+        // Too large to be worth a dispatch: past this the device costs the machine more than it
+        // saves (see `MAX_QUERIES`).
+        if !force && poses * points > MAX_QUERIES {
             return Ok(None);
         }
         let Some(grid) = HashGrid::build(batch.target.points, batch.radius) else {
@@ -277,7 +320,7 @@ pub fn score_of(agree: u32, points: usize) -> f64 {
 mod tests {
     #![allow(clippy::float_cmp, reason = "the point of `score_of` is which double it produces")]
 
-    use super::{MAX_POINT_QUERIES, MIN_QUERIES, score_of};
+    use super::{MAX_POINT_QUERIES, MAX_QUERIES, MIN_QUERIES, score_of};
 
     /// The host-side division is the CPU executor's, to the bit — including the cases where a
     /// reciprocal would differ.
@@ -291,6 +334,22 @@ mod tests {
         let differing = (0_u32..=60).filter(|&k| f64::from(k) * reciprocal != f64::from(k) / 60.0);
         assert!(differing.count() > 0, "if these agreed the distinction would be academic");
         assert_eq!(score_of(0, 0), 0.0, "an empty probe scores zero rather than NaN");
+    }
+
+    /// The ceiling sits between the floor and the dispatch cap, and it is the batch policy — the
+    /// chunking limit above it is the driver's.
+    #[test]
+    fn the_ceiling_is_a_policy_and_the_dispatch_cap_is_not() {
+        const { assert!(MIN_QUERIES < MAX_QUERIES && MAX_QUERIES < MAX_POINT_QUERIES) };
+        // The measured cells of `MAX_QUERIES`'s table: 8 M is on the device, 16 M is not, and the
+        // 22.7 M largest call of `synthetic_20` is not.
+        const { assert!(8_000_000 <= MAX_QUERIES && 16_000_000 > MAX_QUERIES) };
+        // `pot_H`'s largest coarse batch is 3.6 M queries: on that collection the ceiling never
+        // fires, which is why it costs nothing there.
+        const { assert!(3_600_000 < MAX_QUERIES) };
+        // A batch over the ceiling would still have been chunked rather than refused by the
+        // dispatch cap, so the two limits are genuinely different rules.
+        const { assert!(MAX_QUERIES < MAX_POINT_QUERIES) };
     }
 
     /// D §6.4 step 2's cap is a query count, so the pose chunk depends on the probe size, and so

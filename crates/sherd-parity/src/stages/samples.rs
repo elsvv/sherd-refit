@@ -224,7 +224,9 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
                 }
 
                 // --- R §3.5.6: the band, recomputed from the reference's own arrays -----------
-                let d_brk = samples::breakline_distance(&theirs.s, &brk);
+                // With the pipeline's own bounded sweep, and a row that measures the bound
+                // against the unbounded array it stands for (V5-D5).
+                let d_brk = margin_distances(&mut report, name, &theirs.s, &brk, params);
                 let mask = samples::margin_indices(&theirs.sp, &labels, &d_brk, params);
                 report.push(Check::count(
                     name,
@@ -301,7 +303,7 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
                 // reference's comes from its own `md.rng.json`.
                 #[allow(clippy::cast_precision_loss, reason = "sample counts are far below 2^53")]
                 let (ours_margin, theirs_margin) = (
-                    native_margin(&fr) as f64 / ours.n_surface().max(1) as f64,
+                    native_margin(&mut report, name, &fr) as f64 / ours.n_surface().max(1) as f64,
                     theirs.n_margin as f64 / theirs.s.len().max(1) as f64,
                 );
                 report.push(Check::absolute(
@@ -431,9 +433,59 @@ fn dump_params(
 }
 
 /// R §3.5.6's margin on the port's own fragment, **before** the thinning of `margin_idx`.
-fn native_margin(fr: &Fragment) -> usize {
-    let d_brk = samples::breakline_distance(&fr.samples.surface_f64(), &fr.brk.points_f64());
+fn native_margin(report: &mut StageReport, name: &str, fr: &Fragment) -> usize {
+    let d_brk = margin_distances(
+        report,
+        name,
+        &fr.samples.surface_f64(),
+        &fr.brk.points_f64(),
+        fr.samples.params,
+    );
     samples::margin_indices(&fr.samples.sp, &fr.labels, &d_brk, fr.samples.params).len()
+}
+
+/// R §3.5.6's `d_brk`, computed the way the **pipeline** computes it, with a row that measures the
+/// bound against the unbounded array it stands for.
+///
+/// [`samples::match_arrays`] fills `d_brk` with [`samples::breakline_distance_below`] at
+/// `1.5 t`, which reports every distance at or beyond that bound as `∞` instead of finding it:
+/// [`samples::margin_indices`] reads the array only as `inner < d < outer` and `∞ < outer` is the
+/// same `false`, so the *band* is unchanged while the array is not (E2 §5,
+/// `notes/2026-09-07-e2-tuning.md`). Until task Z this harness recomputed the band with the
+/// **unbounded** [`samples::breakline_distance`] at both of its call sites, so the row that gates
+/// R §3.5.6 gated an array the pipeline does not compute and the bounded sweep had no standing
+/// gate at all — its only check was task E2's own before/after byte comparison, which is a
+/// measurement and not a gate (V5-D5).
+///
+/// Both arrays are computed here and the band is taken from the bounded one, so `margin count`,
+/// `margin members` and `margin fraction` now exercise the pipeline's own function; the `margin
+/// bound` row beside them compares the two arrays directly, which is the stronger statement and
+/// the one the equivalence argument actually makes:
+///
+/// * where the true distance is **below** the bound, the two must agree **bit for bit** — both
+///   take `sqrt` of the same minimal squared distance, the bounded search having pruned only nodes
+///   whose box is further than the radius;
+/// * where it is at or beyond the bound, the bounded array must be `∞`.
+///
+/// Anything else is a differing entry. The row costs one unbounded sweep per fragment in the
+/// harness and nothing in the pipeline.
+fn margin_distances(
+    report: &mut StageReport,
+    name: &str,
+    queries: &[[f64; 3]],
+    brk: &[[f64; 3]],
+    params: SampleParams,
+) -> Vec<f64> {
+    let outer = samples::MARGIN_OUTER * params.t;
+    let bounded = samples::breakline_distance_below(queries, brk, outer);
+    let exact = samples::breakline_distance(queries, brk);
+    let differing = bounded
+        .iter()
+        .zip(&exact)
+        .filter(|(b, e)| if **e < outer { b.to_bits() != e.to_bits() } else { b.is_finite() })
+        .count();
+    report.push(Check::entries(name, "margin bound", differing, bounded.len()));
+    bounded
 }
 
 /// `Fracture` for true, `Shell` for false — the reference's `frac` mask as labels.

@@ -688,7 +688,7 @@ Two more places where the table is narrower than it sounds:
 | working mesh | faces, `res`, area, `watertight` | (mesh is injected) | faces ±5 %, `res` ±10 %, area ±0.5 %, same `watertight` |
 | segmentation | area-weighted label agreement; fracture fraction | ≥ 0.995; ±0.005 | ≥ 0.97; ±0.02 |
 | breakline | count; point-set Hausdorff; `dih` per matched point | exact; 1e-4 t; 0.1° | curve length (the sum of the nearest-neighbour distances) ±10 %; **2.3 t on 99 %**; distribution **KS < 0.086** — the last two calibrated to PMC-2's own sensitivity, derived below |
-| samples | `n_surface`, `n_frac`; sample-to-face residual; `fp` on fracture faces; margin count and membership; sample normals; **the reference's own points rebuilt from its own uniforms**; **the face pick over the reference's own cdf** | exact; 1e-9 t; exact; exact; 0.1° over faces conditioned to 1000 f32 ulps, with ≤ 0.1 % of samples left out; exact (bit for bit); exact | `n_frac` ±10 %; fracture-sample fraction ±0.02; margin fraction ±0.05; cross-set nearest-distance p95 of `S` and of `Pf` within a factor of two of the Poisson expectation `0.977·√(A/n)` |
+| samples | `n_surface`, `n_frac`; sample-to-face residual; `fp` on fracture faces; margin count and membership; **`margin bound`** — the bounded `d_brk` the pipeline computes against the unbounded array it stands for; sample normals; **the reference's own points rebuilt from its own uniforms**; **the face pick over the reference's own cdf** | exact; 1e-9 t; exact; exact; **exact (bit for bit below `1.5 t`, `∞` at or above it)**; 0.1° over faces conditioned to 1000 f32 ulps, with ≤ 0.1 % of samples left out; exact (bit for bit); exact | `n_frac` ±10 %; fracture-sample fraction ±0.02; margin fraction ±0.05; **`margin bound` exact, on the port's own arrays**; cross-set nearest-distance p95 of `S` and of `Pf` within a factor of two of the Poisson expectation `0.977·√(A/n)` |
 | hypotheses | `(pa, pb)` set **and order**; the pose of each; the twelve fields of R §1.2 | exact; 1e-4° / 1e-5 t; exact | pair matched at all; count ±30 % |
 | coarse | `cs` per hypothesis, on the reference's own `coarse.idx` | ≤ 1/60 + 1e-6, **and bit-exact** (`cs exact`); probe count and pool exact | — |
 | nms | kept hypotheses, on the reference's own walk order `nms1.order` | identical, in order | — |
@@ -911,6 +911,24 @@ requiring the midpoint of every face's interval of the reference's own cdf to pi
 **7 404 452 faces probed, none wrong**. A face whose interval is narrower than an ulp of the cdf is
 skipped, because no uniform can distinguish it either; `frag_008` has one such sliver in 126 236
 faces.
+
+**`margin bound`: the row gates the array the pipeline computes, which until task Z it did not**
+(V5-D5). Task E2 bounded R §3.5.6's `d_brk` sweep — `breakline_distance_below(..., 1.5 t)` reports
+every distance at or beyond the outer edge of the band as `∞` instead of finding it, because
+`margin_indices` reads the array only as `inner < d < outer` and `∞ < outer` is the same `false`.
+That is an equality of *predicates*, not of arrays, and the harness recomputed the band with the
+unbounded `breakline_distance` at both of its call sites, so the bounded sweep — a change to the
+port's own arithmetic on the critical path — had no standing gate: its only check was E2's
+before/after byte comparison of the outputs, which is a measurement of one tree at one commit and
+not a gate that runs again. The band is now taken from the pipeline's own bounded array in both
+modes, so `margin count`, `margin members` and `margin fraction` exercise it, and a row beside them
+compares the two arrays directly, which is the stronger statement: **below `1.5 t` the two must
+agree bit for bit** (both take `sqrt` of the same minimal squared distance, the bounded search
+having pruned only nodes whose box is further than the radius) **and at or above it the bounded one
+must be `∞`**. Anything else counts as a differing entry, and the gate is zero. The row costs one
+unbounded sweep per fragment in the harness and nothing in the pipeline. Measured, task Z:
+**0 differing of 1 360 000 entries** over the 68 fragments of the eight dumps, injected, and
+0 of 1 360 000 natively.
 
 **Its two normal columns needed a conditioning rule, and that rule is arithmetic rather than
 fitted.** Narrowing a vertex to `f32` moves it by up to one ulp of its coordinate, and moving a

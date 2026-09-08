@@ -99,6 +99,13 @@ struct GpuCheckArgs {
     /// one of them is excluded from the worst case and counted. It costs thirteen CPU ladders.
     #[arg(long)]
     chaos: bool,
+    /// Apply the executor's own size thresholds instead of forcing every batch to the device.
+    ///
+    /// Off by default: layer 3 is about the kernels, and a small collection's rungs are all under
+    /// `icp::MIN_CANDIDATES`, so with the thresholds on the table would compare the CPU with
+    /// itself. On, it reports what a `--backend gpu` run of this collection would actually do.
+    #[arg(long)]
+    policy: bool,
     /// Which GPU adapter to use, by index or by a substring of its name (D §9).
     #[arg(long, value_name = "NAME|INDEX")]
     gpu_adapter: Option<String>,
@@ -734,6 +741,7 @@ fn gpu_check(args: &GpuCheckArgs) -> Result<()> {
         args.gpu_adapter.as_deref(),
         args.pairs.max(1),
         args.chaos,
+        args.policy,
     )?;
     println!(
         "{:<12} {:>10} {:>12} {:>12} {:>10}  status",

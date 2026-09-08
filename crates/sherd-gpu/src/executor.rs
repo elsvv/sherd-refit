@@ -24,7 +24,7 @@
 //! implementation's, and [`Stats::errors`] says how often the device could not give one.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use sherd_core::executor::batch::{CoarseBatch, DistBatch, IcpBatch, InsideBatch, InsideOutcome};
@@ -189,6 +189,7 @@ pub struct GpuExecutor {
     selftest: SelfTest,
     kernels: Kernels,
     stats: Stats,
+    force: AtomicBool,
 }
 
 impl GpuExecutor {
@@ -231,7 +232,7 @@ impl GpuExecutor {
     #[must_use]
     pub fn new(gpu: Arc<Gpu>, selftest: SelfTest) -> Self {
         let kernels = Kernels { coarse: CoarseKernel::build(&gpu), icp: IcpKernel::build(&gpu) };
-        Self { gpu, selftest, kernels, stats: Stats::default() }
+        Self { gpu, selftest, kernels, stats: Stats::default(), force: AtomicBool::new(false) }
     }
 
     /// The device.
@@ -252,6 +253,27 @@ impl GpuExecutor {
         &self.stats
     }
 
+    /// Run the kernels whatever the size thresholds say — **for the cross-check harness only**.
+    ///
+    /// `coarse::MIN_QUERIES` and `icp::MIN_CANDIDATES` are a *policy*: they send a batch the CPU
+    /// answers faster to the CPU. D §10.4 layer 3 is about the *kernel*, and on a small collection
+    /// the policy would send every rung to the CPU and the cross-check would print a deviation of
+    /// zero it had not measured — the exact failure task G1 built the `delegated` label to avoid.
+    /// Measured on terracotta: all 24 of the four pairs' rungs are under the threshold, because
+    /// its breakline cloud is under 400 points.
+    ///
+    /// A run never sets this. `sherd-refit-rs gpu-check` does, and prints which rows reached the
+    /// device either way.
+    pub fn force_device(&self, force: bool) {
+        self.force.store(force, Ordering::Relaxed);
+    }
+
+    /// Whether the size thresholds are being ignored.
+    #[must_use]
+    pub fn forced(&self) -> bool {
+        self.force.load(Ordering::Relaxed)
+    }
+
     /// How many calls have fallen through to the CPU, per method.
     #[must_use]
     pub fn delegated(&self) -> (u64, u64, u64, u64) {
@@ -267,7 +289,7 @@ impl Executor for GpuExecutor {
 
     fn coarse_scores(&self, batch: &CoarseBatch<'_>) -> Vec<f64> {
         self.stats.coarse.call();
-        match self.kernels.coarse.run(&self.gpu, batch) {
+        match self.kernels.coarse.run(&self.gpu, batch, self.forced()) {
             Ok(Some((counts, run))) => {
                 self.stats.coarse.device(run.dispatches, run.gpu, run.queries);
                 counts.into_iter().map(|k| score_of(k, batch.points.len())).collect()
@@ -286,7 +308,7 @@ impl Executor for GpuExecutor {
 
     fn icp_rung(&self, batch: &IcpBatch<'_>) -> Vec<Registration> {
         self.stats.icp.call();
-        match self.kernels.icp.run(&self.gpu, batch) {
+        match self.kernels.icp.run(&self.gpu, batch, self.forced()) {
             Ok(Some((out, run))) => {
                 self.stats.icp.device(run.dispatches, run.gpu, run.iterations);
                 out

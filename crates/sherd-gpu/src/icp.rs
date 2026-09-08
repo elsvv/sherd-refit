@@ -132,10 +132,13 @@ impl IcpKernel {
 
     /// One rung for every candidate of `batch`, or `None` when the device cannot answer it.
     #[allow(clippy::too_many_lines, reason = "one submission: the frame, the buffers, the chunks")]
+    /// `force` ignores [`MIN_CANDIDATES`] and [`MIN_WORK`] — the cross-check harness's switch,
+    /// never a run's.
     pub fn run(
         &self,
         gpu: &Gpu,
         batch: &IcpBatch<'_>,
+        force: bool,
     ) -> Result<Option<(Vec<Registration>, IcpRun)>, GpuError> {
         let n = batch.len();
         let n_src = batch.source.len();
@@ -149,7 +152,7 @@ impl IcpKernel {
         }
         // Too small to be worth a dispatch: the CPU wins below the measured crossover, and a
         // wrong answer to that question costs more than the kernel gains (see `MIN_CANDIDATES`).
-        if n < MIN_CANDIDATES || n * n_src < MIN_WORK {
+        if !force && (n < MIN_CANDIDATES || n * n_src < MIN_WORK) {
             return Ok(None);
         }
         let plane = batch.options.estimation == Estimation::PointToPlane;

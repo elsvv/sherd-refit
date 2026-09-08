@@ -118,10 +118,12 @@ impl CoarseKernel {
     /// `None` is not a failure: an empty probe, an empty breakline or a radius the grid cannot be
     /// built at are the cases the CPU executor answers with zeros, and the caller falls through to
     /// it rather than inventing an answer here.
+    /// `force` ignores [`MIN_QUERIES`] — the cross-check harness's switch, never a run's.
     pub fn run(
         &self,
         gpu: &Gpu,
         batch: &CoarseBatch<'_>,
+        force: bool,
     ) -> Result<Option<(Vec<u32>, CoarseRun)>, GpuError> {
         let poses = batch.poses.len();
         let points = batch.points.len();
@@ -133,7 +135,7 @@ impl CoarseKernel {
             return Ok(None);
         }
         // Too small to be worth a submission and a readback (see `MIN_QUERIES`).
-        if poses * points < MIN_QUERIES {
+        if !force && poses * points < MIN_QUERIES {
             return Ok(None);
         }
         let Some(grid) = HashGrid::build(batch.target.points, batch.radius) else {

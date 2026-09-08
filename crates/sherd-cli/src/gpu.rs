@@ -71,6 +71,10 @@ impl Resolved {
     /// says nothing about *why*; "the device was busy for 6.1 s of it, over 1 520 dispatches" says
     /// whether the device was the limit or the queue in front of it was.
     #[must_use]
+    #[cfg_attr(
+        not(feature = "gpu"),
+        allow(clippy::unused_self, reason = "a build without the crate has no device to report")
+    )]
     pub(crate) fn device_lines(&self) -> Vec<String> {
         #[cfg(feature = "gpu")]
         {
@@ -394,6 +398,7 @@ pub(crate) fn check(
     adapter: Option<&str>,
     pairs: usize,
     chaos: bool,
+    policy: bool,
 ) -> Result<Vec<CheckRow>> {
     use std::sync::Arc;
 
@@ -419,6 +424,12 @@ pub(crate) fn check(
         })
         .collect();
     let executor = GpuExecutor::new(Arc::new(gpu), selftest);
+    // D §10.4 layer 3 is about the kernels, so by default it runs them whatever the executor's
+    // size thresholds say: on terracotta every one of the four pairs' rungs is under
+    // `icp::MIN_CANDIDATES × MIN_WORK`, and a table that printed a deviation of zero for a batch
+    // the CPU answered on both sides would be the lie task G1 built the `delegated` label to
+    // avoid. `--policy` asks for the thresholds a run actually applies.
+    executor.force_device(!policy);
 
     let wanted = |name: &str| stage == "all" || stage == name;
     let delegated = |name: &str, tolerance: f64, items: usize| CheckRow {
@@ -609,12 +620,14 @@ pub(crate) fn check(
         bail!("{}: no matchable pair among {} fragments", input.display(), fragments.len());
     }
 
+    let coarse_rows = rows.len();
     if wanted("coarse") {
         let mut row = coarse.row("coarse cs", tolerance::COARSE);
         row.status = format!("{} ({over_one_probe} over one probe point)", row.status);
         rows.push(row);
         rows.push(rescore.row("coarse s1", tolerance::COARSE));
     }
+    let icp_rows = rows.len();
     if wanted("icp") {
         rows.push(s1_rot.row("icp s1 deg", tolerance::POSE_DEG));
         rows.push(s1_ctrl.row("icp s1 ctrl", tolerance::POSE_DEG));
@@ -629,6 +642,7 @@ pub(crate) fn check(
         rows.push(s2_fit.row("icp s2 fit", tolerance::ICP));
         rows.push(s2_rmse.row("icp s2 rmse", tolerance::ICP));
     }
+    let icp_end = rows.len();
     if wanted("distance") {
         rows.push(CheckRow {
             items: distance.all.len(),
@@ -640,7 +654,27 @@ pub(crate) fn check(
         row.differing = inside_flag + inside_depth.differing;
         rows.push(row);
     }
+    // Every row that compares a kernel says how many of its calls actually reached the device.
     let stats = executor.stats();
+    let annotate = |rows: &mut Vec<CheckRow>,
+                    span: std::ops::Range<usize>,
+                    snapshot: sherd_gpu::MethodSnapshot| {
+        for row in &mut rows[span] {
+            if snapshot.delegated == 0 {
+                row.status = format!("{} [device]", row.status);
+            } else if snapshot.on_device == 0 {
+                "delegated — every call was the CPU's, so this row compares nothing"
+                    .clone_into(&mut row.status);
+            } else {
+                row.status = format!(
+                    "{} [{} of {} calls on the device]",
+                    row.status, snapshot.on_device, snapshot.calls
+                );
+            }
+        }
+    };
+    annotate(&mut rows, coarse_rows..icp_rows, stats.coarse.snapshot());
+    annotate(&mut rows, icp_rows..icp_end, stats.icp.snapshot());
     for line in stats.lines() {
         rows.push(CheckRow {
             stage: "counters".to_owned(),
@@ -871,6 +905,7 @@ pub(crate) fn check(
     _adapter: Option<&str>,
     _pairs: usize,
     _chaos: bool,
+    _policy: bool,
 ) -> Result<Vec<CheckRow>> {
     bail!("gpu-check: this binary was built without the `gpu` feature (D §2)")
 }

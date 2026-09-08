@@ -14,6 +14,8 @@
 
 use std::path::PathBuf;
 
+mod gpu;
+
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use sherd_core::fragment::cache;
@@ -59,8 +61,49 @@ enum Command {
     /// Time the pipeline against the gates of D §10.3.
     Bench(BenchArgs),
 
+    /// Feed identical batches to both executors and report where they disagree (D §10.4 layer 3).
+    GpuCheck(GpuCheckArgs),
+
     /// Print what this build is: versions, algorithm reference, backends.
     Info,
+}
+
+/// Arguments of `gpu-check`: D §10.4 layer 3's cross-check harness.
+///
+/// In phase 2a the four `Executor` stages have no kernels — `sherd-gpu`'s executor routes each of
+/// them to the CPU (D §12: 2b and 2c) — so their rows come back **`delegated`** rather than as a
+/// deviation of zero, and what actually runs on the device is the pair of self-test kernels E7
+/// measured. The table is the one the kernels will report into.
+#[derive(Debug, Args)]
+struct GpuCheckArgs {
+    /// Which stages to compare.
+    #[arg(long, value_enum, default_value_t = GpuStage::All)]
+    stage: GpuStage,
+    /// A collection to form the batches from (R §2's discovery); without it, and without
+    /// `--fixture`, only the self-test kernels run.
+    #[arg(long, value_name = "DIR")]
+    set: Option<PathBuf>,
+    /// A parity fixture dump to form the batches from, instead of `--set`.
+    #[arg(long, value_name = "DIR")]
+    fixture: Option<PathBuf>,
+    /// Which GPU adapter to use, by index or by a substring of its name (D §9).
+    #[arg(long, value_name = "NAME|INDEX")]
+    gpu_adapter: Option<String>,
+}
+
+/// `gpu-check --stage`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum GpuStage {
+    /// R §5.2's coarse score.
+    Coarse,
+    /// One rung of R §7's ICP.
+    Icp,
+    /// R §6.1's bounded point-to-surface distance.
+    Distance,
+    /// R §6.4's inside test.
+    Inside,
+    /// All four, and the self-test kernels above them.
+    All,
 }
 
 /// Arguments of `run`: every flag of `sherd_refit/cli.py`, with its name and its default (R §1.4),
@@ -160,6 +203,9 @@ struct RunArgs {
     /// Executor: `auto`, `cpu` or `gpu` (D §6.8).
     #[arg(long, default_value_t = Backend::Auto)]
     backend: Backend,
+    /// Which GPU adapter to use, by index or by a substring of its name (D §9).
+    #[arg(long, value_name = "NAME|INDEX")]
+    gpu_adapter: Option<String>,
     /// Neither read nor write the fragment cache (R §3.7).
     #[arg(long)]
     no_cache: bool,
@@ -380,6 +426,7 @@ fn main() -> Result<()> {
         Command::Segment(args) => segment(&args),
         Command::Parity(args) => parity(&args),
         Command::Bench(args) => bench(&args),
+        Command::GpuCheck(args) => gpu_check(&args),
         Command::Info => {
             info();
             Ok(())
@@ -404,7 +451,11 @@ fn info() {
     println!("sherd-refit-rs {CORE_VERSION}");
     println!("  algorithm reference: {ALGO_REF}");
     println!("  cache version:       {CACHE_VERSION}");
-    println!("  backends:            cpu (gpu arrives in phase 2)");
+    let mut backends = gpu::info_lines().into_iter();
+    println!("  backends:            {}", backends.next().unwrap_or_default());
+    for line in backends {
+        println!("                       {line}");
+    }
     let threads = std::thread::available_parallelism().map_or(0, std::num::NonZero::get);
     println!("  cores available:     {threads}");
     println!("  default seed:        {}", Params::default().seed);
@@ -523,11 +574,16 @@ fn run(args: &RunArgs) -> Result<()> {
             dir.display()
         );
     }
-    let backend = resolve_backend(args.backend)?;
+    // The pool is sized *before* the backend is resolved: D §6.8's self-test times the same batch
+    // on the CPU, over rayon, and a rayon call initialises the global pool at its default size —
+    // after which `set_threads` can only fail. The ratio the self-test reports is then measured
+    // against the pool the run will actually use, which is the ratio `Backend::Auto` wants.
     let threads = pool_threads(args.threads, args.workers);
     if let Err(e) = pipeline::set_threads(threads) {
         bail!("--threads {threads}: {e}");
     }
+    let resolved = gpu::resolve(args.backend, args.gpu_adapter.as_deref())?;
+    tracing::info!(backend = %resolved.backend, "{}", resolved.reason);
     let options = pipeline::RunOptions {
         target_faces: args.target_faces as usize,
         params: args.params(),
@@ -537,14 +593,17 @@ fn run(args: &RunArgs) -> Result<()> {
         write_meshes: !args.no_meshes,
         cache: !args.no_cache,
         workers: schedule_workers(args.workers),
-        backend,
+        backend: resolved.backend,
         memory: budget(args.memory_budget),
     };
     if args.force && !args.no_cache {
         clear_caches(&args.input, &args.out)?;
     }
     let started = std::time::Instant::now();
-    let summary = pipeline::run(&args.input, &args.out, &options)
+    if args.backend == Backend::Gpu {
+        println!("{}", resolved.reason);
+    }
+    let summary = pipeline::run_with(&args.input, &args.out, &options, resolved.engine)
         .with_context(|| format!("assembling {}", args.input.display()))?;
     let wall = started.elapsed().as_secs_f64();
 
@@ -628,14 +687,42 @@ fn print_timings(timings: &sherd_core::report::Timings, wall: f64) {
     println!("  {:<12} {wall:>8.2} s", "wall");
 }
 
-/// `--backend` resolved for a build with no GPU executor (D §6.8): `auto` falls back to the CPU
-/// and `gpu` is an error rather than a silent fallback, which is what a benchmark asking for it
-/// needs.
-fn resolve_backend(backend: Backend) -> Result<Backend> {
-    match backend {
-        Backend::Gpu => bail!("--backend gpu: the GPU executor arrives in phase 2 (D §6)"),
-        Backend::Auto | Backend::Cpu => Ok(Backend::Cpu),
+/// `gpu-check`: D §10.4 layer 3's cross-check table (D §6.8's kernels, then the four batches).
+fn gpu_check(args: &GpuCheckArgs) -> Result<()> {
+    let stage = match args.stage {
+        GpuStage::Coarse => "coarse",
+        GpuStage::Icp => "icp",
+        GpuStage::Distance => "distance",
+        GpuStage::Inside => "inside",
+        GpuStage::All => "all",
+    };
+    let rows = gpu::check(
+        stage,
+        args.set.as_deref(),
+        args.fixture.as_deref(),
+        args.gpu_adapter.as_deref(),
+    )?;
+    println!(
+        "{:<12} {:>10} {:>12} {:>12} {:>10}  status",
+        "stage", "items", "worst", "tol", "differ"
+    );
+    for row in &rows {
+        let (worst, tol) = if row.tolerance > 0.0 {
+            (format!("{:.3e}", row.worst), format!("{:.3e}", row.tolerance))
+        } else {
+            ("-".to_owned(), "-".to_owned())
+        };
+        println!(
+            "{:<12} {:>10} {:>12} {:>12} {:>10}  {}",
+            row.stage, row.items, worst, tol, row.differing, row.status
+        );
     }
+    let failed = rows.iter().filter(|r| r.failed()).count();
+    println!("\n{} row(s), {failed} failed", rows.len());
+    if failed > 0 {
+        bail!("{failed} of {} gpu-check rows failed", rows.len());
+    }
+    Ok(())
 }
 
 /// `--force`: removes the cache files of the collection about to be run, so every fragment is
@@ -946,14 +1033,19 @@ mod tests {
         }
     }
 
-    /// `--backend gpu` fails rather than falling back silently; `auto` resolves to the CPU while
-    /// there is no other executor (D §6.8).
+    /// `--backend gpu` is refused on a build without the `gpu` feature; with it, the flag is
+    /// resolved by `gpu::resolve`, which needs a device and is exercised by `gpu-check` instead.
     #[test]
-    fn the_backend_resolves_to_the_cpu_and_refuses_the_gpu() {
-        assert_eq!(super::resolve_backend(Backend::Auto).unwrap(), Backend::Cpu);
-        assert_eq!(super::resolve_backend(Backend::Cpu).unwrap(), Backend::Cpu);
-        let err = super::resolve_backend(Backend::Gpu).unwrap_err().to_string();
-        assert!(err.contains("phase 2"), "{err}");
+    fn the_backend_flag_parses_and_defaults_to_auto() {
+        assert_eq!(Backend::default(), Backend::Auto);
+        assert_eq!("gpu".parse::<Backend>().unwrap(), Backend::Gpu);
+        assert!("metal".parse::<Backend>().is_err());
+        #[cfg(not(feature = "gpu"))]
+        {
+            let err = super::gpu::resolve(Backend::Gpu, None).unwrap_err().to_string();
+            assert!(err.contains("without the `gpu` feature"), "{err}");
+            assert_eq!(super::gpu::resolve(Backend::Auto, None).unwrap().backend, Backend::Cpu);
+        }
     }
 
     #[test]

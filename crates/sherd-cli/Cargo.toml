@@ -13,8 +13,16 @@ publish.workspace = true
 name = "sherd-refit-rs"
 path = "src/main.rs"
 
+# `sherd-gpu` is an optional feature, on by default (D §2). `--no-default-features` gives a
+# CPU-only binary with no wgpu, no naga and no driver dependency at all — which is what a machine
+# with no GPU stack, and the `check` job of D §10.5, want to be able to build.
+[features]
+default = ["gpu"]
+gpu = ["dep:sherd-gpu"]
+
 [dependencies]
 sherd-core.workspace = true
+sherd-gpu = { workspace = true, optional = true }
 sherd-parity.workspace = true
 anyhow.workspace = true
 clap.workspace = true

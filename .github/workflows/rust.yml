@@ -47,6 +47,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # `sherd-gpu` is an optional feature of `sherd-cli` (D §2), so the CPU-only shape of the
+      # binary is a second thing that has to compile — a machine with no GPU stack builds it.
+      - run: cargo clippy -p sherd-cli --no-default-features --all-targets --locked -- -D warnings
 
   # Test layers 1, 2 and 4 of D §10.4 on the four platforms the releases are built for;
   # macos-14 is arm64, macos-13 is x86_64.
@@ -68,9 +71,14 @@ jobs:
         with:
           tool: cargo-nextest
       # meshopt builds meshoptimizer from C++; every runner ships a compiler for it.
+      # `sherd-gpu` is in the workspace from phase 2a, so this also proves it *builds* on all four
+      # platforms; whether an adapter exists there is the `gpu-software` job's question, and the
+      # tests below are the adapter-free ones — batch formation, the slot LRU, the dispatch and
+      # chunking arithmetic, and the reduction's CPU mirror (D §10.4 layer 1).
       - run: cargo build --workspace --all-targets --locked
       - run: cargo nextest run --workspace --all-targets --locked
       - run: cargo test --workspace --doc --locked
+      - run: cargo build -p sherd-cli --no-default-features --locked
 
   # The same suite in the profile the gates are measured in. D §10.3's runtime gates and every
   # parity run of D §10.2 use the release binary, so a test that only passes in debug is a test
@@ -98,6 +106,34 @@ jobs:
       - run: cargo build --workspace --all-targets --locked --release
       - run: cargo nextest run --workspace --all-targets --locked --release
 
-  # Layers 3, 5 and 6 — GPU cross-checks on software adapters, the injected and native parity runs
-  # against the large fixtures, and the benchmark gates on a self-hosted M2 Pro — arrive with the
-  # stages they test (D §10.5).
+  # Layer 3 of D §10.4: the self-test and the cross-check table on whatever adapter the runner has.
+  # `gpu-check` needs no fixtures and no collection, so it can run here from phase 2a on; where
+  # there is no adapter it fails with `no GPU adapter found` and the step is *reported* rather than
+  # silently skipped, which is what E7 §6 asks for — on macOS there is no software fallback to get
+  # a second opinion from. lavapipe (Linux) and WARP (Windows) are the software adapters D §10.5
+  # names; the Metal row comes from the self-hosted M2 Pro runner the benchmark gates use.
+  gpu-check:
+    name: gpu-check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - name: Install lavapipe
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      - run: cargo build --release -p sherd-cli --locked
+      - run: ./target/release/sherd-refit-rs info
+      - name: The self-test and the cross-check table
+        run: ./target/release/sherd-refit-rs gpu-check --stage all
+
+  # Layers 5 and 6 — the injected and native parity runs against the large fixtures, and the
+  # benchmark gates on a self-hosted M2 Pro — arrive with the stages they test (D §10.5).

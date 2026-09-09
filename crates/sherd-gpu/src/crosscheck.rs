@@ -75,6 +75,16 @@ pub mod tolerance {
     /// D §10.2's `chaotic` alarm for stage 2, per pair. C2 §5 measured 3 of 10 on the worst pair
     /// of pot_B and set the bound at 0.4.
     pub const CHAOTIC_S2: f64 = 0.4;
+    /// The `bound` alarm for stage 1, **per pair**: the share of a pair's candidates whose answer
+    /// moves out of the pose rows when the correspondence radius moves by the `f32` resolution of
+    /// the clouds ([`boundary_batch`](super::boundary_batch)).
+    ///
+    /// It is D §10.2's own stage-1 `chaotic` number, because it bounds the same kind of thing at
+    /// the same stage — the share of a pair the pose rows cannot be applied to — and because task
+    /// F's measurement leaves it a factor of three: over the eight development sets, four pairs
+    /// each, the worst pair is **2.0e-2** (pot_C) and the set-wide shares are 0, 0, 1.0e-3,
+    /// 1.2e-3, 2.0e-3, 6.0e-3, 7.0e-3 and 8.0e-3.
+    pub const BOUNDARY_S1: f64 = CHAOTIC_S1;
 }
 
 /// A deviation column: the worst, the count that moved at all, and the percentiles beside it.
@@ -98,9 +108,17 @@ pub mod tolerance {
 /// * **the twelve one-ULP neighbours** of the candidate's own initial pose, C2's probe, under
 ///   `--chaos`. Thirteen extra climbs, so it is opt-in; without the flag the exclusion set is
 ///   smaller and the criterion therefore stricter.
+/// * **the correspondence boundary** — [`boundary_batch`], task F. The two reasons above both
+///   perturb the *pose the ladder starts from*, and the audit's §A.2.2 names a second
+///   discontinuity that no starting pose reaches: a source point closer to the correspondence
+///   radius than the two executors' own coordinates are to each other, at any iteration of any
+///   rung. Two extra ladders, so it is always measured, like the control.
 ///
 /// Excluded is not ignored: [`Column::chaotic`] is counted, printed in every row's tail with the
-/// worst deviation over *all* candidates beside it, and gated in its own row.
+/// worst deviation over *all* candidates beside it, and each reason is gated in a row of its own —
+/// D §10.2's `chaotic` bound over the first two, [`tolerance::BOUNDARY_S1`] over the third. They
+/// are kept apart because the bounds are calibrated on different measurements: C2 §5's is a
+/// one-ULP probe of `f64`, and task F's is the `f32` resolution the two executors share.
 #[derive(Debug, Default)]
 pub struct Column {
     all: Vec<f64>,
@@ -155,7 +173,7 @@ impl Column {
         let [p50, p90, p99] = Self::percentiles(&self.all);
         let over_all = Self::worst(&self.all);
         let tail = if self.chaotic > 0 {
-            format!(" ({} chaotic excluded, worst over all {over_all:.3e})", self.chaotic)
+            format!(" ({} excused, worst over all {over_all:.3e})", self.chaotic)
         } else {
             String::new()
         };
@@ -228,6 +246,123 @@ pub fn determined_batch(
         }
     }
     ok
+}
+
+/// How far [`boundary_batch`] moves the correspondence radius, as a multiple of the `f32`
+/// resolution of the clouds.
+///
+/// **One**, because one is the size of the disagreement being probed and not a number tuned to a
+/// verdict: the two executors evaluate `d² < r²` on coordinates that differ by exactly this much,
+/// so a candidate that keeps its answer when the radius moves by it keeps its answer whichever
+/// side of the boundary the kernel's own rounding puts a point on. Task F measured the excused
+/// count over pot_C's four pairs at 0.5, 1, 2, 4, 8 and 16 resolutions — 7, 8, 9, 18, 23 and 38
+/// of 1000 — so one sits on a plateau rather than on a cliff, and the candidate this probe exists
+/// for is excused at 0.5 already (`notes/2026-09-09-f-hardening-findings.md` §2).
+pub const BOUNDARY_SHIFT: f64 = 1.0;
+
+/// The `f32` resolution of the coordinates one rung's kernel makes its correspondence test on.
+///
+/// Both clouds reach the device shifted by their own centroid and narrowed once, and the moved
+/// point is recomputed from the accumulated pose on every iteration (D §6.5), so the coordinate
+/// `d² < r²` is evaluated on carries about `spread · f32::EPSILON`, where `spread` is the largest
+/// shifted coordinate of either cloud. An absolute distance in the cloud's own units, which is
+/// what [`boundary_batch`] moves the radius by.
+fn rung_resolution(rung: &sherd_core::matching::ladder::Rung<'_>) -> f64 {
+    fn spread(points: &[[f64; 3]], centre: [f64; 3]) -> f64 {
+        points.iter().fold(0.0_f64, |worst, p| {
+            worst
+                .max((p[0] - centre[0]).abs())
+                .max((p[1] - centre[1]).abs())
+                .max((p[2] - centre[2]).abs())
+        })
+    }
+    let cs = sherd_core::matching::icp::centroid_of(rung.source);
+    let ct = rung.target.centroid();
+    (spread(rung.source, cs) + spread(rung.target.points(), ct)) * f64::from(f32::EPSILON)
+}
+
+/// The ladder climbed on the CPU with every rung's correspondence radius moved by
+/// `shift · rung_resolution(rung)`.
+fn climb_shifted(
+    rungs: &[sherd_core::matching::ladder::Rung<'_>],
+    inits: &[sherd_core::matching::icp::Pose],
+    scales: &sherd_core::matching::scales::Scales,
+    shift: f64,
+) -> Vec<sherd_core::matching::icp::Pose> {
+    use sherd_core::executor::batch::IcpBatch;
+    use sherd_core::executor::{CPU, Engine, Executor};
+    use sherd_core::matching::icp::Options;
+
+    let mut poses = inits.to_vec();
+    for rung in rungs {
+        let options = Options {
+            estimation: rung.estimation,
+            max_correspondence_distance: scales.icp_dist(rung.k) + shift * rung_resolution(rung),
+            max_iteration: rung.iterations,
+            numerics: Engine::REFERENCE.numerics,
+        };
+        let batch = IcpBatch { source: rung.source, target: rung.target, inits: &poses, options };
+        poses = CPU.icp_rung(&batch).into_iter().map(|r| r.transform).collect();
+    }
+    poses
+}
+
+/// How far each candidate's own CPU answer moves when the correspondence radius moves by
+/// ±[`BOUNDARY_SHIFT`] resolutions — the third measured reason a pose row cannot be applied to a
+/// candidate (task F, defect V7-D1).
+///
+/// # What it is for
+///
+/// The audit's §A.2.2 names two discontinuities between an `f32` rung and an `f64` one, and the
+/// harness could see only one of them. *"A source point within an ULP of the radius flips in or
+/// out between the two sides, one row of the 6×6 changes, the step changes, and the next
+/// iteration's set changes with it."* That flip needs neither a chaotic ladder nor an amplified
+/// starting pose — it needs one source point sitting closer to the radius than the two executors'
+/// coordinates are to each other, at any one iteration of the rung — so neither the control nor
+/// C2's twelve one-ULP neighbours can find it.
+///
+/// Task F measured exactly that on pot_C, the one development set `gpu-check` failed
+/// (`notes/2026-09-09-f-hardening-findings.md` §2). One candidate of a thousand, at its ninth
+/// iteration of twenty, has a correspondence 1.3e-6 of the radius from the boundary — inside the
+/// `f32` resolution of the clouds, 7e-6 of the radius there — and the two executors put it on
+/// opposite sides, after which their sets differ by one point and their answers by 9.1e-2 degrees.
+/// Everything else about that candidate is determined: its ladder does not move under the twelve
+/// one-ULP neighbours of its initial pose, its control is 3.2e-6 degrees, the CPU's own rung with
+/// `f32` point loops answers within 2.3e-6 degrees of its `f64` one, the same rung on the clouds
+/// narrowed as the device sees them answers within 2.0e-6, and the hash grid and the KD-tree agree
+/// on the correspondence set at every pose either side actually reaches.
+///
+/// # Where it applies, and what it costs
+///
+/// **R §5.4's stage-1 ladder**, which with R §5.2's coarse score is what a `--backend gpu` run
+/// puts on the device ([`icp::STAGE2_ON_DEVICE`](crate::icp::STAGE2_ON_DEVICE) is false) and
+/// therefore what D §12's 2b criterion is read over. R §5.6's stage-2 rows are `cpu by policy`
+/// and have nothing to excuse; under `--force-device` they are task W's measurement of the kernel,
+/// which D §10.4 states is not the criterion, and they are left exactly as W measured them.
+///
+/// Two `climb_shifted` calls over the whole array — two extra ladders, the same order as the
+/// control's one, which is why this is always measured rather than behind `--chaos`. It is
+/// computed on the CPU, in `f64`, from the same initial poses, so no kernel result can influence
+/// which candidates it excuses.
+///
+/// Returns, per candidate, the worst rotation (degrees) and displacement (`t`) the two shifted
+/// ladders moved its answer by; the caller compares them with D §10.2's own pose tolerances.
+#[must_use]
+pub fn boundary_batch(
+    rungs: &[sherd_core::matching::ladder::Rung<'_>],
+    inits: &[sherd_core::matching::icp::Pose],
+    scales: &sherd_core::matching::scales::Scales,
+) -> Vec<(f64, f64)> {
+    let base = climb_shifted(rungs, inits, scales, 0.0);
+    let mut worst = vec![(0.0_f64, 0.0_f64); inits.len()];
+    for shift in [BOUNDARY_SHIFT, -BOUNDARY_SHIFT] {
+        let other = climb_shifted(rungs, inits, scales, shift);
+        for (out, (a, b)) in worst.iter_mut().zip(base.iter().zip(&other)) {
+            let (deg, units) = pose_deviation(a, b, scales.t);
+            *out = (out.0.max(deg), out.1.max(units));
+        }
+    }
+    worst
 }
 
 /// `sherd-refit-rs gpu-check`: feed identical batches to both executors and report the deviations.
@@ -354,6 +489,10 @@ pub fn check(
     let mut s2_rmse = Column::default();
     let mut s1_ctrl = Column::default();
     let mut s2_ctrl = Column::default();
+    let mut s1_bound = Column::default();
+    // `(excused, candidates)` per pair for the `bound` alarm, kept apart from `s1_chaos` because
+    // the two bounds are calibrated on different probes.
+    let mut s1_bounds: Vec<(usize, usize)> = Vec::new();
     // `(chaotic, candidates)` per pair, for D §10.2's own `chaotic` alarm row.
     let mut s1_chaos: Vec<(usize, usize)> = Vec::new();
     let mut s2_chaos: Vec<(usize, usize)> = Vec::new();
@@ -446,11 +585,29 @@ pub fn check(
                         })
                         .collect();
                     let excused = sound.iter().filter(|ok| !**ok).count();
+                    // The boundary probe (stage 1 only, `boundary_batch`), counted in its own row.
+                    let on_boundary: Vec<bool> = (0..sound.len())
+                        .map(|k| {
+                            let (deg, units) = if which == 1 {
+                                report.stage1_bound.get(k).copied().unwrap_or((0.0, 0.0))
+                            } else {
+                                (0.0, 0.0)
+                            };
+                            deg > tolerance::POSE_DEG || units > tolerance::POSE_T
+                        })
+                        .collect();
                     if which == 1 {
                         s1_chaos.push((excused, sound.len()));
+                        s1_bounds
+                            .push((on_boundary.iter().filter(|hit| **hit).count(), sound.len()));
+                        for &(deg, _) in &report.stage1_bound {
+                            s1_bound.push(deg, deg > 0.0, true);
+                        }
                     } else {
                         s2_chaos.push((excused, sound.len()));
                     }
+                    let sound: Vec<bool> =
+                        sound.iter().zip(&on_boundary).map(|(ok, hit)| *ok && !*hit).collect();
                     let sound_at = |k: usize| sound.get(k).copied().unwrap_or(true);
                     for (k, (c, g)) in cpu.iter().zip(gpu).enumerate() {
                         let moved = cloud_deviation(&c.transform, &g.transform, &centre, t);
@@ -562,8 +719,9 @@ pub fn check(
     }
     let icp_end = rows.len();
     if wanted("icp") {
-        // Not a kernel comparison, so it stays outside the span `annotate` labels `[device]`:
+        // Not a kernel comparison, so they stay outside the span `annotate` labels `[device]`:
         // which candidates the pose rows had to excuse is decided entirely on the CPU.
+        rows.push(boundary_row(&s1_bound, "icp s1 bound", &s1_bounds));
         rows.push(chaotic_row("icp s1 chaotic", &s1_chaos, tolerance::CHAOTIC_S1));
         rows.push(chaotic_row("icp s2 chaotic", &s2_chaos, tolerance::CHAOTIC_S2));
     }
@@ -736,6 +894,29 @@ pub fn control_row(column: &Column, stage: &str, per_pair: &[(usize, usize)]) ->
     row
 }
 
+/// The `bound` row: how far each candidate's own CPU answer moves when the correspondence radius
+/// moves by the `f32` resolution of the clouds, and how many candidates that put outside the pose
+/// rows (task F, [`boundary_batch`]).
+///
+/// It gates the **share** it excuses, per pair, at [`tolerance::BOUNDARY_S1`] — the shape
+/// `chaotic_row` has, for the same reason: an exclusion nobody bounds is an exclusion that can
+/// grow to cover a real regression. What it does not gate is the deviation itself, which is
+/// unbounded by construction (a candidate on the boundary can move as far as its ladder likes)
+/// and is printed beside the share.
+pub fn boundary_row(column: &Column, stage: &str, per_pair: &[(usize, usize)]) -> CheckRow {
+    let mut row = chaotic_row(stage, per_pair, tolerance::BOUNDARY_S1);
+    if !column.all.is_empty() {
+        let distribution = column.row(stage, f64::INFINITY);
+        row.status = format!(
+            "{}; the radius moved by {BOUNDARY_SHIFT} f32 resolution(s) of the clouds and their \
+             own answers moved {}",
+            row.status,
+            distribution.status.trim_start_matches("ok — "),
+        );
+    }
+    row
+}
+
 /// The rotation (degrees) and the displacement (wall thicknesses) between two poses, in the units
 /// every pose row of D §10.2 is stated in — through the **Frobenius** form rather than the trace.
 ///
@@ -784,6 +965,7 @@ struct PairReport {
     /// Per candidate, whether its own CPU ladder survives all twelve one-ULP perturbations.
     stage1_ok: Vec<bool>,
     stage2_ok: Vec<bool>,
+    stage1_bound: Vec<(f64, f64)>,
     /// The **control**: the same rungs, on the CPU, from the poses the device actually starts
     /// from (`init` through the shifted `f32` state and back). What separates the kernel's `f32`
     /// arithmetic from the ladder's own amplification of an `f32` starting pose.
@@ -850,6 +1032,7 @@ fn compare_pair(
     } else {
         Vec::new()
     };
+    let stage1_bound = boundary_batch(&rungs, &inits, &pair.scales);
     let mut stage1_host = Vec::new();
     let mut stage1_device = Vec::new();
     let mut poses = inits.clone();
@@ -939,6 +1122,7 @@ fn compare_pair(
         stage2_device,
         stage1_ok,
         stage2_ok,
+        stage1_bound,
         stage1_control,
         stage2_control,
         stage1_centre,
@@ -957,8 +1141,11 @@ fn compare_pair(
 
 #[cfg(test)]
 mod tests {
-    use super::{CheckRow, Column, chaotic_row, control_row, origin_row, pose_deviation, table};
-    use sherd_core::matching::icp::{Pose, Rotation, Translation, homogeneous};
+    use super::{
+        BOUNDARY_SHIFT, CheckRow, Column, boundary_row, chaotic_row, climb_shifted, control_row,
+        origin_row, pose_deviation, rung_resolution, table, tolerance,
+    };
+    use sherd_core::matching::icp::{IcpTarget, Pose, Rotation, Translation, homogeneous};
 
     fn column(deviations: &[(f64, bool)]) -> Column {
         let mut c = Column::default();
@@ -986,7 +1173,7 @@ mod tests {
         assert_eq!(row.items, 3, "every candidate is in the item count");
         assert!((row.worst - 2e-3).abs() < 1e-12, "the worst is the determined one: {}", row.worst);
         assert!(
-            row.status.contains("1 chaotic excluded") && row.status.contains("worst over all"),
+            row.status.contains("1 excused") && row.status.contains("worst over all"),
             "an excluded candidate is printed with the worst it would have made: {}",
             row.status
         );
@@ -998,6 +1185,85 @@ mod tests {
         // Nothing to compare is not a pass and not a failure.
         let empty = Column::default().row("icp s2 deg", 0.05);
         assert!(!empty.failed() && empty.status.starts_with("skipped"), "{}", empty.status);
+    }
+
+    /// The `bound` row gates the **share** it excuses and never the deviation, and it says which
+    /// probe the share came from (task F).
+    #[test]
+    fn the_boundary_row_gates_the_share_it_excuses_and_prints_the_move() {
+        // A candidate that moved a long way when the radius moved is exactly what the row is for:
+        // its deviation is unbounded and only the share of them is gated.
+        let wild = column(&[(1e6, true), (0.0, true), (0.0, true), (0.0, true)]);
+        let one_of_four = boundary_row(&wild, "icp s1 bound", &[(1, 4)]);
+        assert!(one_of_four.failed(), "1 of 4 is over BOUNDARY_S1: {}", one_of_four.status);
+        assert!(
+            (one_of_four.tolerance - tolerance::BOUNDARY_S1).abs() < 1e-12,
+            "the bound is D §10.2's stage-1 share: {}",
+            one_of_four.tolerance
+        );
+        assert!(
+            one_of_four.status.contains("f32 resolution(s)"),
+            "the row names its own probe: {}",
+            one_of_four.status
+        );
+
+        let one_of_hundred =
+            boundary_row(&column(&[(1e6, true)]), "icp s1 bound", &[(1, 100), (0, 100)]);
+        assert!(!one_of_hundred.failed(), "{}", one_of_hundred.status);
+        assert!(
+            one_of_hundred.status.contains("1 of 200 candidates excused"),
+            "{}",
+            one_of_hundred.status
+        );
+    }
+
+    /// [`rung_resolution`] is the `f32` step of the two shifted clouds, and a shift of zero climbs
+    /// the ladder the reference climbs — the two properties [`super::boundary_batch`] rests on.
+    #[test]
+    fn the_rung_resolution_is_the_f32_step_of_the_two_shifted_clouds() {
+        use sherd_core::matching::icp::Estimation;
+        use sherd_core::matching::ladder::Rung;
+
+        // A flat patch of 25 points, 4 units across, at 100 units from the origin: the shape and
+        // the magnitudes D §6.7's shift exists for.
+        let grid: Vec<[f64; 3]> = (0..5)
+            .flat_map(|i| (0..5).map(move |j| [100.0 + f64::from(i), 200.0 + f64::from(j), 50.0]))
+            .collect();
+        let target = IcpTarget::new(grid.clone(), Vec::new());
+        let rung = Rung {
+            source: &grid,
+            target: &target,
+            k: 0.2,
+            estimation: Estimation::PointToPoint,
+            iterations: 20,
+        };
+        // Both clouds are the same patch, whose centroid is its middle: the largest shifted
+        // coordinate is 2.0 on each side.
+        let want = 4.0 * f64::from(f32::EPSILON);
+        let got = rung_resolution(&rung);
+        assert!((got - want).abs() < 1e-15, "{got:e} against {want:e}");
+        assert!(got > 0.0 && got < 1e-5, "an f32 step at these magnitudes: {got:e}");
+
+        let scales = sherd_core::matching::scales::Scales::for_pair(
+            &sherd_core::Params::default(),
+            2.0,
+            0.2,
+        );
+        let init = turn(0.0);
+        let unshifted = climb_shifted(std::slice::from_ref(&rung), &[init], &scales, 0.0);
+        let reference = sherd_core::matching::ladder::climb_all(
+            sherd_core::executor::Engine::REFERENCE,
+            std::slice::from_ref(&rung),
+            &[init],
+            &scales,
+        );
+        assert_eq!(
+            unshifted[0], reference[0][0].transform,
+            "a shift of zero is the reference ladder, bit for bit"
+        );
+        // And a shift of one resolution is a different radius, not the same one rounded.
+        let shifted = scales.icp_dist(rung.k) + BOUNDARY_SHIFT * got;
+        assert!(shifted > scales.icp_dist(rung.k), "the radius actually moves: {shifted:e}");
     }
 
     /// Three rows report and never gate: `ctrl` defines the exclusion, the origin translation is

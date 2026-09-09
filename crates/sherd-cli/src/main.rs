@@ -1231,7 +1231,7 @@ fn requested_stages(requested: &[String]) -> Result<Vec<Stage>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Backend, Cli, Params, Thresholds, pipeline, pool_threads, requested_stages,
+        Backend, Cli, ObjectParams, Params, Thresholds, pipeline, pool_threads, requested_stages,
         schedule_workers,
     };
     use clap::{CommandFactory, Parser};
@@ -1401,7 +1401,11 @@ mod tests {
                 assert_eq!(args.backend, Backend::Auto);
                 assert_eq!(
                     args.params(),
-                    Params { tiers: Some(Thresholds::default()), ..Params::default() },
+                    Params {
+                        tiers: Some(Thresholds::default()),
+                        objects: Some(ObjectParams::default()),
+                        ..Params::default()
+                    },
                     "no flag given must leave every threshold of R §1.1 at its default"
                 );
             }
@@ -1409,13 +1413,14 @@ mod tests {
         }
     }
 
-    /// `--tiers off` is the off switch, and it is exactly `Params::default()`.
+    /// The two off switches together are exactly `Params::default()`.
     ///
-    /// The library's default is the tier pass **off** and `run`'s default is the tier pass **on**,
-    /// and the difference is deliberate: `Params::default()` is R §1.1's 46 knobs and nothing
-    /// else, which is what the parity harness compares against a reference fixture and what
-    /// `bench` measures the matcher with, while a museum run wants the band. `--tiers off` puts
-    /// `run` back on the library's default, and that is the switch the byte-identity check uses.
+    /// The library's default is both passes **off** and `run`'s default is both **on**, and the
+    /// difference is deliberate: `Params::default()` is R §1.1's 46 knobs and nothing else, which
+    /// is what the parity harness compares against a reference fixture and what `bench` measures
+    /// the matcher with, while a museum run wants the band and the objects. `--tiers off
+    /// --objects off` puts `run` back on the library's default, and that is the pair of switches
+    /// the byte-identity checks use.
     #[test]
     fn tiers_off_is_the_library_default_and_tiers_on_is_the_measured_set() {
         let params = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().command {
@@ -1423,12 +1428,31 @@ mod tests {
             other => panic!("{other:?}"),
         };
         let base = ["sherd-refit-rs", "run", "in", "--out", "out"];
-        let off: Vec<&str> = base.iter().copied().chain(["--tiers", "off"]).collect();
+        let off: Vec<&str> =
+            base.iter().copied().chain(["--tiers", "off", "--objects", "off"]).collect();
         assert_eq!(params(&off), Params::default());
         assert_eq!(Params::default().tiers, None, "and the library's own default is off");
+        assert_eq!(Params::default().objects, None, "for both of them");
 
         let on = params(&base).tiers.expect("`run` computes a tier unless told not to");
         assert_eq!(on, Thresholds::default(), "M1 §3's chosen set, flag for flag");
+        let objects = params(&base).objects.expect("`run` reads the objects unless told not to");
+        assert_eq!(objects, ObjectParams::default(), "M1 §4's verdict, flag for flag");
+        assert!(objects.demote.is_empty(), "no feature reached audit §D.2's own AUC of 0.800");
+        assert!(!objects.disagreement, "and audit §D.2 (b) removes no false join on this benchmark");
+
+        // The object rules take their own flags, and an unknown feature name is refused rather
+        // than dropped -- the same rule `constraints.json` applies to a fragment name.
+        let tuned: Vec<&str> = base
+            .iter()
+            .copied()
+            .chain(["--object-demote", "shell_radius,thick", "--object-k-mad", "2.5"])
+            .collect();
+        let rules = params(&tuned).objects.expect("still on");
+        assert!(rules.demote.contains(sherd_core::objects::FeatureKey::ShellRadius));
+        assert!(rules.demote.contains(sherd_core::objects::FeatureKey::Thick));
+        assert!(!rules.demote.contains(sherd_core::objects::FeatureKey::FracRough));
+        assert_eq!(rules.k_mad, 2.5);
 
         let tuned: Vec<&str> = base
             .iter()

@@ -267,6 +267,10 @@ fn r_8s_groups_are_components_so_no_join_ever_spans_two_of_them() {
         }
     }
     assert_eq!(merges_seen, 0, "and no merge, because nothing ever proposes one");
+    println!(
+        "4000 graphs: {graphs_with_two_groups} with more than one multi-fragment group, \
+         {refusals} refusals, {merges_seen} merges, {cross_group_joins} cross-group joins"
+    );
     assert!(graphs_with_two_groups > 100, "the sample did produce multi-group assemblies");
     assert!(refusals > 100, "and it did exercise R §8's own refusals");
     assert_eq!(

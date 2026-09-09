@@ -16,7 +16,7 @@
 //! ([`CACHE_VERSION`](crate::CACHE_VERSION) 6, audit §D.2's own number): every fragment carries
 //! its [`Features`] from the moment it is built, a warm run reads them back with the rest of
 //! R §3, and a cache written before they existed is refused by its version and rebuilt. The pass
-//! costs **0.15 s of `mixed_ABG`'s 3.2 s cold preprocessing** (27 fragments, measured) and nothing
+//! costs **0.15 s of `mixed_ABG`'s 3.2 s cold preprocessing** (24 fragments, measured) and nothing
 //! at all on a warm cache. `sherd-refit-rs segment --features FILE` still writes task M1's table,
 //! and now writes the fragments' own stored numbers rather than a second computation of them.
 //!

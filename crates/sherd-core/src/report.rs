@@ -33,6 +33,7 @@ use nalgebra::Matrix4;
 use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 
+use crate::assembly::constraints::Report as ConstraintReport;
 use crate::error::{Error, Result};
 use crate::fragment::Fragment;
 use crate::io::writer::PlyStream;
@@ -41,6 +42,7 @@ use crate::matching::verify::Scores;
 use crate::memory::{self, Budget, MemorySemaphore, reservation};
 use crate::mesh::Mesh;
 use crate::params::Params;
+use crate::review::ReviewIndex;
 use crate::tiers::{Evidence, Tier, TierCounts, TierJoin, TierReport};
 use crate::types::{FragId, apply_transform_fused};
 use crate::{ALGO_REF, CACHE_VERSION, CORE_VERSION, GIT_COMMIT};
@@ -452,6 +454,10 @@ pub struct ReportJson {
     /// with the tier pass off. The set they were decided with is `params.tiers`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tiers: Option<TierCounts>,
+    /// Every constraint the run was given and what it did (audit §D.1); absent from a run without
+    /// a `constraints.json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraints: Option<ConstraintReport>,
 }
 
 /// A 4×4 as the nested lists both JSON files carry.
@@ -561,6 +567,12 @@ pub struct Outcome<'a> {
     /// which case every section this adds to `report.md` and every key it adds to the two JSON
     /// files is absent, and the outputs are the bytes they were.
     pub tiers: Option<&'a TierReport>,
+    /// Every constraint of `constraints.json` and what the run did about it, or `None` on a run
+    /// without the file — in which case `## Constraints` and the `constraints` key are absent.
+    pub constraints: Option<&'a ConstraintReport>,
+    /// Which pairs got a review image, or `None` without `--review-images` — in which case the
+    /// per-fragment index has no `image` column.
+    pub review: Option<&'a ReviewIndex>,
 }
 
 /// R §11.2's `report.json` and R §11.3's `report.md`, both into `out_dir`.
@@ -633,6 +645,7 @@ pub fn report_json(
         engine: Some(Engine::of(backend, params.seed)),
         memory: memory.cloned(),
         tiers: outcome.tiers.map(|t| t.pair_counts(outcome.candidates)),
+        constraints: outcome.constraints.cloned(),
     }
 }
 
@@ -699,6 +712,7 @@ pub fn report_markdown(
     if !singles.is_empty() {
         lines.push(format!("- not assembled (no confident join): {}", join_names(&singles, names)));
     }
+    lines.extend(constraint_section(outcome));
     lines.push(String::new());
     lines.push("## Joins used".to_owned());
     lines.push(String::new());
@@ -794,6 +808,49 @@ pub fn report_markdown(
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+/// Audit §D.1's `## Constraints`: every line of `constraints.json` and what the run did with it.
+///
+/// Nothing at all on a run without the file, which is what keeps such a run's `report.md` byte for
+/// byte the one before the flag existed. The section stands directly under `## Assembly` because a
+/// reader who has just seen which fragments were placed needs to know at once which of those
+/// decisions were the operator's rather than the geometry's.
+fn constraint_section(outcome: &Outcome<'_>) -> Vec<String> {
+    let Some(report) = outcome.constraints else { return Vec::new() };
+    let mut lines: Vec<String> = vec![String::new(), "## Constraints".to_owned(), String::new()];
+    let unsatisfied = report.unsatisfied();
+    lines.push(format!(
+        "`constraints.json` v{} — {} constraint{}, {}. A constraint never edits a score: what it \
+         changes is which pairs are matched, which candidates the assembly may build with, and the \
+         order it sees them in.",
+        report.version,
+        report.entries.len(),
+        if report.entries.len() == 1 { "" } else { "s" },
+        if unsatisfied == 0 {
+            "every one satisfied".to_owned()
+        } else {
+            format!("**{unsatisfied} unsatisfiable**")
+        },
+    ));
+    lines.push(String::new());
+    if report.entries.is_empty() {
+        lines.push("The file was read and constrains nothing.".to_owned());
+        return lines;
+    }
+    lines.push("| constraint | A | B | satisfied | what it did |".to_owned());
+    lines.push("|---|---|---|---|---|".to_owned());
+    for e in &report.entries {
+        lines.push(format!(
+            "| `{}` | {} | {} | {} | {} |",
+            e.list,
+            e.a,
+            e.b,
+            if e.satisfied { "yes" } else { "**no**" },
+            e.outcome,
+        ));
+    }
+    lines
 }
 
 /// How many refused pairs the `Rejected` section lists before it stops and points at the table
@@ -996,12 +1053,19 @@ fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
             .to_owned(),
     );
     lines.push(String::new());
-    lines.push(
-        "| fragment | partner | tier | score | seam (t) | tight | gap (t) | slide (t) | margin | \
-         support | why not confirmed |"
-            .to_owned(),
-    );
-    lines.push("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|".to_owned());
+    // The image column exists only on a run that wrote images, which is what keeps a run without
+    // `--review-images` byte for byte the run before the flag.
+    let images = outcome.review;
+    let head = "| fragment | partner | tier | score | seam (t) | tight | gap (t) | slide (t) | \
+                margin | support | why not confirmed |";
+    let rule = "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|";
+    if images.is_some() {
+        lines.push(format!("{head} image |"));
+        lines.push(format!("{rule}---|"));
+    } else {
+        lines.push(head.to_owned());
+        lines.push(rule.to_owned());
+    }
     let mut listed = 0_usize;
     for (index, name) in names.iter().enumerate() {
         let here = u32::try_from(index).unwrap_or(u32::MAX);
@@ -1029,7 +1093,7 @@ fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
                 || "not probed".to_owned(),
                 |e| if e.failed.is_empty() { "—".to_owned() } else { e.failed.join("; ") },
             );
-            lines.push(format!(
+            let row = format!(
                 "| {name} | {partner} | {} | {:.2} | {:.1} | {:.2} | {:.4} | {} | {} | {} | {why} |",
                 candidate.tier.label(),
                 candidate.score(),
@@ -1039,12 +1103,23 @@ fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
                 optional(e.and_then(|e| e.slide_t), exp),
                 optional(e.and_then(|e| e.margin), two),
                 e.map_or_else(|| "—".to_owned(), |e| e.support.to_string()),
-            ));
+            );
+            lines.push(match images {
+                Some(index) => match index.get(&(candidate.a, candidate.b)) {
+                    Some(file) => format!("{row} [png]({file}) |"),
+                    None => format!("{row} — |"),
+                },
+                None => row,
+            });
             listed += 1;
         }
     }
     if listed == 0 {
-        lines.push("| — | — | — | — | — | — | — | — | — | — | no accepted candidate |".to_owned());
+        let empty = "| — | — | — | — | — | — | — | — | — | — | no accepted candidate |";
+        lines.push(match images {
+            Some(_) => format!("{empty} — |"),
+            None => empty.to_owned(),
+        });
     }
     lines
 }
@@ -1373,6 +1448,8 @@ mod tests {
             rejected: &[],
             groups: &[vec![0], vec![1], vec![2]],
             tiers: None,
+            constraints: None,
+            review: None,
         };
         let timings = super::Timings::from_iter([
             ("preprocess".to_owned(), 16.3),
@@ -1416,6 +1493,8 @@ mod tests {
             rejected: &rejected,
             groups: &[vec![0, 1], vec![2]],
             tiers: None,
+            constraints: None,
+            review: None,
         };
         let stats = Vec::new();
         let timings = super::Timings::from_iter([("matching".to_owned(), 1.25)]);
@@ -1472,6 +1551,8 @@ mod tests {
             rejected: &rejected,
             groups: &[vec![0, 1], vec![2]],
             tiers: None,
+            constraints: None,
+            review: None,
         };
         let timings = super::Timings::from_iter([("matching".to_owned(), 12.34)]);
         let md = report_markdown(&stats, 3.75, &outcome, &timings, &Params::default());
@@ -1602,6 +1683,8 @@ mod tests {
                 rejected: &[],
                 groups: &[vec![0, 1], vec![2]],
                 tiers,
+                constraints: None,
+                review: None,
             };
             report_markdown(&stats, 3.75, &outcome, &timings, &Params::default())
         };

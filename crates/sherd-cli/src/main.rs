@@ -344,6 +344,30 @@ struct RunArgs {
     /// is unchanged, file for file and byte for byte.
     #[arg(long, value_name = "FILE")]
     measure: Option<PathBuf>,
+    /// Read roadmap item 3's operator constraints from FILE (audit §D.1,
+    /// `sherd_core::assembly::constraints`).
+    ///
+    /// `constraints.json` v1 carries four lists. `must_not_join` takes a pair out of the run
+    /// before it is matched and refuses any candidate for it in the assembly; `must_join` matches
+    /// the pair with R §8.1's larger budget and promotes its best probable candidate to confirmed,
+    /// offering it to the assembly before every other join — or, with a 4x4 `pose`, skips matching
+    /// and places at that pose; `same_object` and `different_object` are roadmap item 4's
+    /// evidence, and `different_object` already vetoes a join. Every name is checked against the
+    /// collection and an unknown one fails the run.
+    ///
+    /// A constraint never edits a score. Without the flag the run is unchanged, byte for byte.
+    #[arg(long, value_name = "FILE")]
+    constraints: Option<PathBuf>,
+    /// Write audit §D.1's review images to `<OUT>/review/<a>__<b>.png`
+    /// (`sherd_core::review`).
+    ///
+    /// One PNG per confirmed or probable join: three views of the two fragments at the candidate's
+    /// pose, A grey and B orange, the seam's `t/3` voxels white, B's fracture samples coloured by
+    /// their distance to A's fracture surface, and a caption with the scores, the band, the margin
+    /// and the seed. `report.md`'s per-fragment index links them. Deterministic: two runs of one
+    /// collection write the same bytes.
+    #[arg(long)]
+    review_images: bool,
 }
 
 impl RunArgs {
@@ -841,6 +865,11 @@ fn run(args: &RunArgs) -> Result<()> {
         memory: budget(args.memory_budget),
         watch: watch_signals(),
         measure: args.measure.clone(),
+        constraints: match &args.constraints {
+            Some(path) => Some(sherd_core::assembly::constraints::load(path)?),
+            None => None,
+        },
+        review_images: args.review_images,
     };
     if args.force && !args.no_cache {
         clear_caches(&args.input, &args.out)?;

@@ -449,6 +449,8 @@ fn markdown_row(
         rejected: &rejected,
         groups: &groups,
         tiers: None, // the reference wrote no band, and this is compared against its own file
+        constraints: None,
+        review: None,
     };
     let ours = report::report_markdown(
         &theirs.fragments,

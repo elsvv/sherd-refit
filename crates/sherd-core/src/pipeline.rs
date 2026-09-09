@@ -39,7 +39,8 @@ use std::time::Instant;
 use nalgebra::Matrix4;
 use rayon::prelude::*;
 
-use crate::assembly::{Piece, assemble_with, recenter};
+use crate::assembly::constraints::{self, Constraints, Resolved};
+use crate::assembly::{Piece, assemble_under, recenter};
 use crate::collection::{self, Entry};
 use crate::error::{Error, Result};
 use crate::executor::{Backend, Engine, Executor};
@@ -224,6 +225,14 @@ pub struct RunOptions {
     /// has already computed and writes nothing else, so a run with it unset is byte for byte the
     /// run that came before the flag existed.
     pub measure: Option<PathBuf>,
+    /// Roadmap item 3's operator constraints ([`crate::assembly::constraints`]), already parsed.
+    ///
+    /// The pipeline resolves the names against the collection and fails the run on an unknown one;
+    /// the CLI reads the file, so that a caller with the constraints in hand needs no file at all.
+    /// `None` is a run with no `constraints.json`, which is byte for byte the run before the flag.
+    pub constraints: Option<Constraints>,
+    /// Write audit §D.1's review images ([`crate::review`]) for the confirmed and probable joins.
+    pub review_images: bool,
 }
 
 impl Default for RunOptions {
@@ -242,6 +251,8 @@ impl Default for RunOptions {
             memory: Budget::default_for_machine(),
             watch: Watch::default(),
             measure: None,
+            constraints: None,
+            review_images: false,
         }
     }
 }
@@ -440,13 +451,49 @@ pub fn run_with(
         "preprocessing done"
     );
 
-    // 2. pairs (R §4.1)
+    // 1a. the operator's constraints (audit §D.1, roadmap item 3), resolved against the names the
+    // collection actually has. An unknown name fails the run here, before a single pair is
+    // matched, because a typo that quietly became "no constraint" is the failure this validation
+    // exists to prevent.
+    let plan: Option<Resolved> = match &options.constraints {
+        Some(file) => {
+            let resolved = constraints::resolve(file, &names)?;
+            tracing::info!(
+                must_join = resolved.forced.len(),
+                must_not_join = resolved.forbidden.len(),
+                same_object = resolved.same.len(),
+                different_object = resolved.different.len(),
+                "constraints"
+            );
+            Some(resolved)
+        }
+        None => None,
+    };
+    let id = |n: usize| u32::try_from(n).expect("fewer than 2^32 fragments");
+
+    // 2. pairs (R §4.1), with the two lists that decide before R §4.1 does: `must_not_join` takes
+    // its pairs out of the run entirely, a pinned `must_join` skips matching because it already
+    // has its pose, and a `must_join` without one is matched even where R §4.1's wall-ratio filter
+    // would have refused it — the operator's word outranks a heuristic about wall thicknesses.
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     let mut skipped = 0_usize;
+    let mut forbidden = 0_usize;
+    let mut pinned_pairs = 0_usize;
+    let mut forced_over_ratio = 0_usize;
     for a in 0..fragments.len() {
         for b in (a + 1)..fragments.len() {
-            if pair::Pair::skipped(&fragments[a], &fragments[b], params) {
-                skipped += 1;
+            let forced = plan.as_ref().and_then(|r| r.forced_pair(id(a), id(b)));
+            if plan.as_ref().is_some_and(|r| r.forbids(id(a), id(b))) {
+                forbidden += 1;
+            } else if forced.is_some_and(|f| f.pose.is_some()) {
+                pinned_pairs += 1;
+            } else if pair::Pair::skipped(&fragments[a], &fragments[b], params) {
+                if forced.is_some() {
+                    forced_over_ratio += 1;
+                    pairs.push((a, b));
+                } else {
+                    skipped += 1;
+                }
             } else {
                 pairs.push((a, b));
             }
@@ -457,6 +504,14 @@ pub fn run_with(
             skipped,
             ratio = params.thick_ratio,
             "pairs skipped: the walls differ by more than the ratio"
+        );
+    }
+    if forbidden + pinned_pairs + forced_over_ratio > 0 {
+        tracing::info!(
+            forbidden,
+            pinned = pinned_pairs,
+            matched_over_ratio = forced_over_ratio,
+            "pairs decided by constraints.json"
         );
     }
 
@@ -496,7 +551,65 @@ pub fn run_with(
         &options.watch,
     )?;
     stages.finish("matching", started.elapsed().as_secs_f64());
-    let mut candidates: Vec<Candidate> = per_pair.iter().flatten().copied().collect();
+
+    // 2b'. `must_join` without a pose: audit §D.1 asks for the pair to be *"matched with the
+    // second-pass budget"*, which is R §8.1's larger `stage1`/`stage2` with the stage-1 floor
+    // removed. It is a handful of pairs, matched a second time rather than promoted out of the
+    // first pass, because the budget is the whole point of the sentence.
+    let forced_retry: Vec<(usize, usize)> = plan
+        .as_ref()
+        .map(|r| {
+            pairs
+                .iter()
+                .copied()
+                .filter(|&(a, b)| r.forced_pair(id(a), id(b)).is_some_and(|f| f.pose.is_none()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !forced_retry.is_empty() {
+        let started = Instant::now();
+        let found = match_all(
+            engine,
+            &fragments,
+            &forced_retry,
+            &second_pass_params(params),
+            options.keep_per_pair,
+            workers,
+            Some("must_join"),
+            &options.watch,
+        )?;
+        for (k, list) in forced_retry.iter().zip(found) {
+            let at = pairs.iter().position(|p| p == k).expect("a forced pair is a pair");
+            per_pair[at] = list;
+        }
+        tracing::info!(
+            pairs = forced_retry.len(),
+            seconds = started.elapsed().as_secs_f64(),
+            "must_join rematched with the second-pass budget"
+        );
+    }
+
+    // 2b''. `must_join` with a pose: matching was skipped for the pair, so its candidate is made
+    // here. R §6 is run **at the pinned pose** so that the report carries an honest opinion of it;
+    // acceptance is the operator's, which is what pinning a pose means, and the constraints
+    // section says so beside the numbers.
+    let pinned: Vec<Candidate> = plan
+        .as_ref()
+        .map(|r| {
+            r.forced
+                .iter()
+                .filter_map(|f| {
+                    f.pose.map(|pose| pinned_candidate(engine, &fragments, f.a, f.b, &pose, params))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let collect_candidates = |per_pair: &[Vec<Candidate>]| -> Vec<Candidate> {
+        let mut all: Vec<Candidate> = per_pair.iter().flatten().copied().collect();
+        all.extend(pinned.iter().copied());
+        all
+    };
+    let mut candidates = collect_candidates(&per_pair);
     tracing::info!(
         seconds = stages.timings["matching"],
         candidates = candidates.len(),
@@ -512,6 +625,11 @@ pub fn run_with(
     // alive from the last pair until the block that releases them below.
     let mut tiered = tier_pass(engine, &fragments, &mut candidates, params, &mut stages);
     let gate = if params.tiers.is_some() { Gate::Confirmed } else { Gate::Accepted };
+    // 2d. and then the half of the constraints that acts on the candidate list: a `must_join` is
+    // promoted to the confirmed band. `assemble_under` below does the other half.
+    let mut honoured = plan.as_ref().map(|r| {
+        constraints::apply(r, &names, &mut candidates, tiered.as_mut(), gate == Gate::Confirmed)
+    });
 
     // 3. assembly (R §8). The timer starts here, not at `assemble`: the reference builds the
     // stage's own `MatchData` inside `timings["assembly"]`, and PMC-8's cheaper equivalent — the
@@ -536,19 +654,15 @@ pub fn run_with(
             s_pen: s,
         })
         .collect();
-    let mut assembly = assemble_with(engine.exec, &pieces, &candidates, params, gate);
+    let mut assembly =
+        assemble_under(engine.exec, &pieces, &candidates, params, gate, plan.as_ref());
     stages.finish("assembly", started.elapsed().as_secs_f64());
 
     // 3a. second pass (R §8.1, off by default)
     let retry = second_pass_pairs(&names, &pairs, &candidates, &assembly.groups, params);
     if !retry.is_empty() {
         let started = Instant::now();
-        let bigger = Params {
-            stage1: params.second_pass_stage1,
-            stage2: params.second_pass_stage2,
-            stage1_floor: 0.0,
-            ..*params
-        };
+        let bigger = second_pass_params(params);
         let again = match_all(
             engine,
             &fragments,
@@ -563,14 +677,17 @@ pub fn run_with(
             let at = pairs.iter().position(|p| p == k).expect("a retried pair is a pair");
             per_pair[at] = found;
         }
-        candidates = per_pair.iter().flatten().copied().collect();
+        candidates = collect_candidates(&per_pair);
         stages.finish("second_pass", started.elapsed().as_secs_f64());
         // The candidate list is a different list, so its tiers are a different answer: the
         // margin, the placements and the support count are all statements about the list as a
         // whole, and a pair rematched with the larger budget changes them for pairs it never
         // touched. The pass is repeated rather than patched for that reason.
         tiered = tier_pass(engine, &fragments, &mut candidates, params, &mut stages);
-        assembly = assemble_with(engine.exec, &pieces, &candidates, params, gate);
+        honoured = plan.as_ref().map(|r| {
+            constraints::apply(r, &names, &mut candidates, tiered.as_mut(), gate == Gate::Confirmed)
+        });
+        assembly = assemble_under(engine.exec, &pieces, &candidates, params, gate, plan.as_ref());
         tracing::info!(
             pairs = retry.len(),
             seconds = stages.timings["second_pass"],
@@ -611,6 +728,28 @@ pub fn run_with(
             "measurement written"
         );
         measured = Some(path.clone());
+    }
+
+    // 3c. audit §D.1's review images, off unless `--review-images` asked for them.
+    //
+    // Here for the same reason the measurement is: the contact colouring is R §6.1's own distance
+    // against A's fracture tree, and the next block releases it.
+    let mut review = None;
+    let mut review_files: Vec<PathBuf> = Vec::new();
+    if options.review_images {
+        let started = Instant::now();
+        let (files, index) = crate::review::write_review_images(
+            engine,
+            out_dir,
+            &fragments,
+            &names,
+            &candidates,
+            tiered.as_ref(),
+            params,
+        )?;
+        stages.finish("review", started.elapsed().as_secs_f64());
+        review_files = files;
+        review = Some(index);
     }
 
     // Both BVHs have had their last reader (audit §B.3): R §6.1's fracture tree ended with the
@@ -660,6 +799,7 @@ pub fn run_with(
     let started = Instant::now();
     let mut written = Vec::new();
     written.extend(measured);
+    written.extend(review_files);
     let stats: Vec<FragmentStats> = fragments.iter().map(FragmentStats::of).collect();
     let rejected: Vec<(usize, String)> =
         assembly.rejected.iter().map(|r| (r.candidate, r.reason.message(&names))).collect();
@@ -670,6 +810,8 @@ pub fn run_with(
         rejected: &rejected,
         groups: &assembly.groups,
         tiers: tiered.as_ref(),
+        constraints: honoured.as_ref(),
+        review: review.as_ref(),
     };
     let tier_joins = tiered.as_ref().map(|_| crate::tiers::joins(&candidates, &names));
     write_transforms(
@@ -735,6 +877,59 @@ pub fn run_with(
         timings: stages.timings,
         written,
     })
+}
+
+/// R §8.1's larger budget, which audit §D.1 also gives a `must_join` pair.
+fn second_pass_params(params: &Params) -> Params {
+    Params {
+        stage1: params.second_pass_stage1,
+        stage2: params.second_pass_stage2,
+        stage1_floor: 0.0,
+        ..*params
+    }
+}
+
+/// The candidate a `must_join` with a pose stands for: R §6 at the pinned pose, accepted by the
+/// operator's word and confirmed by it (audit §D.1).
+///
+/// The scores are measured and not invented — a conservator who pins a pose still wants to see
+/// what the geometry thinks of it, and `report.md`'s constraints section prints the verdict R §6.5
+/// would have reached beside the fact that the pose was pinned. A pair one of whose fragments has
+/// no surface at all cannot be scored; the candidate then carries R §5.6's partial scores and
+/// `accepted = false`, which the constraints section reports as unsatisfiable.
+fn pinned_candidate(
+    engine: Engine<'_>,
+    fragments: &[Fragment],
+    a: FragId,
+    b: FragId,
+    pose: &Matrix4<f64>,
+    params: &Params,
+) -> Candidate {
+    use crate::matching::verify::{Scores, verify};
+    let (fa, fb) = (&fragments[a as usize], &fragments[b as usize]);
+    let built = pair::Pair::build(fa, fb, params);
+    let sc = built.scales;
+    match built.surfaces() {
+        Some((sa, sb)) => {
+            let scores = verify(engine.exec, &sa, &sb, pose, &sc, true, None);
+            Candidate {
+                a,
+                b,
+                transform: *pose,
+                scores,
+                accepted: true,
+                tier: crate::tiers::Tier::Confirmed,
+            }
+        }
+        None => Candidate {
+            a,
+            b,
+            transform: *pose,
+            scores: Scores::partial(&sc, 0.0),
+            accepted: false,
+            tier: crate::tiers::Tier::Rejected,
+        },
+    }
 }
 
 /// [`preprocess`] with the ids assigned and the first failure turned into the run's failure.

@@ -255,7 +255,7 @@ pub fn determined_batch(
 /// verdict: the two executors evaluate `d² < r²` on coordinates that differ by exactly this much,
 /// so a candidate that keeps its answer when the radius moves by it keeps its answer whichever
 /// side of the boundary the kernel's own rounding puts a point on. Task F measured the excused
-/// count over pot_C's four pairs at 0.5, 1, 2, 4, 8 and 16 resolutions — 7, 8, 9, 18, 23 and 38
+/// count over pot_C's four pairs at 0.5, 1, 2, 4, 8 and 16 resolutions — 7, 8, 9, 18, 23 and 39
 /// of 1000 — so one sits on a plateau rather than on a cliff, and the candidate this probe exists
 /// for is excused at 0.5 already (`notes/2026-09-09-f-hardening-findings.md` §2).
 pub const BOUNDARY_SHIFT: f64 = 1.0;

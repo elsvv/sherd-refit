@@ -23,6 +23,7 @@ use crate::params::Params;
 use crate::types::FragId;
 
 use super::consistency::{agrees, disagreement, penetration};
+use super::constraints::Resolved;
 use super::groups::{Grouping, Piece};
 
 /// Why an accepted join did not become part of the assembly (R §8).
@@ -59,6 +60,12 @@ pub enum Rejection {
     },
     /// Both fragments are placed, in **different** groups. R §8 does not merge groups.
     MergesGroups,
+    /// `constraints.json` refuses the pair (audit §D.1): `must_not_join`, or `different_object`.
+    ///
+    /// Not R §8's own refusal, and it says so: the operator's word is the reason, and the report
+    /// prints the key of the list the pair was written in so that the sentence can be traced back
+    /// to a line of the file.
+    Constrained(crate::assembly::constraints::Veto),
 }
 
 impl Rejection {
@@ -81,6 +88,9 @@ impl Rejection {
                 format!("inconsistent with the assembled poses ({angle:.1} deg, {distance:.2} t)")
             }
             Self::MergesGroups => "would merge two groups (not supported)".to_owned(),
+            Self::Constrained(veto) => {
+                format!("refused by constraints.json (`{}`)", veto.key())
+            }
         }
     }
     /// The same sentence with every *measured* number taken out: the kind of refusal and, where
@@ -101,6 +111,9 @@ impl Rejection {
                 "inconsistent with the assembled poses".to_owned()
             }
             Self::MergesGroups => "would merge two groups (not supported)".to_owned(),
+            Self::Constrained(veto) => {
+                format!("refused by constraints.json (`{}`)", veto.key())
+            }
         }
     }
 
@@ -154,7 +167,16 @@ pub struct Assembly {
 ///   whose order is insertion order: pairs tied on score come back in the order the matcher
 ///   produced them, which is R §4.1's `itertools.combinations` order. `sort_by` in Rust is stable
 ///   too, and the insertion order is tracked explicitly rather than left to a hash map.
-fn best_per_pair(candidates: &[Candidate], gate: Gate) -> Vec<usize> {
+///
+/// A third rule joins them when a `constraints.json` is in force: a `must_join` pair sorts **before
+/// every other join**, whatever its score, which is audit §D.1's *"seeded first"*. With no
+/// constraints the key is constant and a stable sort leaves the two rules above exactly as they
+/// are, which is what keeps a run without the file byte for byte the run it was.
+fn best_per_pair(
+    candidates: &[Candidate],
+    gate: Gate,
+    constraints: Option<&Resolved>,
+) -> Vec<usize> {
     let mut best: BTreeMap<(FragId, FragId), usize> = BTreeMap::new();
     let mut order: Vec<(FragId, FragId)> = Vec::new();
     for (i, c) in candidates.iter().enumerate() {
@@ -174,11 +196,17 @@ fn best_per_pair(candidates: &[Candidate], gate: Gate) -> Vec<usize> {
         }
     }
     let mut accepted: Vec<usize> = order.iter().map(|key| best[key]).collect();
+    let forced = |i: usize| {
+        let c = &candidates[i];
+        u8::from(!constraints.is_some_and(|r| r.forces(c.a, c.b)))
+    };
     accepted.sort_by(|&x, &y| {
-        candidates[y]
-            .score()
-            .partial_cmp(&candidates[x].score())
-            .unwrap_or(std::cmp::Ordering::Equal)
+        forced(x).cmp(&forced(y)).then_with(|| {
+            candidates[y]
+                .score()
+                .partial_cmp(&candidates[x].score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     });
     accepted
 }
@@ -324,8 +352,31 @@ pub fn assemble_with(
     p: &Params,
     gate: Gate,
 ) -> Assembly {
+    assemble_under(exec, pieces, candidates, p, gate, None)
+}
+
+/// [`assemble_with`] under an operator's `constraints.json` as well (audit §D.1, roadmap item 3).
+///
+/// The constraints reach R §8 in exactly two places and nowhere else. A pair `must_not_join` or
+/// `different_object` names is **refused**, with [`Rejection::Constrained`] and before any test of
+/// R §8's own, so it appears in the report as a join the operator refused rather than one the
+/// geometry did; and a pair `must_join` names is offered to the loop **first**, whatever its score,
+/// which is what makes the group grow from it. Everything between those two — the greedy rule, the
+/// ties, the penetration and consistency tests, the sentences — is R §8's, untouched.
+///
+/// `must_not_join` has already removed its pairs before matching by the time this runs, so the
+/// refusal here is the second half of a belt and braces: a candidate for such a pair can only
+/// reach R §8 through a candidate list assembled by something other than the pipeline.
+pub fn assemble_under(
+    exec: &dyn Executor,
+    pieces: &[Piece<'_>],
+    candidates: &[Candidate],
+    p: &Params,
+    gate: Gate,
+    constraints: Option<&Resolved>,
+) -> Assembly {
     let started = std::time::Instant::now();
-    let accepted = best_per_pair(candidates, gate);
+    let accepted = best_per_pair(candidates, gate, constraints);
     let inputs = Inputs { exec, pieces, candidates, accepted: &accepted, p };
     let mut grouping = Grouping::new(pieces.len());
     let mut used: Vec<usize> = Vec::new();
@@ -337,6 +388,11 @@ pub fn assemble_with(
         for here in remaining.clone() {
             let candidate = accepted[here];
             let c = &candidates[candidate];
+            if let Some(veto) = constraints.and_then(|r| r.veto(c.a, c.b)) {
+                remaining.retain(|&k| k != here);
+                rejected.push(Rejected { candidate, reason: Rejection::Constrained(veto) });
+                continue;
+            }
             let (a_in, b_in) = (grouping.placed(c.a), grouping.placed(c.b));
             if a_in && b_in {
                 remaining.retain(|&k| k != here);

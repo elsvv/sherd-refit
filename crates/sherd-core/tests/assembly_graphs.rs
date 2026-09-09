@@ -18,9 +18,10 @@
 
 use nalgebra::Matrix4;
 use sherd_core::Params;
-use sherd_core::assembly::{Piece, Rejection, assemble, recenter};
+use sherd_core::assembly::constraints::{Constraints, Veto, resolve};
+use sherd_core::assembly::{Piece, Rejection, assemble, assemble_under, recenter};
 use sherd_core::executor::CPU;
-use sherd_core::matching::pair::Candidate;
+use sherd_core::matching::pair::{Candidate, Gate};
 use sherd_core::matching::verify::Scores;
 use sherd_core::spatial::bvh::RayScene;
 use sherd_core::tiers::Tier;
@@ -317,4 +318,76 @@ fn recentring_moves_each_group_to_its_own_centroid() {
     assert!((out[1][(0, 3)] - (110.0 - centre)).abs() < 1e-12);
     assert!((out[2][(0, 3)] + inside).abs() < 1e-12, "a singleton is recentred too");
     assert_eq!(out[0].fixed_view::<3, 3>(0, 0), Matrix4::identity().fixed_view::<3, 3>(0, 0));
+}
+
+/// Audit §D.1's two ways a constraint reaches R §8: a vetoed pair is refused before any test of
+/// R §8's own, and a `must_join` pair is offered first whatever its score.
+///
+/// The graph is a chain whose strongest join is `0-1`; the constraint names the *weakest*, so the
+/// order the loop sees is the assertion. Without a constraint the same graph grows from `0-1`
+/// (`a_chain_grows_from_its_strongest_join` above), which is what makes the difference legible.
+#[test]
+fn a_must_join_pair_seeds_the_assembly_and_a_vetoed_pair_is_refused() {
+    let pieces = bare(4);
+    let candidates = vec![
+        join(0, 1, [10.0, 0.0, 0.0], 3.0),
+        join(1, 2, [10.0, 0.0, 0.0], 2.0),
+        join(2, 3, [10.0, 0.0, 0.0], 1.0),
+    ];
+    let names = names(4);
+    let file: Constraints = serde_json::from_str(
+        r#"{"must_join": [["frag_2", "frag_3"]], "different_object": [["frag_0", "frag_1"]]}"#,
+    )
+    .expect("the format parses");
+    let plan = resolve(&file, &names).expect("the names are the collection's");
+    let out =
+        assemble_under(&CPU, &pieces, &candidates, &Params::default(), Gate::Accepted, Some(&plan));
+
+    // `2-3` was seeded although it is the weakest join, so `1-2` grew onto it and `0-1` never had
+    // a chance to be the seed.
+    assert_eq!(used_pairs(&candidates, &out.used), [(2, 3), (1, 2)]);
+    assert_eq!(out.groups, [vec![2, 3, 1], vec![0]], "0 is refused and stays a singleton");
+    assert_eq!(out.rejected.len(), 1, "{:?}", out.rejected);
+    assert_eq!(out.rejected[0].reason, Rejection::Constrained(Veto::DifferentObject));
+    assert_eq!(
+        out.rejected[0].reason.message(&names),
+        "refused by constraints.json (`different_object`)",
+        "the report says whose decision it was"
+    );
+}
+
+/// `must_not_join` refuses the same way, and with its own name in the sentence — the pipeline
+/// removes such a pair before matching, so this is the belt to that braces.
+#[test]
+fn must_not_join_refuses_a_candidate_that_reaches_the_assembly() {
+    let pieces = bare(3);
+    let candidates = vec![join(0, 1, [10.0, 0.0, 0.0], 3.0), join(1, 2, [10.0, 0.0, 0.0], 2.0)];
+    let names = names(3);
+    let file: Constraints =
+        serde_json::from_str(r#"{"must_not_join": [["frag_1", "frag_0"]]}"#).expect("it parses");
+    let plan = resolve(&file, &names).expect("the names are the collection's");
+    let out =
+        assemble_under(&CPU, &pieces, &candidates, &Params::default(), Gate::Accepted, Some(&plan));
+    assert_eq!(used_pairs(&candidates, &out.used), [(1, 2)]);
+    assert_eq!(out.rejected.len(), 1);
+    assert_eq!(out.rejected[0].reason, Rejection::Constrained(Veto::MustNotJoin));
+}
+
+/// And with no constraints at all, `assemble_under` is `assemble`: same joins, same order, same
+/// poses. The off switch of a new behaviour, at the level R §8 sees it.
+#[test]
+fn no_constraints_is_the_assembly_r_8_always_made() {
+    let pieces = bare(4);
+    let candidates = vec![
+        join(0, 1, [10.0, 0.0, 0.0], 3.0),
+        join(1, 2, [10.0, 0.0, 0.0], 2.0),
+        join(2, 3, [10.0, 0.0, 0.0], 1.0),
+    ];
+    let p = Params::default();
+    let plain = assemble(&CPU, &pieces, &candidates, &p);
+    let under = assemble_under(&CPU, &pieces, &candidates, &p, Gate::Accepted, None);
+    assert_eq!(plain.used, under.used);
+    assert_eq!(plain.groups, under.groups);
+    assert_eq!(plain.order, under.order);
+    assert_eq!(plain.poses, under.poses);
 }

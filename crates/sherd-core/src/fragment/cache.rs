@@ -160,8 +160,8 @@ pub struct CacheMeta {
     /// Audit §D.2's object features, measured on this fragment's own samples (task O1).
     ///
     /// D §4.2 sketched these as optional `features/*` **tensors**; what they turned out to be is
-    /// twenty scalars and two triples, which belong in the metadata block beside `thick` rather
-    /// than in a tensor of length one. They are `None` only in a cache written by a build that
+    /// thirteen numbers, a name, a flag and two Lab triples, which belong in the metadata block
+    /// beside `thick` rather than in a tensor of length one. They are `None` only in a cache written by a build that
     /// could not compute them, and [`Fragment::load_or_build`] fills that in and rewrites the
     /// file.
     #[serde(default, skip_serializing_if = "Option::is_none")]

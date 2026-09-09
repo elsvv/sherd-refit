@@ -336,3 +336,257 @@ fn the_terracotta_assembles_the_two_joins_of_r_13() {
     assert_eq!(groups[1], serde_json::json!(["FY234007_reduced"]), "R §13: 007 is unplaced");
     std::fs::remove_dir_all(&out).ok();
 }
+
+// ---------------------------------------------------------------------------------------------
+// Task T2: review images and constraints (audit §D.1)
+
+/// Writes a `constraints.json` beside a scratch directory and returns its path.
+fn constraints_file(tag: &str, body: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("sherd-constraints-{}-{tag}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let path = dir.join("constraints.json");
+    std::fs::write(&path, body).expect("the constraints file");
+    path
+}
+
+/// `report.json` of a finished run.
+fn report_of(out: &Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(out.join("report.json")).expect("report.json"))
+        .expect("valid JSON")
+}
+
+/// Audit §E's gate for the review images: **deterministic between two runs**.
+///
+/// The sampler is seeded per image rather than per pass, so nothing about the image depends on how
+/// many pairs came before it or on which thread rayon gave it; two runs must write the same PNG
+/// bytes. The rest of the run is compared too, because an image pass that moved a pose would be a
+/// worse defect than a non-deterministic image.
+#[test]
+fn review_images_are_the_same_bytes_twice_and_the_index_links_them() {
+    let input = repo_root().join("fixtures/slab/input");
+    let first = scratch("review-a");
+    let second = scratch("review-b");
+    run_with(&input, &first, &["--review-images"]);
+    run_with(&input, &second, &["--review-images"]);
+
+    let a = outputs(&first);
+    let b = outputs(&second);
+    let images: Vec<&String> = a.keys().filter(|k| k.starts_with("review/")).collect();
+    assert_eq!(
+        images,
+        ["review/pieceA__pieceB.png"],
+        "one image per confirmed or probable join, named after the pair"
+    );
+    for name in &images {
+        assert!(a[*name] == b[*name], "{name}: the two runs must write the same bytes");
+        assert!(a[*name].len() > 1000, "{name}: an empty PNG is not an image");
+    }
+    let markdown = String::from_utf8(a["report.md"].clone()).expect("report.md is UTF-8");
+    assert!(
+        markdown.contains("[png](review/pieceA__pieceB.png)"),
+        "the per-fragment index links the image"
+    );
+
+    // And the run itself did not move: everything but the images is what a run without the flag
+    // writes.
+    let plain_dir = scratch("review-none");
+    run(&input, &plain_dir);
+    let plain = outputs(&plain_dir);
+    assert!(
+        plain.keys().all(|k| !k.starts_with("review/")),
+        "no flag, no images: {:?}",
+        plain.keys()
+    );
+    assert!(
+        plain["transforms.json"] == a["transforms.json"],
+        "the images are an output, not an input: the poses do not move"
+    );
+    for dir in [&first, &second, &plain_dir] {
+        std::fs::remove_dir_all(dir).ok();
+    }
+}
+
+/// `must_not_join` takes the pair out of the run **before matching**, and the report says so.
+///
+/// The slab has exactly one pair, so "removed before matching" is visible as a candidate list that
+/// is empty rather than merely as an assembly that placed nothing.
+#[test]
+fn must_not_join_removes_the_pair_before_matching_and_the_report_lists_it() {
+    let input = repo_root().join("fixtures/slab/input");
+    let out = scratch("must-not-join");
+    let file =
+        constraints_file("not", r#"{"version": 1, "must_not_join": [["pieceB", "pieceA"]]}"#);
+    run_with(&input, &out, &["--constraints", &file.to_string_lossy()]);
+
+    let report = report_of(&out);
+    assert_eq!(
+        report["candidates"].as_array().expect("candidates").len(),
+        0,
+        "the pair was never matched, so it produced no candidate"
+    );
+    assert_eq!(report["joins_used"].as_array().expect("joins_used").len(), 0);
+    let entries = report["constraints"]["entries"].as_array().expect("the constraints block");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["list"], "must_not_join");
+    assert_eq!(entries[0]["satisfied"], serde_json::json!(true));
+    assert!(
+        entries[0]["outcome"].as_str().expect("an outcome").contains("before matching"),
+        "{:?}",
+        entries[0]
+    );
+    let markdown =
+        String::from_utf8(std::fs::read(out.join("report.md")).expect("report.md")).unwrap();
+    assert!(markdown.contains("## Constraints"), "report.md lists every constraint");
+    assert!(markdown.contains("`must_not_join`"), "and names the list it was written in");
+    std::fs::remove_dir_all(&out).ok();
+    std::fs::remove_dir_all(file.parent().expect("a parent")).ok();
+}
+
+/// A `must_join` carrying a 4x4: **matching is skipped and the pose is a confirmed candidate**.
+///
+/// The pose pinned is the one an unconstrained run found for the pair, so the assembly must place
+/// it; what the test asserts is that it got there without being matched — one candidate for the
+/// pair instead of the five R §5.7 keeps — and that the band is confirmed.
+#[test]
+fn a_pinned_pose_places_without_matching() {
+    let input = repo_root().join("fixtures/slab/input");
+    let found_dir = scratch("pinned-source");
+    run(&input, &found_dir);
+    let found = report_of(&found_dir);
+    let candidates = found["candidates"].as_array().expect("candidates");
+    assert!(candidates.len() > 1, "the matcher keeps several candidates for this pair");
+    let pose = found["joins_used"][0]["T"].clone();
+    assert!(pose.is_array(), "the unconstrained run placed the pair");
+
+    let out = scratch("pinned");
+    let body = serde_json::json!({
+        "version": 1,
+        "must_join": [{"a": "pieceA", "b": "pieceB", "pose": pose}],
+    });
+    let file = constraints_file("pin", &body.to_string());
+    run_with(&input, &out, &["--constraints", &file.to_string_lossy()]);
+
+    let report = report_of(&out);
+    let pinned = report["candidates"].as_array().expect("candidates");
+    assert_eq!(pinned.len(), 1, "matching was skipped: the pinned pose is the only candidate");
+    assert_eq!(pinned[0]["tier"], "confirmed", "audit §D.1: the pose is a confirmed candidate");
+    assert_eq!(pinned[0]["T"], found["joins_used"][0]["T"], "and it is the pose that was pinned");
+    assert_eq!(report["joins_used"].as_array().expect("joins_used").len(), 1, "so R §8 placed it");
+    let entry = &report["constraints"]["entries"][0];
+    assert_eq!(entry["satisfied"], serde_json::json!(true));
+    assert!(
+        entry["outcome"].as_str().expect("an outcome").contains("matching skipped"),
+        "{entry:?}"
+    );
+    for dir in [&found_dir, &out] {
+        std::fs::remove_dir_all(dir).ok();
+    }
+    std::fs::remove_dir_all(file.parent().expect("a parent")).ok();
+}
+
+/// `different_object` vetoes a join that R §6 accepted, and says whose decision it was.
+#[test]
+fn different_object_vetoes_a_join_the_geometry_accepted() {
+    let input = repo_root().join("fixtures/slab/input");
+    let out = scratch("different-object");
+    let file =
+        constraints_file("diff", r#"{"version": 1, "different_object": [["pieceA", "pieceB"]]}"#);
+    run_with(&input, &out, &["--constraints", &file.to_string_lossy()]);
+
+    let report = report_of(&out);
+    assert!(
+        report["candidates"].as_array().expect("candidates").iter().any(|c| c["accepted"] == true),
+        "the pair was still matched and still accepted: a constraint never edits a score"
+    );
+    assert_eq!(report["joins_used"].as_array().expect("joins_used").len(), 0, "and not placed");
+    let refused = report["joins_rejected"].as_array().expect("joins_rejected");
+    assert_eq!(refused.len(), 1);
+    assert_eq!(
+        refused[0]["reason"], "refused by constraints.json (`different_object`)",
+        "{refused:?}"
+    );
+    std::fs::remove_dir_all(&out).ok();
+    std::fs::remove_dir_all(file.parent().expect("a parent")).ok();
+}
+
+/// An unknown fragment name is an **error**, not a skip (audit §D.1).
+#[test]
+fn an_unknown_name_in_the_constraints_file_fails_the_run() {
+    let input = repo_root().join("fixtures/slab/input");
+    let out = scratch("unknown-name");
+    let file =
+        constraints_file("unknown", r#"{"version": 1, "must_not_join": [["pieceA", "pieceZ"]]}"#);
+    let result = Command::new(env!("CARGO_BIN_EXE_sherd-refit-rs"))
+        .args(["run", &input.to_string_lossy(), "--out", &out.to_string_lossy()])
+        .args(["--constraints", &file.to_string_lossy()])
+        .output()
+        .expect("the binary runs");
+    assert!(!result.status.success(), "an unknown name must fail the run");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("pieceZ"), "the message names the fragment: {stderr}");
+    std::fs::remove_dir_all(&out).ok();
+    std::fs::remove_dir_all(file.parent().expect("a parent")).ok();
+}
+
+/// Audit §E's two terracotta gates for the constraints file. The scans are not in the repository,
+/// so this runs on demand.
+///
+/// * `must_not_join [021, 094]` leaves 094–104 as the only join, and the report says the pair was
+///   removed before matching.
+/// * `must_join [007, 021]` is **unsatisfiable** — 007 has no accepted partner at any budget
+///   (R §13) — and the run still succeeds and says so.
+#[test]
+#[ignore = "needs input/test_fragments_1/fragments, which is not in the repository"]
+fn the_terracotta_honours_its_two_constraints() {
+    let input = repo_root().join("input/test_fragments_1/fragments");
+    assert!(input.is_dir(), "{} is missing", input.display());
+
+    let refused = scratch("terracotta-refused");
+    let file = constraints_file(
+        "terracotta-not",
+        r#"{"version": 1,
+            "must_not_join": [["FY234021_reduced", "FY234094_reduced"]]}"#,
+    );
+    run_with(&input, &refused, &["--constraints", &file.to_string_lossy()]);
+    let report = report_of(&refused);
+    let joins: Vec<(String, String)> = report["joins_used"]
+        .as_array()
+        .expect("joins_used")
+        .iter()
+        .map(|j| (j["a"].as_str().expect("a").to_owned(), j["b"].as_str().expect("b").to_owned()))
+        .collect();
+    assert_eq!(
+        joins,
+        [("FY234094_reduced".to_owned(), "FY234104_reduced".to_owned())],
+        "with 021-094 refused, 094-104 is the only join left"
+    );
+    assert!(
+        report["candidates"]
+            .as_array()
+            .expect("candidates")
+            .iter()
+            .all(|c| !(c["a"] == "FY234021_reduced" && c["b"] == "FY234094_reduced")),
+        "and the pair was never matched"
+    );
+    let entry = &report["constraints"]["entries"][0];
+    assert_eq!(entry["list"], "must_not_join");
+    assert_eq!(entry["satisfied"], serde_json::json!(true));
+
+    let forced = scratch("terracotta-forced");
+    let file2 = constraints_file(
+        "terracotta-join",
+        r#"{"version": 1, "must_join": [["FY234007_reduced", "FY234021_reduced"]]}"#,
+    );
+    run_with(&input, &forced, &["--constraints", &file2.to_string_lossy()]);
+    let report = report_of(&forced);
+    let entry = &report["constraints"]["entries"][0];
+    assert_eq!(entry["list"], "must_join");
+    assert_eq!(entry["satisfied"], serde_json::json!(false), "{entry:?}");
+    assert!(entry["outcome"].as_str().expect("an outcome").contains("unsatisfiable"), "{entry:?}");
+
+    for dir in [&refused, &forced] {
+        std::fs::remove_dir_all(dir).ok();
+    }
+    std::fs::remove_dir_all(file.parent().expect("a parent")).ok();
+    std::fs::remove_dir_all(file2.parent().expect("a parent")).ok();
+}

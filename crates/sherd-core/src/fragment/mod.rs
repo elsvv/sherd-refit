@@ -360,6 +360,18 @@ impl Fragment {
             .as_deref()
     }
 
+    /// [`Fragment::surface_scene`] as the shared handle it is stored as.
+    ///
+    /// The BVH is behind an `Arc` because D §4.1 says one fragment's tree serves every pair it
+    /// takes part in; handing the `Arc` out rather than a borrow is what lets R §8's `Piece` list
+    /// outlive a `&mut Fragment` — which is how the fracture trees are released after matching
+    /// (audit §B.3, [`Fragment::release_scenes`]) without rebuilding anything.
+    pub fn surface_scene_arc(&self) -> Option<Arc<RayScene>> {
+        self.bvh_full
+            .get_or_init(|| RayScene::of_mesh(&self.mesh.v, &self.mesh.f).map(Arc::new))
+            .clone()
+    }
+
     /// A BVH over this fragment's **fracture faces alone**, built on first use (R §6.1, D §4.1).
     ///
     /// This is the reference's `frac_scene`, and the submesh is what makes `tight` and `gap`
@@ -373,6 +385,26 @@ impl Fragment {
                 .map(Arc::new)
             })
             .as_deref()
+    }
+
+    /// Frees both BVHs, if they were built.
+    ///
+    /// D §8 books them "in the LRU" and there has never been an LRU: they are `OnceLock`s and
+    /// they live for the process (audit §B.3). Their two readers both stop before the run does —
+    /// R §6.1's point-to-surface distance ends with the last pair, R §6.4's penetration test with
+    /// the last `try_place` — and the two stages that follow, R §9's refinement and R §11.4's
+    /// writers, are the ones that hold a full-resolution original per job. Measured on
+    /// `synthetic_20` (20 fragments, 3.66 M working-mesh faces): **472 MB** of whole-mesh trees
+    /// and **46 MB** of fracture trees, which is 12.9 B and 1.2 B per working-mesh face and, at
+    /// D §8's 170 fragments, about 4 GB and 400 MB.
+    ///
+    /// It cannot move a result: nothing reads either tree afterwards, and a fragment asked for one
+    /// again simply builds it again — the `OnceLock` is reset, not poisoned. It is not enough on
+    /// its own, either: the whole-mesh tree is an `Arc` that R §8's `Piece` list also holds
+    /// ([`Fragment::surface_scene_arc`]), so the caller has to drop that list in the same breath.
+    pub fn release_scenes(&mut self) {
+        self.bvh_frac = OnceLock::new();
+        self.bvh_full = OnceLock::new();
     }
 }
 

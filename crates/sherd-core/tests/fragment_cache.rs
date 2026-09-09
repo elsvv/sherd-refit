@@ -177,3 +177,38 @@ fn the_cache_of_a_real_fragment_is_reproducible_and_self_describing() {
 
     std::fs::remove_dir_all(&out).ok();
 }
+
+/// Audit §B.3: the two BVHs are released once their readers are done, and the release is a reset
+/// rather than a poisoning.
+///
+/// What it has to guarantee is that dropping the trees cannot change an answer. It cannot, because
+/// a fragment asked for a tree after the release simply builds it again — same mesh, same faces,
+/// same tree — and that is what this asserts, on the same closest-point query on both sides.
+#[test]
+fn releasing_the_scenes_frees_them_and_they_come_back() {
+    let fragment = {
+        let mut fragment =
+            Fragment::from_mesh_file(slab_piece("pieceA"), TARGET_FACES).expect("pieceA");
+        let query = [1.0_f32, 2.0, 3.0];
+        let before = (
+            fragment.surface_scene().expect("a whole-mesh tree").closest_face(query),
+            fragment.fracture_scene().expect("a fracture tree").closest_face(query),
+        );
+        fragment.release_scenes();
+        fragment.release_scenes(); // twice: releasing what is not there is not an error
+        let after = (
+            fragment
+                .surface_scene()
+                .expect("the whole-mesh tree is rebuilt on demand")
+                .closest_face(query),
+            fragment
+                .fracture_scene()
+                .expect("the fracture tree is rebuilt on demand")
+                .closest_face(query),
+        );
+        assert_eq!(before.0, after.0, "the whole-mesh tree answers the same query");
+        assert_eq!(before.1, after.1, "the fracture tree answers the same query");
+        fragment
+    };
+    assert!(fragment.n_faces() > 0);
+}

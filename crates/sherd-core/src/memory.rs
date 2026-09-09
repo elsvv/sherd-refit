@@ -532,16 +532,19 @@ impl RssMonitor {
         Some(Self { shared, thread: Some(thread) })
     }
 
-    /// The largest resident set seen since the last call (or since [`RssMonitor::start`]), in
-    /// bytes, and the window starts again at what is resident now.
+    /// The largest resident set **seen while the window was open**, in bytes, and a new window
+    /// opens empty.
     ///
     /// A stage shorter than [`SAMPLE_INTERVAL`] still gets a number: this takes a sample of its
-    /// own before it reads the mark.
+    /// own, which closes the window it reads. The next window starts at zero rather than at that
+    /// sample, so a stage is charged for what was resident *during* it and never for what the
+    /// stage before it was still holding at the boundary — which is the whole question audit §B.3
+    /// asks.
     pub fn take_peak(&self) -> u64 {
-        let now = self.shared.sample().unwrap_or(0);
+        self.shared.sample();
         let Ok(mut marks) = self.shared.marks.lock() else { return 0 };
         let peak = marks.window;
-        marks.window = now;
+        marks.window = 0;
         peak
     }
 
@@ -756,6 +759,7 @@ mod tests {
         let second = monitor.take_peak();
         assert!(second > 0, "a window shorter than the interval still takes its own sample");
         assert!(monitor.peak() >= first.max(second), "the run's peak covers every window");
+        assert!(second >= rss, "an empty window still closes on its own sample");
         assert_eq!(held.len(), 2_000_000, "the allocation is not optimised away");
     }
 }

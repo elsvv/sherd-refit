@@ -388,7 +388,7 @@ pub fn run_with(
     // 1. preprocessing (R §3, through the cache of R §3.7)
     let started = Instant::now();
     let cache_dir = options.cache.then(|| out_dir.to_path_buf());
-    let fragments = preprocess_collection(
+    let mut fragments = preprocess_collection(
         &entries,
         options.target_faces,
         cache_dir.as_deref(),
@@ -486,17 +486,21 @@ pub fn run_with(
     // fragments' own samples and their whole-mesh BVHs — belongs in the same place.
     let started = Instant::now();
     let samples: Vec<Vec<[f64; 3]>> = fragments.iter().map(|f| f.samples.surface_f64()).collect();
-    fragments.par_iter().for_each(|f| {
-        let _ = f.surface_scene();
-    });
+    // The whole-mesh BVHs are built eagerly and then held as `Arc`s of their own rather than as
+    // borrows of the fragments. That is what lets the fracture trees be released between the last
+    // pair and R §9 below (audit §B.3): a `Piece` list borrowed from `fragments` would keep the
+    // collection immutably borrowed to the end of the run.
+    let scenes: Vec<Option<std::sync::Arc<crate::spatial::bvh::RayScene>>> =
+        fragments.par_iter().map(Fragment::surface_scene_arc).collect();
     let pieces: Vec<Piece<'_>> = fragments
         .iter()
         .zip(&samples)
-        .map(|(f, s)| Piece {
+        .zip(&scenes)
+        .map(|((f, s), scene)| Piece {
             thick: f.thick,
             res: f.res(),
             watertight: f.watertight,
-            mesh: f.surface_scene(),
+            mesh: scene.as_deref(),
             s_pen: s,
         })
         .collect();
@@ -543,6 +547,38 @@ pub fn run_with(
     let used: Vec<(FragId, FragId)> =
         assembly.used.iter().map(|&i| (candidates[i].a, candidates[i].b)).collect();
 
+    // Both BVHs have had their last reader (audit §B.3): R §6.1's fracture tree ended with the
+    // last pair, R §6.4's whole-mesh tree with the last `try_place`. R §8.2's recentring reads
+    // only the surface samples, so what follows — R §9's refinement and R §11's writers, the two
+    // stages that hold one full-resolution original per job — does not have to make room for
+    // 4 GB of trees on a 170-fragment collection. The `Piece` list is dropped with them, because
+    // it holds the whole-mesh trees' `Arc`s; `placed` is R §8.2's own view, without them.
+    let before = crate::memory::resident_memory();
+    drop(pieces);
+    drop(scenes);
+    for fragment in &mut fragments {
+        fragment.release_scenes();
+    }
+    if let (Some(before), Some(after)) = (before, crate::memory::resident_memory()) {
+        tracing::info!(
+            rss_before_mib = before / (1024 * 1024),
+            rss_after_mib = after / (1024 * 1024),
+            reclaimed_mib = before.saturating_sub(after) / (1024 * 1024),
+            "BVHs released"
+        );
+    }
+    let placed: Vec<Piece<'_>> = fragments
+        .iter()
+        .zip(&samples)
+        .map(|(f, s)| Piece {
+            thick: f.thick,
+            res: f.res(),
+            watertight: f.watertight,
+            mesh: None,
+            s_pen: s,
+        })
+        .collect();
+
     // 4. full-resolution refinement (R §9) and R §8.2's recentring
     let mut poses = assembly.poses.clone();
     if options.refine && assembly.groups.iter().any(|g| g.len() > 1) {
@@ -552,7 +588,7 @@ pub fn run_with(
         stages.finish("refine", started.elapsed().as_secs_f64());
         tracing::info!(seconds = stages.timings["refine"], joins = used.len(), "refinement done");
     }
-    let poses = recenter(&poses, &pieces, &assembly.groups);
+    let poses = recenter(&poses, &placed, &assembly.groups);
 
     // 5. outputs (R §11)
     let started = Instant::now();

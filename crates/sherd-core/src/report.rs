@@ -189,8 +189,9 @@ pub type Timings = Ordered<f64>;
 pub struct MemoryReport {
     /// The largest resident set seen over the whole run, in bytes.
     pub peak_rss: u64,
-    /// The largest resident set seen during each stage, in the order the stages finished, in
-    /// bytes. A stage's window starts at what was resident when the previous stage ended.
+    /// The largest resident set seen while each stage ran, in the order the stages finished, in
+    /// bytes. A stage is charged for what was resident during it and not for what the stage
+    /// before it was holding at the boundary.
     pub stages: Ordered<u64>,
 }
 

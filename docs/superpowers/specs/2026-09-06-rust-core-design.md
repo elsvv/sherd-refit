@@ -473,10 +473,16 @@ floating-point order.
 
 All arrays are SoA `vec4<f32>` (xyz + spare) or `u32`, 16-byte aligned, `bytemuck::Pod`.
 
-- **Fragment slots** (resident on the device, LRU of 32 slots ≈ 400 MB): per fragment `S`,
+- ~~**Fragment slots** (resident on the device, LRU of 32 slots ≈ 400 MB): per fragment `S`,
   `Pf`, `Nf`, `brk_P`, `brk_ns`, `brk_sub`, `Pm`, `Nm`, fracture BVH, full BVH. Uploaded once
   per epoch; pairs reference slots by index. The scheduler orders pair blocks to maximise slot
-  reuse (same block structure as the CPU path).
+  reuse (same block structure as the CPU path).~~ — **not built** (task H2, audit §B.5). The
+  bookkeeping existed from phase 2a as `sherd_gpu::slots::SlotTable` and never acquired a caller:
+  what a kernel uploads is a *pair's* target at a *rung's* radius, not a fragment, so there is
+  nothing per-fragment to keep resident until §6.5's multi-pair batch exists, and task G3 §2
+  measured device-side preparation at **1.7 % of a run** — a resident set would be optimising a
+  rounding error. The 315 lines were removed; the memory rule that does the work is
+  `device::Allocations`'s per-call reservation (§6.8).
 - **Per-pair descriptors** (`PairDesc`): slot indices, `t_pair`, `res_pair`, the `Scales`, and
   offsets of the pair's grids (built per pair per rung on the CPU, ≈ 1 MB per pair).
 - **Per-candidate state** (`CandState { pair: u32, t: mat3x4<f32>, fitness, rmse: f32, done: u32, iter: u32 }`).
@@ -486,15 +492,11 @@ All arrays are SoA `vec4<f32>` (xyz + spare) or `u32`, 16-byte aligned, `bytemuc
   GPUs: staging via `queue.write_buffer`, readback through a mapped `MAP_READ` buffer once per
   batch. Readback volume is tiny (candidate states, scores).
 
-**Built in phase 2a:** `sherd_gpu::slots::SlotTable` is the resident set (32 slots, 400 MB,
-least-recently-used with ties to the lower slot index, a fragment larger than the budget refused
-rather than admitted after emptying the table) and holds no wgpu type, so its eviction rule is
-tested on every platform without an adapter; `sherd_gpu::buffers::{Chunking, Dispatch}` are the
-binding-cap split and the 2-D dispatch fold; `upload`/`read_back` are the two transfer paths, of
-which **only the mapped-at-creation one has ever run** — this machine has one integrated Metal
-adapter and no software fallback (E7 §6). `Chunking` has no consumer until a kernel dispatches a
-batch larger than one binding; the batch structs report `device_bytes()` so a scheduler can size
-itself against it.
+**Built in phase 2a:** `sherd_gpu::buffers::{Chunking, Dispatch}` are the binding-cap split and
+the 2-D dispatch fold; `upload`/`read_back` are the two transfer paths, of which **only the
+mapped-at-creation one has ever run** — this machine has one integrated Metal adapter and no
+software fallback (E7 §6). `Chunking` is used by `coarse.rs`; the batch structs report
+`device_bytes()` so a scheduler can size itself against it.
 
 ### 6.4 Batch formation and the software pipeline
 
@@ -830,12 +832,13 @@ actually true, measured twice:
   index" cannot fix that, since the tie is not exact on one side. A cross-check therefore gates on
   the *rate* and on every disagreement being a genuine near-tie, never on a count of zero.
 
-**Phase 2b measured the agreement on the two matching kernels, and §12's 2b exit criterion —
-"CPU/GPU cross-check within §10.2" — is met on one development set of eight.** That is the plain
-statement task W was asked for (V6-D2); what follows is the whole measurement rather than the part
-of it that passes. `gpu-check --stage all --pairs 4 --chaos`, every set, at the tolerances §10.2
-writes (0.05°, **0.01 t of the origin**, 1e-4), with the chaotic candidates excused as §10.2's own
-row asks and counted in the last column:
+**Phase 2b measured the agreement on the two matching kernels with every rung forced onto the
+device, and on that reading §12's 2b exit criterion — "CPU/GPU cross-check within §10.2" — is met
+on one development set of eight.** That is the plain statement task W was asked for (V6-D2); what
+follows is the whole measurement rather than the part of it that passes. `gpu-check --stage all
+--pairs 4 --chaos --force-device`, every set, at the tolerances §10.2 writes (0.05°, **0.01 t of
+the origin**, 1e-4), with the chaotic candidates excused as §10.2's own row asks and counted in the
+last column:
 
 | set | s1 `deg` | s1 `t` | s1 `fit` | s1 `rmse` | s2 `deg` | s2 `t` | s2 `fit` | s2 `rmse` | excused | exit |
 |---|---|---|---|---|---|---|---|---|---:|---:|
@@ -870,6 +873,18 @@ Read with it, three things that were stated wrongly or not at all before task W:
   §10.2's per-pair bounds on all eight sets (stage 1: worst pair 8.0e-3 of 0.06; stage 2: worst
   pair 3.0e-1 of 0.4), and the number of failing rows per set is the same with the exclusion as
   without it. The gate is honest about what it excuses and it does not depend on it.
+
+**Task H2 reads the same harness at the production policy, and the table above is not what a run
+produces.** Stage 2 is the CPU's on every collection (`icp::STAGE2_ON_DEVICE`), so its eight
+columns describe a batch no `--backend gpu` run ever sends to the device; the translation column is
+the origin-referenced one, and at the cloud stage 1 is inside on 8 of 8. What is left when the
+policy decides is R §5.2's coarse score and R §5.4's two stage-1 rungs, and there
+`gpu-check --stage all --pairs 4` exits 0 on **seven** of the eight sets. The eighth is pot_C:
+`icp s1 deg` 9.1e-2 of 0.05, `icp s1 fit` 1.9e-3 and `icp s1 rmse` 2.6e-3 of 1e-4, p50 0.0 and
+p99 1.2e-4 over a thousand candidates — one candidate, on a rung whose `f64` control from the
+device's own starting pose lands 3.2e-6 away, so it is the rung and not its input. The `iter` row
+puts it seven iterations apart, which is the stopping rule of §6.7's own paragraph one stage
+earlier than the table found it. §12's 2b row carries this as the criterion's standing result.
 
 End to end this costs nothing measurable: the two backends produce **the same used joins, the same
 groups and the same `tools/evaluate.py` scores on all seven development collections**, the worst
@@ -966,17 +981,23 @@ groups.
   implementation of the API, the measured ratio is **≥ 1.5×**, *and* the executor is worth using.
   **Phase 2b split that last clause in two, because the first three are about the device and the
   question is about the stage.** `GpuExecutor::HAS_KERNELS` is now `true` — `coarse_scores` and
-  `icp_rung` are real kernels and `--backend gpu` runs them — and `GpuExecutor::AUTO_ELIGIBLE` is
-  `false`, carrying the measurement that makes it false: the matching stage is 1.21× on one thread
-  and **1.0× on ten**, while the self-test's own ratio on the same machine is 3–6×. The self-test
-  measures a bounded-NN kernel on an idle device; the stage is ten rayon tasks taking turns
-  blocking on one queue. `Selection::decide` reads `AUTO_ELIGIBLE`, and it flips when §6.4's block
-  scheduler lands (phase 2d), not when a kernel does.
-  **Phase 2d landed the scheduler and the constant did not flip.** The stage is now 1.04–1.40× over
+  `icp_rung` are real kernels and `--backend gpu` runs them — and the last clause carried the
+  measurement that made it false: the matching stage is 1.21× on one thread and **1.0× on ten**,
+  while the self-test's own ratio on the same machine is 3–6×. The self-test measures a bounded-NN
+  kernel on an idle device; the stage is ten rayon tasks taking turns blocking on one queue. It was
+  expected to flip when §6.4's block scheduler landed (phase 2d), not when a kernel did.
+  **Phase 2d landed the scheduler and it did not flip.** The stage is now 1.04–1.40× over
   the seven development collections and the bar is 1.5×; what holds it there is §6.6's envelope —
-  the device losing 1.60× of its own throughput as the ten cores fill up — and not a queue. The
-  constant now carries that table, and what would move it is a device that does not share the
-  envelope (E8's discrete rows), not more work on this one.
+  the device losing 1.60× of its own throughput as the ten cores fill up — and not a queue.
+  **Task H2 stopped writing this as a number and wrote it as a policy** (audit §A.2.4).
+  `GpuExecutor::AUTO_ELIGIBLE = false` read as a value the next tuning pass might tick over;
+  `GpuExecutor::AUTO = AutoPolicy::CpuUntilADiscreteAdapter` says the decision instead, and
+  `Selection::decide` takes the policy rather than a `bool`. The envelope is a property of an
+  **integrated** adapter, so the ratio is not going to move on this machine and the port stops
+  trying to move it: `auto` is the CPU until a *discrete* adapter has been measured on the
+  matching stage, `--backend gpu` stays available and documented as the opt-in for anyone
+  measuring the kernels, and `Selection`'s four-branch rule is kept intact for the machine that
+  earns it (`AutoPolicy::MeasuredOnThisMachine`).
 - **`--backend gpu`** opens the device and runs the self-test, and **fails** — with the adapter
   list, the unmet limits or the failed checks — when either step fails, rather than falling back
   silently. A macOS self-test failure means the CPU with no second opinion: there is no software
@@ -997,22 +1018,14 @@ groups.
 - **Timeouts:** dispatches ≤ 100 ms by construction (§6.4); `device.poll(PollType::wait_indefinitely())`
   with a watchdog; a device loss mid-run falls back to the CPU for the remaining blocks and is
   recorded in the report.
-- **Memory:** slots + batches ≤ 1 GB. `SlotTable` is D §6.3's resident set — 32 slots, 400 MB,
-  least-recently-used eviction with ties to the lower slot index, a fragment larger than the whole
-  budget refused rather than admitted after emptying the table. It holds no wgpu type, so its
-  eviction rule is tested on every CI platform without an adapter. On adapters reporting < 2 GB
-  the slot count halves and `P` shrinks (`SlotTable::with_capacity`).
+- **Memory:** batches ≤ 1 GB (§6.3's resident set was never built, so there are no slots to add).
   **Enforced in phase 2d (task G3)** by `sherd_gpu::device::Allocations` and `--gpu-memory GB`
   (default 1 GB, `0` removes the bound): each kernel adds up the buffers it is about to create and
   **reserves them before the first one exists**; a batch larger than the whole budget is answered
   by the CPU executor and counted as a refusal rather than allocated anyway, a batch that fits but
   finds the budget occupied **waits for room** rather than being refused (§6.6, V6-D8), and the
   reservation is an RAII guard so a call's bytes are released when the call returns. Measured peaks at the default: **103 MB** on
-  `synthetic_20`, 21 MB on pot_H, no refusals — an order of magnitude under the row. `SlotTable`
-  still has **no consumer**: what a kernel uploads is a *pair's* target at a *rung's* radius, not a
-  fragment, so there is nothing per-fragment to keep resident until §6.5's multi-pair batch exists,
-  and task G3 §2 measured device-side preparation at 1.7 % of a run, so a resident set would be
-  optimising a rounding error.
+  `synthetic_20`, 21 MB on pot_H, no refusals — an order of magnitude under the row.
 - **Precision:** f32 only (`f16`/`f64` unused; `SHADER_F64` is not available on Metal anyway);
   `Scales` and thresholds computed in f64 on the CPU and passed as f32.
 - **Untestable here, and said so rather than assumed:** the staging upload path for discrete GPUs
@@ -1767,6 +1780,26 @@ seeds each — 15 runs — not derived from the port.
    iteration-count row, `p50`/`p90`/`p99` beside every worst case, and a displacement read at the
    cloud beside §10.2's origin-referenced one.
 
+   **The table is read at the production policy** (the audit's §A.2.4, task H2). `--policy` was a
+   flag and is now the default; `--force-device` is what asks for the old behaviour. The three
+   things that changes, and the reason for each:
+
+   * **The kernel rows are the ones a run actually produces.** At the thresholds a `--backend gpu`
+     run applies, the device answers R §5.2's coarse score (when the batch is between
+     `coarse::MIN_QUERIES` and `MAX_QUERIES`) and R §5.4's two stage-1 breakline rungs; every row
+     still prints how many of its calls reached the device, so a set on which the coarse batches
+     are over the ceiling says `delegated` rather than pretending to a comparison.
+   * **The stage-2 rows read `cpu by policy`.** R §5.6 climbs `Params::stage2` = 10 candidates and
+     `icp::MIN_CANDIDATES` is 16, so no stage-2 rung of a production run reaches the device on any
+     collection. That was a consequence of two measured thresholds; it is now
+     `sherd_gpu::icp::STAGE2_ON_DEVICE`, a policy constant with a test tying it to R §1.1's own
+     number, so a tuning pass cannot move a verification criterion by accident.
+   * **The translation row is read at the cloud.** §10.2 writes the tolerance over the
+     displacement of the *origin*, and on these scans that is a lever arm of 100–150 units times
+     the rotation: pot_A's stage-1 poses read 4.3e-2 t at the origin and 3.6e-3 t at the fragment.
+     `icp sN t@cloud` is the row the exit code is stated over and `icp sN t` is printed beside it,
+     ungated, as the alarm it always was in substance.
+
    **Task W made the exit code the criterion and nothing else** (V6-D2). A candidate is excused
    from the pose rows for either of two *measured* reasons, and §10.2's `chaotic` row then counts
    and bounds the ones that were:
@@ -1782,7 +1815,9 @@ seeds each — 15 runs — not derived from the port.
    rows carry §10.2's own per-pair bounds (0.06 and 0.4; four pairs are not a dump, and the
    per-dump bounds are stated over tens of thousands of candidates). `gpu-check` exits non-zero
    **exactly when** some row is over its tolerance, which is now exactly the criterion §12's 2b
-   row states.
+   row states. Read at the production policy that is **seven development sets of eight**, against
+   one of eight when every rung was forced onto the device; §12's 2b row carries the one that is
+   left and names the candidate.
 
    **The `distance` and `inside` rows read `delegated` on every set, permanently** (V6-D9). Phase
    2c was decided against on measurements (§12's 2c row), so R §6.1 and R §6.4 have no kernel and
@@ -1861,14 +1896,14 @@ shorten phase 1+2 to ≈ 14 weeks because GPU work can start once the CPU ICP is
 | **phase 1 total** | | **11** | | |
 | 2a | wgpu device/adapter/self-test, buffers, slots, batch structs; E7, E8 | 1.5 | self-test passes on Metal + lavapipe | naga/driver issues |
 | 2a, task G1 | done: the `Executor` boundary made real (§6.1) with the CPU path routed through it and byte-identical, `spatial::grid`'s hash grid (§6.2), the `sherd-gpu` crate — device and `--gpu-adapter` (§6.8), buffer chunking and the 2-D dispatch fallback, the 32-slot LRU (§6.3), the self-test on E7's two kernels, `gpu-check` (§10.4 layer 3) | | reduction bit-identical (`0x49a7230c`), bounded NN 1 differing of 384 000 at `max |Δd|` 1.3e-7, 12.2–17.9 ns/query and 3.3–6.3× the ten-core CPU; CPU outputs byte-identical to `9bf35d6` on the four sets (92 files) and parity 23 804 / 0 | lavapipe and WARP are CI's to answer; the discrete-GPU staging path is untestable here (E7 §6) |
-| 2b | hash grid + `icp_rung` (both estimators, in-kernel solves), `coarse_scores` | 2.5 | CPU/GPU cross-check within §10.2 | shared-memory limits; f32 conditioning |
+| 2b | hash grid + `icp_rung` (both estimators, in-kernel solves), `coarse_scores` | 2.5 | CPU/GPU cross-check within §10.2 **at the production policy**, and the two run-level rows (task H2, audit §A.2.4) | shared-memory limits; f32 conditioning |
 | 2b, task G2 | done: `kernels/coarse.wgsl` (§6.5, one workgroup per hypothesis, an integer count out) and `kernels/icp.wgsl` (both estimators, every iteration of a rung in one dispatch, the shifted frame with §7's correction, an equilibrated 6×6), the three size thresholds, per-method counters, and `gpu-check --pairs/--chaos/--policy` (§10.4 layer 3) | | coarse **bit-identical on 2 934 052 of 2 934 122 hypotheses**, the other 70 one probe point away; stage 1 inside §10.2's rotation row on 7 of 8 sets and its translation row at the cloud on 8 of 8; stage 2 inside on 4 of 8, the tail separated by a control into ladder and kernel; end to end **the same used joins, groups and `evaluate.py` scores as the CPU on all seven collections**, two GPU runs byte-identical, CPU outputs unmoved | both risks were real: 29 accumulators do not fit one 16 KB reduction, and `f32` needed the shift *and* §7's composition correction *and* an equilibrated solve. The one this row did not name is the one that decided the phase: **the stage is 1.0× because the pipeline blocks ten threads on one queue**, which is 2d's |
-| **2b, exit criterion, task W** | — | — | **Not met, on seven development sets of eight.** `gpu-check --stage all --pairs 4 --chaos` exits 0 on the slab and 1 on the other seven, and that exit code is now the criterion exactly (§10.4 layer 3, V6-D2). At §10.2's own tolerances, with the chaotic candidates excused and counted: stage 1 inside the rotation row on 7 of 8 and the **origin-referenced** translation row on 5 of 8; stage 2 inside on 4 of 8 and **1 of 8**. §6.7 carries the per-set table. It is **not** the ladder: after every candidate whose own `f64` control is outside the row is excused, four sets are still outside on the kernel's account (2.113°, 5.030°, 1.466°, 0.380°) | task W's own experiment — double-single accumulation of the 27 partials, then of the 6×6 solve too — moved none of them and cost up to 1.22× of device time, so more precision in the rung is not the answer; the divergence is in the *rung count*. Nothing about this row moves a decision on any development set: both backends place the same fragments, use the same joins and score the same, and the worst final pose gap is inside §10.2's `refine` row |
-| 2c | BVH kernels (`bounded_distance`, `inside`) | 1.5 | cross-check | traversal stack in WGSL |
+| **2b, exit criterion, restated at the production policy (task H2)** | — | — | **Met at the run level on all eight development sets; met on the kernel rows on seven of eight.** The criterion is the audit's §A.2.4: the device does R §5.2's coarse score and R §5.4's two stage-1 breakline rungs, R §5.6's stage 2 is the CPU's by policy (`icp::STAGE2_ON_DEVICE`), the translation row is read **at the cloud**, and the two run-level rows are what a placed pose is held to — identical used joins, identical groups, identical `evaluate.py` scores on both backends, and a worst final pose gap of 7.0e-2° / 2.9e-4 t, inside §10.2's `refine` row. `gpu-check --stage all --pairs 4` now exits 0 on terracotta, pot_A, pot_B, pot_G, pot_H, `synthetic_20` and the slab, against **1 of 8** when every rung was forced onto the device. **pot_C is the one that is left**, and it is named rather than excused: `icp s1 deg` 9.1e-2 of 0.05, `icp s1 fit` 1.9e-3 and `icp s1 rmse` 2.6e-3 of 1e-4, on a rung the policy really does send to the device, with p50 0.0 and p99 1.2e-4 — one candidate of a thousand. Its `t@cloud` row passes (7.3e-3 of 0.01) and its `ctrl` row is 3.2e-6, so the ladder did not amplify an `f32` input: the rung itself stopped seven iterations apart | the audit predicted 8 of 8 and the measurement says 7; the difference is pot_C's stage 1, which task W's table also carried at 9.1e-2 and which forcing was not the cause of. It is §6.7's stopping-rule discontinuity one stage earlier — a threshold comparison on `f32` sums whose own noise is 1.6e-6 — and task W measured that more precision does not move it (double-single on the 27 partials and on the 6×6: nothing, at up to 1.22× of device time). Nothing about this row moves a decision on any development set |
+| ~~2c~~ | ~~BVH kernels (`bounded_distance`, `inside`)~~ — **struck** (task H2, audit §A.2.4 and §C.7). Not built, and not planned: task G3 measured the move at **at most 1.2 s off a 13.38 s stage** on a device that is already 1.6× down on its idle throughput whenever the ten cores are busy, which is the row below. `gpu-check`'s `distance` and `inside` rows read `delegated` permanently and say so (§10.4 layer 3, V6-D9). A discrete adapter, or a prototype measured against those two rows, is what would reopen it | — | — | ~~traversal stack in WGSL~~ |
 | 2c, task G3 | **not built, and measured rather than deferred.** R §6 is 15.9 % of a GPU-backend run's core time, so the rule to build it fires; the batches are 10 900 (`bounded_distance`) and 20 000 (`inside`) points, which is the size at which `icp.wgsl` already wins | | moving R §6 to the device takes **at most 1.2 s** off a 13.38 s stage and adds 43.7 M BVH queries to a device that has 4.3 s of slack, is 1.6× down on its idle throughput and gets slower the busier the CPU beside it is (§6.6). The hash-grid kernel — no stack, no triangle projection — runs at 55–80 M queries/s on an **idle** device | the decision is against the trigger and rests on §6.6's envelope; a discrete adapter (E8) or a prototype measured against `gpu-check`'s `distance` and `inside` rows would settle it |
 | 2d, task G3 | done: §6.4's software pipeline — one submitting thread, four command buffers in flight, `Executor::device_slack`, one submission per `Executor` call — plus `Occupancy` (the union of the outstanding intervals, not the per-thread sum), `--gpu-memory` and §1's reservation, §5's `Cancel`/`Progress` with Ctrl-C, and the TDR/2-D-dispatch tests | | matching **1.04–1.40×** on the seven development collections (was 1.0×), device occupancy 41 % → 68 % **at G3; 48 % after 2e's ceiling halved it deliberately, re-measured at task W** (V6-D6), peak device memory 103 MB of 1 GB, **68 MB at task W**; parity 23 804 / 0 and **every used join, group and pose bit-identical to G2's on both backends** | the risk this row named — "overlap efficiency" — is the one that bit, in a form no scheduler addresses: on an integrated part the device loses 1.60× of its throughput as the ten cores fill up, so §6.6's overlap arithmetic does not hold and the stage's minimum is at six workers, not nine |
 | 2d | scheduler, pipelining, TDR chunking, memory management | 1.5 | the GPU gates of §10.3 **on the development sets** (`mixed_ABG` included, on the same terms: it is roadmap item 4's baseline, not a quality gate), and §5's memory semaphore holding a projected 170-scan preprocessing budget (E1 §7); "synthetic 170 ≤ 30 min" is the final acceptance after phase 2, not a 2d exit (decision 2026-09-07) | overlap efficiency; a projection carried this long can be wrong in a way only the run shows |
-| 2e | vendor matrix (NVIDIA/AMD/Intel/Apple), tuning | 2 | E8 matrix green | Intel/AMD driver quirks |
+| ~~2e~~ | ~~vendor matrix (NVIDIA/AMD/Intel/Apple), tuning~~ — **struck** (task H2, audit §A.2.4 and §C.7). Not built, and not buildable here: this machine has one Metal adapter and macOS offers no software fallback (E7 §6), so every cell of the matrix would be written from a machine nobody has. The tuning half was done on the one adapter (task G4, the row below) and its two constants are consequences of an *integrated* part sharing power and bandwidth with the cores — a discrete card shares neither, so a matrix would have to re-measure them rather than inherit them. The GPU path is frozen as an opt-in instead: `--backend gpu` for anyone measuring the kernels, `auto` on the CPU by policy (`GpuExecutor::AUTO`) | — | — | ~~Intel/AMD driver quirks~~ |
 | 2e, task G4 | done, on the one adapter this machine has: `coarse::MAX_QUERIES` (a measured **ceiling** beside §6.4's floors), `device_slack` capped at one worker per core plus one, the §10.3 rows measured on both backends cold and warm, §6.6 re-derived from measured throughput, a `sherd-refit-rs info` that runs the self-test and prints **both** ratios with their names on them, and the README's GPU section | | matching **1.07–1.43×** on the seven development collections (was 1.04–1.40×), `synthetic_20` 1.08 → **1.28×**; every §10.3 row inside its gate on both backends, warm and cold; peak device memory 67 MB of 1 GB; parity 23 804 / 0 and **every used join, group and pose bit-identical to G3's on both backends**, two GPU runs byte-identical | **the vendor matrix itself is not done and cannot be done here** — one Metal adapter, no software fallback (E7 §6). Both new constants are consequences of an *integrated* part sharing power and bandwidth with the CPU; a discrete card shares neither and each row of E8 has to re-measure them rather than inherit them. What CI checks without a GPU: the build on four platforms, the chunking and threshold arithmetic, `Selection::decide`'s rule; adapter tests skip with a printed reason |
 | **phase 2 total** | | **9** | | |
 | 3a | pyo3 module, numpy interop, `SHERD_REFIT_BACKEND=rust` routing in the Python package, A/B on the fixtures | 2 | Python pipeline with Rust kernels reproduces the Rust CLI | packaging on Windows |

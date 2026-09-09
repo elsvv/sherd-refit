@@ -41,8 +41,8 @@ pub(crate) fn info_lines() -> Vec<String> {
             adapters.len(),
             if adapters.len() == 1 { "" } else { "s" },
             if sherd_gpu::GpuExecutor::HAS_KERNELS {
-                "R §5.2's coarse score and R §7's ICP rung on the device, R §6's two methods on \
-                 the CPU (phase 2c)"
+                "R §5.2's coarse score and R §5.4's stage-1 ICP rungs on the device, R §5.6's \
+                 stage 2 and R §6's two methods on the CPU (policy; D §12's 2c struck)"
             } else {
                 "no kernels yet"
             }
@@ -101,7 +101,7 @@ pub(crate) fn selftest_lines(adapter: Option<&str>) -> Vec<String> {
             selftest::STAGE_SPEEDUP.1,
             selftest::STAGE_SPEEDUP_SOURCE,
         ));
-        let selection = Selection::decide(test, GpuExecutor::AUTO_ELIGIBLE);
+        let selection = Selection::decide(test, GpuExecutor::AUTO);
         lines.push(format!(
             "  --backend auto: {} — {}",
             if selection.use_gpu { "gpu" } else { "cpu" },
@@ -248,9 +248,11 @@ pub(crate) fn resolve(
             }
             let reason = format!(
                 "--backend gpu on {}: the self-test passed ({:.1} ns/query, {:.2}x the CPU on its \
-                 batch). R §5.2's coarse score and R §7's ICP rung run on the device, between the \
-                 measured size thresholds; R §6.1's bounded distance and R §6.4's inside test are \
-                 still the CPU implementation's (D §12: 2c), and `gpu-check` says which is which. \
+                 batch). R §5.2's coarse score and R §5.4's stage-1 ICP rungs run on the device, \
+                 between the measured size thresholds; R §5.6's stage 2 is the CPU's by policy \
+                 (icp::STAGE2_ON_DEVICE: ten candidates under a threshold of sixteen), and \
+                 R §6.1's bounded distance and R §6.4's inside test are the CPU implementation's \
+                 (D §12's 2c, struck). `gpu-check` says which is which. \
                  The self-test's ratio is a kernel on an idle device and not the stage's: the \
                  matching stage measures {:.2}-{:.2}x, and the device loses 1.6x of its own \
                  throughput as the ten cores fill up (tasks G3, G4).",
@@ -272,7 +274,8 @@ pub(crate) fn resolve(
             })
         }
         // `auto`: never fails, and today never picks the GPU. `Selection` is the rule, and it is
-        // the same rule that will pick the GPU when `AUTO_ELIGIBLE` flips.
+        // the same rule that will pick the GPU on a machine whose stage has been measured
+        // (`GpuExecutor::AUTO`).
         (_, Err(e)) => Ok(Resolved {
             backend: Backend::Cpu,
             engine: Engine::REFERENCE,
@@ -281,7 +284,7 @@ pub(crate) fn resolve(
             executor: None,
         }),
         (_, Ok((gpu, test))) => {
-            let selection = Selection::decide(test, GpuExecutor::AUTO_ELIGIBLE);
+            let selection = Selection::decide(test, GpuExecutor::AUTO);
             if !selection.use_gpu {
                 drop(gpu);
                 return Ok(Resolved {
@@ -557,7 +560,7 @@ pub(crate) fn check(
     adapter: Option<&str>,
     pairs: usize,
     chaos: bool,
-    policy: bool,
+    force_device: bool,
 ) -> Result<Vec<CheckRow>> {
     use std::sync::Arc;
 
@@ -583,12 +586,12 @@ pub(crate) fn check(
         })
         .collect();
     let executor = GpuExecutor::new(Arc::new(gpu), selftest);
-    // D §10.4 layer 3 is about the kernels, so by default it runs them whatever the executor's
-    // size thresholds say: on terracotta every one of the four pairs' rungs is under
-    // `icp::MIN_CANDIDATES × MIN_WORK`, and a table that printed a deviation of zero for a batch
-    // the CPU answered on both sides would be the lie task G1 built the `delegated` label to
-    // avoid. `--policy` asks for the thresholds a run actually applies.
-    executor.force_device(!policy);
+    // D §12's 2b criterion is stated at the **production policy** (audit §A.2.4): the executor's
+    // own size thresholds decide what reaches the device, which is what a `--backend gpu` run of
+    // this collection would do. `--force-device` is task W's measurement of the kernel instead —
+    // every rung on the device, including the ones no run puts there — and on a small collection
+    // it is also what keeps a row from comparing the CPU with itself.
+    executor.force_device(force_device);
 
     let wanted = |name: &str| stage == "all" || stage == name;
     let delegated = |name: &str, tolerance: f64, items: usize| CheckRow {
@@ -669,6 +672,10 @@ pub(crate) fn check(
     let mut inside_items = 0_usize;
     let mut used = 0_usize;
     let mut over_one_probe = 0_usize;
+    // `(on_device, calls)` of `icp_rung` per stage, so that the stage-1 and stage-2 rows can each
+    // say what the *policy* did with them rather than sharing one method-wide counter.
+    let mut s1_calls = (0_u64, 0_u64);
+    let mut s2_calls = (0_u64, 0_u64);
 
     'outer: for i in 0..fragments.len() {
         for j in i + 1..fragments.len() {
@@ -686,6 +693,8 @@ pub(crate) fn check(
             used += 1;
             let t = pair.scales.t;
             let report = compare_pair(&pair, &params, &executor, chaos);
+            s1_calls = (s1_calls.0 + report.stage1_calls.0, s1_calls.1 + report.stage1_calls.1);
+            s2_calls = (s2_calls.0 + report.stage2_calls.0, s2_calls.1 + report.stage2_calls.1);
 
             if wanted("coarse") {
                 for (c, g) in report.coarse_host.iter().zip(&report.coarse_device) {
@@ -832,20 +841,23 @@ pub(crate) fn check(
         rows.push(row);
         rows.push(rescore.row("coarse s1", tolerance::COARSE));
     }
-    let icp_rows = rows.len();
+    let s1_rows = rows.len();
     if wanted("icp") {
         rows.push(s1_rot.row("icp s1 deg", tolerance::POSE_DEG));
         rows.push(control_row(&s1_ctrl, "icp s1 ctrl", &s1_chaos));
         rows.push(s1_iter.row("icp s1 iter", f64::INFINITY));
-        rows.push(s1_disp.row("icp s1 t", tolerance::POSE_T));
         rows.push(s1_cloud.row("icp s1 t@cloud", tolerance::POSE_T));
+        rows.push(origin_row(&s1_disp, "icp s1 t"));
         rows.push(s1_fit.row("icp s1 fit", tolerance::ICP));
         rows.push(s1_rmse.row("icp s1 rmse", tolerance::ICP));
+    }
+    let s2_rows = rows.len();
+    if wanted("icp") {
         rows.push(s2_rot.row("icp s2 deg", tolerance::POSE_DEG));
         rows.push(control_row(&s2_ctrl, "icp s2 ctrl", &s2_chaos));
         rows.push(s2_iter.row("icp s2 iter", f64::INFINITY));
-        rows.push(s2_disp.row("icp s2 t", tolerance::POSE_T));
         rows.push(s2_cloud.row("icp s2 t@cloud", tolerance::POSE_T));
+        rows.push(origin_row(&s2_disp, "icp s2 t"));
         rows.push(s2_fit.row("icp s2 fit", tolerance::ICP));
         rows.push(s2_rmse.row("icp s2 rmse", tolerance::ICP));
     }
@@ -871,23 +883,38 @@ pub(crate) fn check(
     let stats = executor.stats();
     let annotate = |rows: &mut Vec<CheckRow>,
                     span: std::ops::Range<usize>,
-                    snapshot: sherd_gpu::MethodSnapshot| {
+                    (on_device, calls): (u64, u64)| {
         for row in &mut rows[span] {
-            if snapshot.delegated == 0 {
+            if on_device == calls {
                 row.status = format!("{} [device]", row.status);
-            } else if snapshot.on_device == 0 {
+            } else if on_device == 0 {
                 "delegated — every call was the CPU's, so this row compares nothing"
                     .clone_into(&mut row.status);
             } else {
-                row.status = format!(
-                    "{} [{} of {} calls on the device]",
-                    row.status, snapshot.on_device, snapshot.calls
-                );
+                row.status = format!("{} [{on_device} of {calls} calls on the device]", row.status);
             }
         }
     };
-    annotate(&mut rows, coarse_rows..icp_rows, stats.coarse.snapshot());
-    annotate(&mut rows, icp_rows..icp_end, stats.icp.snapshot());
+    let coarse_snapshot = stats.coarse.snapshot();
+    annotate(&mut rows, coarse_rows..s1_rows, (coarse_snapshot.on_device, coarse_snapshot.calls));
+    annotate(&mut rows, s1_rows..s2_rows, s1_calls);
+    // The stage-2 rows are the ones the audit's §A.2.4 restates. When the policy is in force and
+    // no stage-2 rung reached the device — which is every production run, because R §5.6 climbs
+    // ten candidates and `icp::MIN_CANDIDATES` is sixteen — the rows say so by name instead of
+    // reporting a deviation of zero that both executors computed on the CPU.
+    if !force_device && s2_calls.0 == 0 && !sherd_gpu::icp::STAGE2_ON_DEVICE {
+        for row in &mut rows[s2_rows..icp_end] {
+            row.status = format!(
+                "cpu by policy — R §5.6 climbs {} candidates, under icp::MIN_CANDIDATES ({}), so \
+                 no run sends stage 2 to the device (audit §A.2.4); `--force-device` measures the \
+                 kernel on it",
+                sherd_gpu::icp::STAGE2_CANDIDATES,
+                sherd_gpu::icp::MIN_CANDIDATES,
+            );
+        }
+    } else {
+        annotate(&mut rows, s2_rows..icp_end, s2_calls);
+    }
     for line in stats.lines() {
         rows.push(CheckRow {
             stage: "counters".to_owned(),
@@ -941,6 +968,31 @@ fn chaotic_row(stage: &str, per_pair: &[(usize, usize)], tolerance: f64) -> Chec
         format!("FAIL — {detail}")
     };
     CheckRow { stage: stage.to_owned(), items: total, worst, tolerance, differing: chaotic, status }
+}
+
+/// The origin-referenced translation row, as an **alarm** beside the row that gates.
+///
+/// D §10.2 writes the translation tolerance over the displacement of the *origin*, and its own
+/// note says why: *"a pure rotation difference shows up in both rows — which is the conservative
+/// way round"*. On these scans that conservatism is the whole number rather than a rounding: the
+/// fragments sit 100–150 units from the origin, so the row reads a lever arm times the rotation
+/// and reports 4.3e-2 t where the fragment itself moved 1e-4 t (task W, D §6.7's third bullet).
+///
+/// The audit's §A.2.4 therefore reads the translation **at the cloud** — the centroid of the
+/// moving points, where a reader asking "did the fragment move" is looking — and keeps this one
+/// beside it, printed and ungated. Both are measured over the same candidates; only which of them
+/// decides the exit code changed.
+#[cfg(feature = "gpu")]
+fn origin_row(column: &Column, stage: &str) -> CheckRow {
+    let mut row = column.row(stage, f64::INFINITY);
+    if !column.all.is_empty() {
+        row.status = format!(
+            "{} (the displacement of the origin, D §10.2's own form: a lever arm of 100-150 units \
+             times the rotation on these scans; the row the criterion is read at is `{stage}@cloud`)",
+            row.status,
+        );
+    }
+    row
 }
 
 /// The `ctrl` row: the same rungs, in `f64`, on the CPU, from the pose the device itself starts
@@ -1066,6 +1118,10 @@ struct PairReport {
     /// The centroid of each stage's moving cloud, for the displacement read at the fragment.
     stage1_centre: [f64; 3],
     stage2_centre: [f64; 3],
+    /// `(on_device, calls)` of `icp_rung` for this pair's stage-1 and stage-2 rungs, so that each
+    /// stage's rows report what the size policy did with them.
+    stage1_calls: (u64, u64),
+    stage2_calls: (u64, u64),
     pose: sherd_core::matching::icp::Pose,
 }
 
@@ -1125,6 +1181,7 @@ fn compare_pair(
     let mut stage1_device = Vec::new();
     let mut poses = inits.clone();
     let mut control = sherd_gpu::icp::device_round_trip(&inits, &source, &icp_target);
+    let icp_before = executor.stats().icp.snapshot();
     for rung in &rungs {
         let options = Options {
             estimation: rung.estimation,
@@ -1141,6 +1198,7 @@ fn compare_pair(
     }
     let stage1_control = control;
     let stage1_centre = centroid(&source);
+    let icp_after_s1 = executor.stats().icp.snapshot();
 
     // R §5.4's re-score, over the poses stage 1 actually produced: `Pair::stage1`'s own batch,
     // over B's whole breakline subset at `sc.stage1` rather than sixty points at `sc.coarse`.
@@ -1191,6 +1249,7 @@ fn compare_pair(
     }
     let stage2_control = control2;
     let stage2_centre = rungs2.last().map_or([0.0; 3], |rung| centroid(rung.source));
+    let icp_after_s2 = executor.stats().icp.snapshot();
     let pose = poses2
         .first()
         .copied()
@@ -1211,6 +1270,14 @@ fn compare_pair(
         stage2_control,
         stage1_centre,
         stage2_centre,
+        stage1_calls: (
+            icp_after_s1.on_device - icp_before.on_device,
+            icp_after_s1.calls - icp_before.calls,
+        ),
+        stage2_calls: (
+            icp_after_s2.on_device - icp_after_s1.on_device,
+            icp_after_s2.calls - icp_after_s1.calls,
+        ),
         pose,
     }
 }

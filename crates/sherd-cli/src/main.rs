@@ -88,10 +88,12 @@ struct InfoArgs {
 
 /// Arguments of `gpu-check`: D §10.4 layer 3's cross-check harness.
 ///
-/// In phase 2a the four `Executor` stages have no kernels — `sherd-gpu`'s executor routes each of
-/// them to the CPU (D §12: 2b and 2c) — so their rows come back **`delegated`** rather than as a
-/// deviation of zero, and what actually runs on the device is the pair of self-test kernels E7
-/// measured. The table is the one the kernels will report into.
+/// The table is read at the **production policy** (audit §A.2.4): the kernel rows are R §5.2's
+/// coarse score and R §5.4's two stage-1 breakline rungs, the stage-2 rows read `cpu by policy`
+/// because R §5.6's ten candidates never reach the device, the translation row is read at the
+/// cloud, and R §6.1's bounded distance and R §6.4's inside test read `delegated` permanently
+/// (phase 2c was measured and decided against, D §12). `--force-device` puts every rung on the
+/// device instead, which is task W's kernel measurement and not the criterion.
 #[derive(Debug, Args)]
 struct GpuCheckArgs {
     /// Which stages to compare.
@@ -124,13 +126,20 @@ struct GpuCheckArgs {
     /// *widen* the excused set: the run without it is the stricter of the two.
     #[arg(long)]
     chaos: bool,
-    /// Apply the executor's own size thresholds instead of forcing every batch to the device.
+    /// Force every batch to the device instead of applying the executor's own size thresholds.
     ///
-    /// Off by default: layer 3 is about the kernels, and a small collection's rungs are all under
-    /// `icp::MIN_CANDIDATES`, so with the thresholds on the table would compare the CPU with
-    /// itself. On, it reports what a `--backend gpu` run of this collection would actually do.
+    /// **Off by default since the audit's §A.2.4**, which restated D §12's 2b exit criterion at the
+    /// *production policy*: what a `--backend gpu` run of this collection actually sends to the
+    /// device is R §5.2's coarse score and R §5.4's two stage-1 breakline rungs, and R §5.6's
+    /// stage 2 is the CPU's by policy (`sherd_gpu::icp::STAGE2_ON_DEVICE`). Those are the rows the
+    /// criterion is stated over, and the ones this command exits on.
+    ///
+    /// With the flag the table is task W's: every rung forced onto the device, including the ones
+    /// no run would ever put there. That is a measurement of the *kernel* — useful, and not the
+    /// criterion. A small collection then has rows that compare the CPU with itself, which is why
+    /// forcing was the default while phase 2b was measuring the kernels.
     #[arg(long)]
-    policy: bool,
+    force_device: bool,
     /// Which GPU adapter to use, by index or by a substring of its name (D §9).
     #[arg(long, value_name = "NAME|INDEX")]
     gpu_adapter: Option<String>,
@@ -537,6 +546,11 @@ fn info(args: &InfoArgs) {
         "                       neither the abort nor the fence it resolves as success, and the",
         "                       port answers such a batch on the CPU and counts it `corrupt` in",
         "                       the run's device lines (task H1, D §7).",
+        "  gpu, when to use it: `--backend gpu` is an opt-in — for measuring the kernels, and for",
+        "                       a discrete adapter. `auto` is the CPU by policy until the matching",
+        "                       stage has been measured on one: on an integrated part the device",
+        "                       and the cores share one envelope and the stage is 1.07-1.43x,",
+        "                       under D §6.8's 1.5x (audit §A.2.4, D §6.8).",
     ] {
         println!("{line}");
     }
@@ -838,7 +852,7 @@ fn gpu_check(args: &GpuCheckArgs) -> Result<()> {
         args.gpu_adapter.as_deref(),
         args.pairs.max(1),
         args.chaos,
-        args.policy,
+        args.force_device,
     )?;
     println!(
         "{:<12} {:>10} {:>12} {:>12} {:>10}  status",

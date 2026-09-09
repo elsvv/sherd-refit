@@ -94,6 +94,46 @@ pub const MIN_CANDIDATES: usize = 16;
 /// which is what the measurements say.
 pub const MIN_WORK: usize = 100_000;
 
+/// The size policy of D §6.4, as one predicate: is a rung of `candidates` candidates over
+/// `points` source points worth a dispatch?
+///
+/// [`IcpKernel::run`] applies it and [`STAGE2_ON_DEVICE`] reads it; the cross-check harness
+/// reports what it decided rather than inferring it from two constants.
+#[must_use]
+pub const fn on_device(candidates: usize, points: usize) -> bool {
+    candidates >= MIN_CANDIDATES && candidates * points >= MIN_WORK
+}
+
+/// R §5.6's stage-2 candidate count in a production run — `Params::stage2`, the `--candidates`
+/// flag's default (R §1.1).
+///
+/// Named here so that the line below is a statement about the production policy and not about a
+/// number that happens to be small. The unit test at the bottom of this file asserts that it *is*
+/// `Params::default().stage2`, so a change to R §1.1 breaks the build rather than moving a
+/// criterion quietly.
+pub const STAGE2_CANDIDATES: usize = 10;
+
+/// **Policy: R §5.6's stage-2 ladder is answered by the CPU, on every collection and every
+/// adapter** (audit §A.2.4, D §12's 2b row).
+///
+/// Ten candidates is under [`MIN_CANDIDATES`], so no stage-2 rung of a production run can reach
+/// the device whatever its source cloud holds — but that was a *consequence* of two measured
+/// thresholds until this constant existed, and a future tuning of either could have moved a
+/// verification criterion without anyone deciding to. The exit criterion of D §12's 2b row is
+/// stated at this policy: the device does R §5.2's coarse score and R §5.4's two stage-1
+/// breakline rungs, and `gpu-check` prints `cpu by policy` on every stage-2 row rather than a
+/// deviation nothing in a run would ever produce.
+///
+/// The f32/f64 divergence this policy leaves outside the criterion is measured and understood
+/// (D §6.7): it is a stopping-rule discontinuity, not a precision shortfall, and task W's
+/// double-single experiment moved none of it.
+pub const STAGE2_ON_DEVICE: bool = STAGE2_CANDIDATES >= MIN_CANDIDATES;
+
+const _: () = assert!(
+    !STAGE2_ON_DEVICE,
+    "R §5.6's stage 2 is the CPU's by policy: `STAGE2_CANDIDATES` must stay under `MIN_CANDIDATES`"
+);
+
 /// Words the kernel keeps per candidate: twelve of the pose, then count, error², iterations, the
 /// convergence flag and the nonce of [`NONCE`].
 pub const STATE_WORDS: usize = 17;
@@ -207,7 +247,7 @@ impl IcpKernel {
         }
         // Too small to be worth a dispatch: the CPU wins below the measured crossover, and a
         // wrong answer to that question costs more than the kernel gains (see `MIN_CANDIDATES`).
-        if !force && (n < MIN_CANDIDATES || n * n_src < MIN_WORK) {
+        if !force && !on_device(n, n_src) {
             return Ok(IcpAnswer::Cpu);
         }
         let plane = batch.options.estimation == Estimation::PointToPlane;
@@ -648,8 +688,9 @@ mod tests {
     #![allow(clippy::float_cmp, reason = "a change of frame is exact or it is wrong")]
 
     use super::{
-        Check, MAX_CANDIDATES, MIN_CANDIDATES, MIN_WORK, ORTHONORMAL_TOLERANCE, STATE_WORDS,
-        centroid, next_nonce, registration, shifted, shifted_state,
+        Check, MAX_CANDIDATES, MIN_CANDIDATES, ORTHONORMAL_TOLERANCE, STAGE2_CANDIDATES,
+        STAGE2_ON_DEVICE, STATE_WORDS, centroid, next_nonce, on_device, registration, shifted,
+        shifted_state,
     };
     use sherd_core::matching::icp::{Pose, Rotation, Translation, homogeneous};
 
@@ -826,7 +867,24 @@ mod tests {
         const { assert!(1 < MIN_CANDIDATES) };
         // The measured cells: 16 × 2 000 is 0.85× and stays on the CPU; 16 × 12 000 is 1.71× and
         // 64 × 2 000 is 1.55×, and both go to the device.
-        const { assert!(16 * 2_000 < MIN_WORK) };
-        const { assert!(16 * 12_000 >= MIN_WORK && 64 * 2_000 >= MIN_WORK) };
+        const { assert!(!on_device(16, 2_000)) };
+        const { assert!(on_device(16, 12_000) && on_device(64, 2_000)) };
+    }
+
+    /// The stage-2 policy is a statement about R §1.1's own parameter, not about a number that
+    /// happens to be small (audit §A.2.4).
+    ///
+    /// If `--candidates`' default ever rises to sixteen, this test fails and the exit criterion of
+    /// D §12's 2b row has to be restated before the build goes green again.
+    #[test]
+    fn stage_two_is_the_cpus_by_policy_and_the_policy_is_r_1_1s_own_number() {
+        assert_eq!(
+            usize::try_from(sherd_core::Params::default().stage2).expect("a small count"),
+            STAGE2_CANDIDATES,
+            "`STAGE2_CANDIDATES` is R §1.1's `--candidates` default"
+        );
+        const { assert!(!STAGE2_ON_DEVICE) };
+        // And it is the candidate count that decides it, whatever the fracture cloud holds.
+        const { assert!(!on_device(STAGE2_CANDIDATES, 1_000_000)) };
     }
 }

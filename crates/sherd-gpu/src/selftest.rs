@@ -299,6 +299,29 @@ impl SelfTest {
     }
 }
 
+/// What `--backend auto` is allowed to pick, as a policy with a reason attached.
+///
+/// The audit's §A.2.4 replaced a `bool` with this: `AUTO_ELIGIBLE = false` was a value that read
+/// as though the next tuning pass might flip it, and the decision behind it is not that shape.
+/// The matching stage measures 1.07–1.43× on this machine because the device and the ten cores
+/// share one power and bandwidth envelope (D §6.6, tasks G3 and G4) — a property of an
+/// **integrated** adapter, not a tuning shortfall — so the port stops tuning for it and states the
+/// rule instead. [`GpuExecutor::AUTO`](crate::GpuExecutor::AUTO) is the one in force.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoPolicy {
+    /// **The CPU, until a discrete adapter has been measured on the matching stage.**
+    ///
+    /// `--backend gpu` still opens the device and runs the kernels; `auto` does not choose them,
+    /// and says this in words rather than quoting a ratio that will not move.
+    CpuUntilADiscreteAdapter,
+    /// D §6.8's own rule, on a machine where the *stage* has been measured at or above
+    /// [`AUTO_SPEEDUP`]: a passing self-test on a non-software adapter picks the GPU.
+    ///
+    /// Nothing sets this today. It is what a discrete adapter's measurement would set, and it is
+    /// here so that [`Selection::decide`]'s rule has something to be a rule *about*.
+    MeasuredOnThisMachine,
+}
+
 /// What `Backend::Auto` decided, and why (D §6.8).
 #[derive(Clone, Debug)]
 pub struct Selection {
@@ -315,27 +338,29 @@ pub struct Selection {
 impl Selection {
     /// D §6.8's rule, applied to a self-test that has already run.
     ///
-    /// `worth_using` is what keeps this honest. The self-test measures E7 §5's bounded-NN kernel
+    /// `policy` is what keeps this honest. The self-test measures E7 §5's bounded-NN kernel
     /// on an idle device, and that ratio is not the matching stage's: task G2 measured the two
     /// matching kernels at 1.6–4.2× in isolation and the stage they belong to at **1.0×** on ten
     /// threads, because the pipeline runs one pair per rayon task and ten tasks then block on one
-    /// queue. `Auto` therefore reads `GpuExecutor::AUTO_ELIGIBLE`, which is that measurement and
-    /// not the self-test's.
+    /// queue. `Auto` therefore reads [`GpuExecutor::AUTO`](crate::GpuExecutor::AUTO), which is a
+    /// decision about integrated adapters and not the self-test's number.
     #[must_use]
-    pub fn decide(selftest: SelfTest, worth_using: bool) -> Self {
+    pub fn decide(selftest: SelfTest, policy: AutoPolicy) -> Self {
         let adapter = Some(selftest.adapter.clone());
         if !selftest.passed() {
             let reason =
                 format!("the self-test failed ({}); using the CPU", selftest.failures().join("; "));
             return Self { adapter, selftest: Some(selftest), use_gpu: false, reason };
         }
-        if !worth_using {
+        if policy == AutoPolicy::CpuUntilADiscreteAdapter {
             let reason = format!(
                 "the self-test passed at {:.2}x on {}, but that is the bounded-NN kernel on an \
                  idle device and not the matching stage: measured end to end over the seven \
                  development collections the stage is {:.2}-{:.2}x ({STAGE_SPEEDUP_SOURCE}), \
                  under the {AUTO_SPEEDUP}x D §6.8 asks for, because the device and the cores \
-                 share one power and bandwidth envelope (D §6.6); using the CPU",
+                 share one power and bandwidth envelope (D §6.6). That is a property of an \
+                 integrated adapter, so the policy is the CPU until a discrete one has been \
+                 measured; `--backend gpu` runs the kernels on this one",
                 selftest.speedup, selftest.adapter.name, STAGE_SPEEDUP_MIN, STAGE_SPEEDUP_MAX,
             );
             return Self { adapter, selftest: Some(selftest), use_gpu: false, reason };
@@ -739,8 +764,8 @@ fn storage_entry(binding: u32, read_only: bool) -> BindGroupLayoutEntry {
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTO_SPEEDUP, Check, NN_POSES, NN_RADIUS, Selection, SelfTest, nn_cloud, nn_on_host,
-        reduce_mirror, reduce_terms,
+        AUTO_SPEEDUP, AutoPolicy, Check, NN_POSES, NN_RADIUS, Selection, SelfTest, nn_cloud,
+        nn_on_host, reduce_mirror, reduce_terms,
     };
     use crate::device::AdapterEntry;
     use sherd_core::spatial::grid::HashGrid;
@@ -822,30 +847,41 @@ mod tests {
     /// D §6.8's `Backend::Auto` rule, every branch, without an adapter.
     #[test]
     fn the_auto_rule_needs_a_pass_a_gpu_and_one_and_a_half_times() {
-        // Everything passes and it still says CPU while a matching kernel is missing.
-        let partial = Selection::decide(selftest(true, 8.0, "IntegratedGpu"), false);
+        let measured = AutoPolicy::MeasuredOnThisMachine;
+        // Everything passes and the shipped policy still says CPU, in words.
+        let partial = Selection::decide(
+            selftest(true, 8.0, "IntegratedGpu"),
+            AutoPolicy::CpuUntilADiscreteAdapter,
+        );
         assert!(!partial.use_gpu);
         assert!(
             partial.reason.contains("1.07-1.43x") && partial.reason.contains("matching stage"),
             "the reason has to quote the *stage*'s measured range, not the kernel's: {}",
             partial.reason
         );
+        assert!(
+            partial.reason.contains("discrete"),
+            "the shipped policy is a decision about integrated adapters, and says so: {}",
+            partial.reason
+        );
 
-        // With kernels: a passing self-test above the threshold picks the GPU.
-        let picked = Selection::decide(selftest(true, 8.0, "IntegratedGpu"), true);
+        // On a machine whose stage has been measured: a passing self-test above the threshold
+        // picks the GPU.
+        let picked = Selection::decide(selftest(true, 8.0, "IntegratedGpu"), measured);
         assert!(picked.use_gpu, "{}", picked.reason);
         assert!(picked.reason.contains("8.00x"), "{}", picked.reason);
 
         // Below the threshold it does not.
-        let slow = Selection::decide(selftest(true, AUTO_SPEEDUP - 0.01, "IntegratedGpu"), true);
+        let slow =
+            Selection::decide(selftest(true, AUTO_SPEEDUP - 0.01, "IntegratedGpu"), measured);
         assert!(!slow.use_gpu && slow.reason.contains("below"), "{}", slow.reason);
-        let exactly = Selection::decide(selftest(true, AUTO_SPEEDUP, "IntegratedGpu"), true);
+        let exactly = Selection::decide(selftest(true, AUTO_SPEEDUP, "IntegratedGpu"), measured);
         assert!(exactly.use_gpu, "the rule is `at or above`: {}", exactly.reason);
 
         // A failed check always wins, and a software adapter is never preferred to the CPU.
-        let failed = Selection::decide(selftest(false, 100.0, "IntegratedGpu"), true);
+        let failed = Selection::decide(selftest(false, 100.0, "IntegratedGpu"), measured);
         assert!(!failed.use_gpu && failed.reason.contains("self-test failed"), "{}", failed.reason);
-        let software = Selection::decide(selftest(true, 100.0, "Cpu"), true);
+        let software = Selection::decide(selftest(true, 100.0, "Cpu"), measured);
         assert!(!software.use_gpu && software.reason.contains("software"), "{}", software.reason);
 
         // And with no adapter at all the reason is the error the operator has to act on.

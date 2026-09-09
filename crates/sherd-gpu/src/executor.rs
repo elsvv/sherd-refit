@@ -43,7 +43,7 @@ use sherd_core::matching::icp::Registration;
 use crate::coarse::{CoarseAnswer, CoarseKernel, score_of};
 use crate::device::Gpu;
 use crate::icp::{IcpAnswer, IcpKernel};
-use crate::selftest::SelfTest;
+use crate::selftest::{AutoPolicy, SelfTest};
 
 /// What one `Executor` method did, over the life of the executor.
 #[derive(Debug, Default)]
@@ -232,8 +232,20 @@ impl GpuExecutor {
     /// phase 2c's and delegate.
     pub const HAS_KERNELS: bool = true;
 
-    /// Whether `Backend::Auto` may **pick** this executor — which is a different question, and on
-    /// this machine the answer is no.
+    /// What `Backend::Auto` does with this executor — which is a different question from
+    /// [`HAS_KERNELS`](Self::HAS_KERNELS), and the answer is a **policy** and not a threshold.
+    ///
+    /// [`AutoPolicy::CpuUntilADiscreteAdapter`] is the decision of the audit's §A.2.4, taken after
+    /// tasks G2, G3, G4 and W: *the CPU, until a discrete adapter has been measured*. It used to
+    /// be a `bool` named `AUTO_ELIGIBLE` whose value was `false` "because 1.07–1.43× is under
+    /// 1.5×", which read as a number that might tick over on the next tuning pass. It will not:
+    /// the ratio is a property of an **integrated** part sharing power and bandwidth with the ten
+    /// cores, no scheduler moves it, and the port stops tuning for it. `--backend gpu` stays as an
+    /// opt-in for anyone measuring the kernels, and for the discrete adapter this policy is
+    /// waiting for.
+    ///
+    /// The measurements that decided it are below, because a policy that does not carry them is
+    /// just a preference.
     ///
     /// D §6.8's rule reads the self-test's ratio, and the self-test measures E7 §5's bounded-NN
     /// kernel on an idle device: 3–6× the whole ten-core CPU. That number is real and it is not
@@ -278,10 +290,10 @@ impl GpuExecutor {
     /// it is what `info` and this constant quote.
     ///
     /// So `Auto` keeps the CPU and says why, `--backend gpu` runs the kernels for anyone measuring
-    /// them, and this constant flips when a *measured* 1.5× exists — which on this machine would
-    /// take a kernel for R §6 that does not have to share, or a discrete GPU that does not share
-    /// at all. D §6.8's bar is 1.5×; the honest measurement is 1.07–1.43×.
-    pub const AUTO_ELIGIBLE: bool = false;
+    /// them, and this policy changes when a *discrete* adapter has been measured on the matching
+    /// stage — not when someone re-runs the same seven collections on this one. D §6.8's bar is
+    /// 1.5×; the honest measurement on an integrated part is 1.07–1.43×.
+    pub const AUTO: AutoPolicy = AutoPolicy::CpuUntilADiscreteAdapter;
 
     /// How many worker threads the matching stage runs beyond `--threads`: **half as many again**
     /// (D §6.4, `Executor::device_slack`).
@@ -472,19 +484,19 @@ impl Executor for GpuExecutor {
 
 #[cfg(test)]
 mod tests {
-    use super::{GpuExecutor, Stats};
+    use super::{AutoPolicy, GpuExecutor, Stats};
     use std::time::Duration;
 
-    /// Phase 2b's flag is what `Backend::Auto` reads, and the two matching kernels are in.
+    /// The two matching kernels are in, and `Backend::Auto` still says CPU — by policy.
     #[test]
     fn the_kernels_exist_and_auto_still_says_cpu() {
         const { assert!(GpuExecutor::HAS_KERNELS, "task G2 puts coarse and icp on the device") };
-        const {
-            assert!(
-                !GpuExecutor::AUTO_ELIGIBLE,
-                "measured: matching is 1.07-1.43x, under D §6.8's 1.5x bar"
-            );
-        }
+        assert_eq!(
+            GpuExecutor::AUTO,
+            AutoPolicy::CpuUntilADiscreteAdapter,
+            "measured on an integrated part: matching is 1.07-1.43x, under D §6.8's 1.5x bar, and \
+             the envelope it shares with the cores is not something tuning moves"
+        );
     }
 
     /// The slack is capped at the cores the pool has not already claimed (task G4).

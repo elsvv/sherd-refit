@@ -7,15 +7,21 @@
 //! the bounded point-to-surface distance and the inside test. `sherd-core`'s `CpuExecutor` is the
 //! reference implementation of all four. This crate is the second one.
 //!
-//! **Phase 2a (task G1) builds the trust, not the kernels.** What is here is the device
-//! ([`device`]), the buffer and dispatch arithmetic ([`buffers`]), the fragment-slot LRU
-//! ([`slots`]), the self-test of D §6.8 as E7 §8 corrects it ([`selftest`]) and a
-//! [`GpuExecutor`] that **routes every method to the CPU executor** and says
-//! so. The four kernels arrive in phases 2b and 2c; when they do, the self-test, the cross-check
-//! harness (`sherd-refit-rs gpu-check`) and the slot table are already there to measure them.
+//! **Two of the four are on the device and two are not, and the crate says which.** What is here
+//! is the device ([`device`]), the buffer and dispatch arithmetic ([`buffers`]), the self-test of
+//! D §6.8 as E7 §8 corrects it ([`selftest`]), the two matching kernels ([`coarse`], [`icp`]) and
+//! a [`GpuExecutor`] that routes `bounded_distance` and `inside` to the CPU executor and counts
+//! every such call. Phase 2c's BVH kernels were measured and decided against (D §12, struck).
 //! Nothing here silently pretends to be a GPU result: [`selftest::SelfTest`] reports which kernels
-//! actually ran on the device, and `gpu-check` marks a delegated row `delegated` rather than
-//! printing a deviation of zero.
+//! actually ran on the device, `gpu-check` marks a delegated row `delegated` rather than printing
+//! a deviation of zero, and no readback is believed on the strength of `Ok` alone (task H1,
+//! [`icp::registration`]).
+//!
+//! **What is not here: D §6.3's resident set.** `slots::SlotTable` — an LRU of 32 fragment slots
+//! under a 400 MB budget — was built in phase 2a and never acquired a caller: every kernel uploads
+//! its batch per call, and the memory rule that does the work is
+//! [`device::Allocations`]'s reservation. Task H2 removed it rather than keep 315 lines of
+//! bookkeeping for a design that was measured out (audit §B.5); D §6.3 records it as not built.
 //!
 //! # The two kernels that do run
 //!
@@ -58,11 +64,10 @@ pub mod icp;
 pub mod pipeline;
 pub mod selftest;
 pub mod shader;
-pub mod slots;
 
 pub use device::{AdapterChoice, AdapterEntry, Gpu};
 pub use executor::{GpuExecutor, MethodSnapshot, Stats};
-pub use selftest::{Selection, SelfTest};
+pub use selftest::{AutoPolicy, Selection, SelfTest};
 
 /// Everything that can stop the GPU path, with the message the CLI prints.
 ///

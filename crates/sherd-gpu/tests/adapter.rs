@@ -25,7 +25,7 @@ use sherd_core::progress::{Cancel, Watch};
 use sherd_core::spatial::kdtree::PointTree;
 use sherd_gpu::device::{AdapterChoice, Requirements};
 use sherd_gpu::selftest::AUTO_SPEEDUP;
-use sherd_gpu::{Gpu, GpuExecutor, Selection, SelfTest};
+use sherd_gpu::{AutoPolicy, Gpu, GpuExecutor, Selection, SelfTest};
 
 /// Opens the default adapter, or prints why it could not and returns `None`.
 fn device(what: &str) -> Option<Gpu> {
@@ -101,8 +101,8 @@ fn an_opened_device_clears_the_portable_limits() {
 /// bounded-NN kernel agreeing inside E7 §5.1's measured residue, and a throughput figure.
 ///
 /// The `Backend::Auto` rule is asserted on the result, including the clause that keeps it on the
-/// CPU while `GpuExecutor::AUTO_ELIGIBLE` is false — which it is on this machine, and for a
-/// measured reason that has nothing to do with the self-test's own ratio.
+/// CPU under `GpuExecutor::AUTO` — which is a policy about integrated adapters, and has nothing
+/// to do with the self-test's own ratio.
 #[test]
 fn the_self_test_holds_on_this_machines_adapter() {
     let Some(gpu) = device("self-test") else { return };
@@ -128,12 +128,13 @@ fn the_self_test_holds_on_this_machines_adapter() {
 
     // D §6.8's rule, on the real numbers: the executor is not `Auto`-eligible, whatever the
     // device did on the self-test's own batch.
-    let today = Selection::decide(test.clone(), GpuExecutor::AUTO_ELIGIBLE);
-    assert!(!today.use_gpu, "the stage is 1.0x on ten threads: {}", today.reason);
+    let today = Selection::decide(test.clone(), GpuExecutor::AUTO);
+    assert!(!today.use_gpu, "the policy is the CPU until a discrete adapter: {}", today.reason);
     println!("  auto (as shipped): {}", today.reason);
 
-    // And when it is eligible, the decision is the measured ratio against D §6.8's 1.5x.
-    let with_kernels = Selection::decide(test.clone(), true);
+    // And on a machine whose stage *has* been measured, the decision is the ratio against
+    // D §6.8's 1.5x.
+    let with_kernels = Selection::decide(test.clone(), AutoPolicy::MeasuredOnThisMachine);
     assert_eq!(
         with_kernels.use_gpu,
         test.speedup >= AUTO_SPEEDUP && !test.adapter.is_software(),
@@ -528,8 +529,7 @@ fn the_icp_rung_crossover_is_a_candidate_count() {
                 cpu_time / gpu_time,
                 if on_device { "device" } else { "cpu (below the threshold)" }
             );
-            let wanted = candidates >= sherd_gpu::icp::MIN_CANDIDATES
-                && candidates * points >= sherd_gpu::icp::MIN_WORK;
+            let wanted = sherd_gpu::icp::on_device(candidates, points);
             assert_eq!(on_device, wanted, "{candidates} × {points} went the wrong way");
             // The ratios are printed and not asserted. `cargo test` runs these tests in parallel
             // on the same ten cores and the same one GPU, so a timing assertion here would be

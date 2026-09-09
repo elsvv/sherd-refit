@@ -247,11 +247,12 @@ pub const DEFAULT_MEMORY_BUDGET: u64 = 1024 * 1024 * 1024;
 /// batch on the CPU instead. A refusal is a delegation, counted like every other, never a failure
 /// and never an allocation that is made anyway.
 ///
-/// The rule is [`SlotTable`](crate::slots::SlotTable)'s, one level down: a request larger than the
-/// whole budget is refused rather than admitted after everything else has been given up. What is
-/// different is that there is nothing to evict — a batch's buffers live exactly as long as the
-/// call that made them — so the reservation is an RAII guard and the "eviction" is the guard going
-/// out of scope.
+/// The rule is the one D §6.3's resident set would have applied one level down: a request larger
+/// than the whole budget is refused rather than admitted after everything else has been given up.
+/// What is different is that there is nothing to evict — a batch's buffers live exactly as long as
+/// the call that made them — so the reservation is an RAII guard and the "eviction" is the guard
+/// going out of scope. (The resident set itself was never built and its bookkeeping is gone; this
+/// is the whole of the crate's memory rule.)
 ///
 /// # A shortfall waits; only an impossible batch is refused (V6-D8)
 ///

@@ -505,7 +505,8 @@ pub fn run_with(
     let mut poses = assembly.poses.clone();
     if options.refine && assembly.groups.iter().any(|g| g.len() > 1) {
         let started = Instant::now();
-        poses = refine(engine, &fragments, &assembly.groups, &poses, &used, params)?;
+        poses =
+            refine(engine, &fragments, &assembly.groups, &poses, &used, params, options.memory)?;
         timings.insert("refine", started.elapsed().as_secs_f64());
         tracing::info!(seconds = timings["refine"], joins = used.len(), "refinement done");
     }
@@ -856,6 +857,7 @@ fn refine(
     poses: &[Matrix4<f64>],
     used: &[(FragId, FragId)],
     params: &Params,
+    budget: Budget,
 ) -> Result<Vec<Matrix4<f64>>> {
     let in_group: Vec<bool> = {
         let mut flags = vec![false; fragments.len()];
@@ -866,9 +868,42 @@ fn refine(
         }
         flags
     };
+    let clouds = fracture_clouds(fragments, &in_group, budget)?.0;
+    let pieces: Vec<RefinePiece<'_>> = fragments
+        .iter()
+        .zip(&clouds)
+        .map(|(f, c)| RefinePiece { thick: f.thick, res: f.res(), cloud: c.as_ref() })
+        .collect();
+    Ok(refine_joins(&pieces, poses, groups, used, params, engine).poses)
+}
+
+/// R §9's clouds: one per member of a group of two or more, under D §5 step 2's budget.
+///
+/// This is the audit's §B.2. R §9 reads the **original** scan of every grouped fragment — the
+/// whole file, before R §3.3's decimation — so the stage's own high-water mark is
+/// `concurrent jobs x (vertices + normals + the KD query)` of originals, which is the same peak
+/// preprocessing has and is priced by the same model ([`memory::reservation`]). Preprocessing
+/// (`preprocess_watched`) and R §11.4's placed writers ([`write_placed_meshes`]) have both gone
+/// through the semaphore since E2; this stage did not, and on a 170-scan collection it is the one
+/// place left where the pool's width alone decides how many originals are resident.
+///
+/// It moves no result, for the reason the semaphore never does (D §5, [`memory`]): the loop
+/// collects by index, each job reads nothing but its own file, and the cap R §9 draws is seeded
+/// from [`refine::CAP_SEED`] and not from the schedule. `Budget::bytes(1)` — one scan at a time —
+/// produces the same clouds as an unbounded budget, bit for bit, which is what
+/// `the_refinement_reserves_its_scans_like_preprocessing` asserts.
+///
+/// Returns the clouds and what the semaphore did, so the caller can log it as preprocessing does
+/// and the test can read it.
+fn fracture_clouds(
+    fragments: &[Fragment],
+    in_group: &[bool],
+    budget: Budget,
+) -> Result<(Vec<Option<FractureCloud>>, memory::SemaphoreStats)> {
+    let semaphore = MemorySemaphore::new(budget);
     let clouds: Vec<Option<FractureCloud>> = fragments
         .par_iter()
-        .zip(&in_group)
+        .zip(in_group)
         .map(|(fragment, &wanted)| {
             if !wanted {
                 return Ok(None);
@@ -876,8 +911,12 @@ fn refine(
             let v64: Vec<[f64; 3]> = fragment.mesh.v.iter().map(|v| v.to_f64()).collect();
             let centroids = geometry::face_geometry(&v64, &fragment.mesh.f).centroids;
             let fracture: Vec<bool> = fragment.labels.iter().map(|l| l.is_fracture()).collect();
+            // The reservation covers the original and the cloud built from it, and is released
+            // the moment the cloud is the only thing left — the same span `place` reserves for.
+            let permit =
+                semaphore.acquire(memory::scan_faces(&fragment.source.path).map_or(0, reservation));
             let original = crate::io::load_mesh(&fragment.source.path)?;
-            Ok(Some(fracture_cloud(
+            let cloud = fracture_cloud(
                 &original,
                 &centroids,
                 &fracture,
@@ -885,19 +924,26 @@ fn refine(
                 fragment.res(),
                 // R §10's inventory gives the refinement stream the literal 0, and `refine.py:35`
                 // is `np.random.default_rng(0)` — not `Params.seed`, which every other stream
-                // takes. The two agree today because no CLI exposes `--seed`; passing `p.seed`
-                // here would make the port's refinement move under a flag the reference's does
-                // not answer to (V4-D9).
+                // takes. `--seed` (task H3) does not reach here for that reason: the reference's
+                // refinement does not answer to its own seed, so neither does the port's (V4-D9).
                 refine::CAP_SEED,
-            )))
+            );
+            drop(original);
+            drop(permit);
+            Ok(Some(cloud))
         })
         .collect::<Result<Vec<Option<FractureCloud>>>>()?;
-    let pieces: Vec<RefinePiece<'_>> = fragments
-        .iter()
-        .zip(&clouds)
-        .map(|(f, c)| RefinePiece { thick: f.thick, res: f.res(), cloud: c.as_ref() })
-        .collect();
-    Ok(refine_joins(&pieces, poses, groups, used, params, engine).poses)
+    if budget.is_bounded() {
+        let stats = semaphore.stats();
+        tracing::info!(
+            budget_mib = budget.available() / (1024 * 1024),
+            peak_mib = stats.peak / (1024 * 1024),
+            peak_concurrent = stats.peak_running,
+            waited = stats.waited,
+            "refinement memory"
+        );
+    }
+    Ok((clouds, semaphore.stats()))
 }
 
 /// The tail of the reference's `pipeline.segment_only`: the segmentation preview alone.
@@ -1050,6 +1096,51 @@ mod tests {
         let bounded = preprocess(&entries, 200_000, None, Budget::bytes(1));
         assert!(bounded[0].is_err(), "the semaphore never turns a read error into a hang");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Audit §B.2: R §9 reads one original scan per grouped fragment, and it now reserves for
+    /// them exactly as preprocessing and R §11.4's writers do.
+    ///
+    /// The two claims the fix has to support are here: under a budget that admits nothing
+    /// (`Budget::bytes(1)`) the stage runs **one scan at a time**, and the clouds it produces are
+    /// the unbounded run's, bit for bit — the semaphore reorders when a scan is read and never
+    /// what is read from it.
+    #[test]
+    fn the_refinement_reserves_its_scans_like_preprocessing() {
+        let input =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/slab/input");
+        let entries = vec![
+            Entry { path: input.join("pieceA.ply"), name: "pieceA".to_owned() },
+            Entry { path: input.join("pieceB.ply"), name: "pieceB".to_owned() },
+        ];
+        let fragments: Vec<crate::fragment::Fragment> =
+            preprocess(&entries, 200_000, None, Budget::unbounded())
+                .into_iter()
+                .map(|r| r.expect("the slab preprocesses").fragment)
+                .collect();
+        let in_group = vec![true; fragments.len()];
+
+        let (free, _) = super::fracture_clouds(&fragments, &in_group, Budget::unbounded())
+            .expect("the clouds build");
+        let (bounded, stats) = super::fracture_clouds(&fragments, &in_group, Budget::bytes(1))
+            .expect("the clouds build under a budget that admits nothing");
+
+        assert_eq!(stats.peak_running, 1, "one scan at a time: {stats:?}");
+        assert!(
+            free.iter().all(Option::is_some) && free.len() == fragments.len(),
+            "every member of a group gets a cloud"
+        );
+        for (a, b) in free.iter().zip(&bounded) {
+            let (a, b) = (a.as_ref().expect("a cloud"), b.as_ref().expect("a cloud"));
+            assert_eq!(a.idx, b.idx, "the selected vertices, in the ICP's summation order");
+            assert_eq!(bits(&a.points), bits(&b.points), "the points, bit for bit");
+            assert_eq!(bits(&a.normals), bits(&b.normals), "the normals, bit for bit");
+        }
+    }
+
+    /// Every `f64` of a cloud as its bits, so "identical" means identical and not "equal".
+    fn bits(points: &[[f64; 3]]) -> Vec<u64> {
+        points.iter().flatten().map(|x| x.to_bits()).collect()
     }
 
     /// Every pair of `n` fragments, in R §4.1's `itertools.combinations` order.

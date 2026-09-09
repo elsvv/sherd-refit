@@ -367,7 +367,14 @@ block schedule takes `--workers`; both fall back to `pipeline::default_workers()
    cache whose hits are bit-identical to its misses has to do. Item 5 rebuilds it or does not need
    it.
    With the GPU executor the block loop becomes a software pipeline (§6.4).
-4. **Assemble** (R§8), **refine** (R§9), **recentre**, **outputs** (R§11). Full-resolution meshes
+4. **Assemble** (R§8), **refine** (R§9), **recentre**, **outputs** (R§11). R§9 reads the
+   **original** scan of every grouped fragment to build its full-resolution fracture cloud, and
+   since task H3 (audit §B.2) that `par_iter` holds step 2's reservation across `load_mesh` and
+   `fracture_cloud` exactly as preprocessing and the writers below do — it was the one stage where
+   the pool's width alone decided how many originals were resident, which on 170 multi-million-face
+   scans is the difference between a bounded peak and an unbounded one. It moves no result, for the
+   reason no admission rule does: the loop collects by index and R§9's cap is seeded from the
+   literal 0. Full-resolution meshes
    are read, transformed and written **in parallel, bounded by step 2's budget** (E2): the files
    are independent and their names are fixed, so the loop is a `par_iter` whose results are
    collected in fragment order, and `place` holds one original scan, which is exactly what
@@ -1066,7 +1073,7 @@ groups.
 | full BVH (penetration) | ≈ 4 MB | in the LRU | |
 | matching transient per pair | hypotheses 150k × 48 B ≈ 7 MB + grids 1 MB | ≈ 10 threads × 10 MB | |
 | assembly | poses, candidates | negligible | |
-| refinement clouds | ≤ 150k × 24 B = 3.6 MB per placed fragment | ≤ 0.6 GB (all placed) | freed per group |
+| refinement clouds | ≤ 150k × 24 B = 3.6 MB per placed fragment, over **one original scan per job in flight** | ≤ 0.6 GB of clouds, plus what the originals hold | the clouds live for the stage; the originals are the peak, and since task H3 they are bounded by §5 step 2's budget (audit §B.2) — before it, `threads × original` |
 | outputs | one original mesh **per writer in flight**, bounded by §5 step 2's budget | ≤ 1.2 GB peak (10 M faces) per writer | streaming PLY writer; E2 made the placed meshes parallel under that budget |
 | **peak RSS** | | **≈ 3–6 GB** (≤ 3 M faces), **≤ 10 GB** (10 M-face scans, 3 preprocessing workers) | measured on the largest development set, warm, previews and meshes on: **1.9 GiB** after E2 against 1.6 GiB before it, the rise being E2's parallel writers and its `MatchData` cache (`notes/2026-09-07-e2-tuning.md` §9) |
 | GPU | slots 32 × 12 MB + batch ≤ 256 MB | ≤ 1 GB | halves on small adapters |

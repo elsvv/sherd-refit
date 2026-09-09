@@ -18,7 +18,7 @@ use sherd_core::executor::batch::IcpBatch;
 use sherd_core::executor::batch::{CoarseBatch, Poses};
 use sherd_core::matching::coarse::Target;
 use sherd_core::matching::icp::{
-    Estimation, IcpTarget, Options, Pose, Rotation, Translation, homogeneous,
+    Estimation, IcpTarget, Options, Pose, Rotation, Translation, homogeneous, pose_gap,
 };
 use sherd_core::pipeline::RunOptions;
 use sherd_core::progress::{Cancel, Watch};
@@ -415,17 +415,10 @@ fn the_icp_kernel_matches_the_cpu_executor_on_synthetic_batches() {
         let mut worst_fitness = 0.0_f64;
         let mut moved = 0_usize;
         for (c, g) in cpu.iter().zip(&device_out) {
-            let mut frobenius = 0.0;
-            let mut origin = 0.0;
-            for i in 0..3 {
-                for j in 0..3 {
-                    frobenius += (c.transform[(i, j)] - g.transform[(i, j)]).powi(2);
-                }
-                origin += (c.transform[(i, 3)] - g.transform[(i, 3)]).powi(2);
-            }
-            let half = (frobenius.sqrt() / (2.0 * std::f64::consts::SQRT_2)).clamp(-1.0, 1.0);
-            worst_deg = worst_deg.max(2.0 * half.asin().to_degrees());
-            worst_origin = worst_origin.max(origin.sqrt());
+            // The Frobenius form, and `t = 1` because this test reports the displacement in the
+            // synthetic cloud's own units rather than in wall thicknesses.
+            worst_deg = worst_deg.max(pose_gap::frobenius_deg(&c.transform, &g.transform));
+            worst_origin = worst_origin.max(pose_gap::origin_t(&c.transform, &g.transform, 1.0));
             for p in &source {
                 let mut moved2 = 0.0;
                 for i in 0..3 {

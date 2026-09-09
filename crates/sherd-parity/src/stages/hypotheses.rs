@@ -295,7 +295,7 @@ fn pose_deviation(
                 trace += ours.r[h][(j, i)] * cell;
             }
         }
-        rotation = rotation.max(((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos().to_degrees());
+        rotation = rotation.max(sherd_core::matching::icp::pose_gap::angle_from_trace(trace));
         let d = (0..3).map(|i| (ours.tau[h][i] - tau[i]).powi(2)).sum::<f64>().sqrt();
         translation = translation.max(d / t);
     }

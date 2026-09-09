@@ -54,7 +54,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use sherd_core::executor::batch::IcpBatch;
-use sherd_core::matching::icp::{Estimation, Registration};
+use sherd_core::matching::icp::{Estimation, Registration, centroid_of};
 use sherd_core::spatial::grid::HashGrid;
 use wgpu::BindingResource;
 
@@ -257,7 +257,7 @@ impl IcpKernel {
 
         // The shifted frame: both clouds to their own centroids, in `f64`, once for the batch.
         let centre_t = batch.target.centroid();
-        let centre_s = centroid(batch.source);
+        let centre_s = centroid_of(batch.source);
         let shifted_target = shifted(batch.target.points(), centre_t);
         let normals: Vec<[f64; 3]> = if plane {
             batch.target.normals().to_vec()
@@ -466,7 +466,7 @@ pub fn device_round_trip(
     target: &sherd_core::matching::icp::IcpTarget,
 ) -> Vec<sherd_core::matching::icp::Pose> {
     let centre_t = target.centroid();
-    let centre_s = centroid(source);
+    let centre_s = centroid_of(source);
     inits
         .iter()
         .map(|init| {
@@ -474,22 +474,6 @@ pub fn device_round_trip(
             pose_of(&words[..12], &centre_s, &centre_t)
         })
         .collect()
-}
-
-/// The mean of a point set, summed in index order (D §7).
-fn centroid(points: &[[f64; 3]]) -> [f64; 3] {
-    if points.is_empty() {
-        return [0.0; 3];
-    }
-    let mut sum = [0.0; 3];
-    for p in points {
-        for (out, value) in sum.iter_mut().zip(p) {
-            *out += value;
-        }
-    }
-    #[allow(clippy::cast_precision_loss, reason = "cloud sizes are far below 2^53")]
-    let n = points.len() as f64;
-    [sum[0] / n, sum[1] / n, sum[2] / n]
 }
 
 /// A cloud translated by `−centre`, narrowed once.
@@ -689,9 +673,9 @@ mod tests {
 
     use super::{
         Check, MAX_CANDIDATES, MIN_CANDIDATES, ORTHONORMAL_TOLERANCE, STAGE2_CANDIDATES,
-        STAGE2_ON_DEVICE, STATE_WORDS, centroid, next_nonce, on_device, registration, shifted,
-        shifted_state,
+        STAGE2_ON_DEVICE, STATE_WORDS, next_nonce, on_device, registration, shifted, shifted_state,
     };
+    use sherd_core::matching::icp::centroid_of;
     use sherd_core::matching::icp::{Pose, Rotation, Translation, homogeneous};
 
     /// The change of frame is a round trip: a pose narrowed into the shifted frame and read back
@@ -849,9 +833,9 @@ mod tests {
     /// The centroid is D §7's: summed in index order, then divided once.
     #[test]
     fn the_centroid_is_summed_in_index_order() {
-        assert_eq!(centroid(&[]), [0.0; 3]);
+        assert_eq!(centroid_of(&[]), [0.0; 3]);
         let points = vec![[1.0, 2.0, 3.0], [3.0, 4.0, 9.0]];
-        assert_eq!(centroid(&points), [2.0, 3.0, 6.0]);
+        assert_eq!(centroid_of(&points), [2.0, 3.0, 6.0]);
         let narrowed = shifted(&points, [2.0, 3.0, 6.0]);
         assert_eq!(narrowed, vec![[-1.0, -1.0, -3.0], [1.0, 1.0, 3.0]]);
     }

@@ -1017,50 +1017,32 @@ fn control_row(column: &Column, stage: &str, per_pair: &[(usize, usize)]) -> Che
 }
 
 /// The rotation (degrees) and the displacement (wall thicknesses) between two poses, in the units
-/// every pose row of D §10.2 is stated in — but through the Frobenius form rather than the trace.
+/// every pose row of D §10.2 is stated in — through the **Frobenius** form rather than the trace.
 ///
-/// `sherd_parity::stages::pose_gap` reads the angle off `trace(Rᵀ R') = 1 + 2cos θ`, which is what
-/// D §10.2's rows were calibrated with and is right for a comparison against the *reference's*
-/// poses. It has a floor this harness cannot live with: `Σ R²ᵢⱼ` is 3 only for an exactly
-/// orthonormal `R`, and R §5.1's hypothesis rotations are built from breakline frames that came
-/// out of an `f32` cloud, so they are orthonormal to about `1e-7` and `pose_gap(T, T)` — a pose
-/// against **itself** — already reports 3.6e-2 degrees. Measured on terracotta: the two executors
-/// returned bit-identical stage-1 poses and the trace form called 223 of 500 of them different.
-///
-/// `‖R − R'‖_F = 2√2·|sin(θ/2)|` for true rotations, so this is the same angle wherever the trace
-/// form is meaningful, and it is **exactly zero** when the two poses are the same bits. The
-/// displacement is `pose_gap`'s own: `|τ − τ'| / t`.
+/// Both forms live in `sherd_core::matching::icp::pose_gap`, with the reason each exists; this
+/// harness needs the one that is exactly zero for identical bits, because R §5.1's hypothesis
+/// rotations are orthonormal to about 1e-7 and the trace form reports 3.6e-2 degrees for a pose
+/// against itself — most of the 0.05 the row allows.
 #[cfg(feature = "gpu")]
 fn pose_deviation(
     a: &sherd_core::matching::icp::Pose,
     b: &sherd_core::matching::icp::Pose,
     t: f64,
 ) -> (f64, f64) {
-    let mut frobenius = 0.0;
-    let mut displacement = 0.0;
-    for i in 0..3 {
-        for j in 0..3 {
-            frobenius += (a[(i, j)] - b[(i, j)]).powi(2);
-        }
-        displacement += (a[(i, 3)] - b[(i, 3)]).powi(2);
-    }
-    let half = (frobenius.sqrt() / (2.0 * std::f64::consts::SQRT_2)).clamp(-1.0, 1.0);
-    (2.0 * half.asin().to_degrees(), displacement.sqrt() / t)
+    use sherd_core::matching::icp::pose_gap;
+    (pose_gap::frobenius_deg(a, b), pose_gap::origin_t(a, b, t))
 }
 
-/// How far a point of the moving cloud travels between two poses, in wall thicknesses.
+/// How far a point of the moving cloud travels between two poses, in wall thicknesses — the row
+/// `gpu-check`'s translation criterion is stated over (audit §A.2.4).
 ///
-/// D §10.2's translation column is the displacement of the **origin**, and its own note says why:
+/// D §10.2's own translation column is the displacement of the **origin**, and its note says why:
 /// "a pure rotation difference shows up in both rows — which is the conservative way round". These
 /// scans sit 100–150 units from the origin, so that conservatism is not a rounding — it is the
 /// whole number. On pot_A's stage-1 rungs the worst rotation is 2.6e-2 degrees, inside the row's
 /// 0.05, and the origin-referenced displacement of the same poses is 4.3e-2 t, four times outside
 /// the row's 0.01 — the same disagreement, read at a point 130 units away from where the fragment
-/// is.
-///
-/// This row is the same disagreement read **at the cloud**: the centroid of the moving points,
-/// which is where a reader asking "did the fragment move" is looking. Both are reported, and the
-/// D §10.2 row is the one the tolerance is applied to.
+/// is. Both are reported; this one is gated.
 #[cfg(feature = "gpu")]
 fn cloud_deviation(
     a: &sherd_core::matching::icp::Pose,
@@ -1068,32 +1050,7 @@ fn cloud_deviation(
     centre: &[f64; 3],
     t: f64,
 ) -> f64 {
-    let mut moved = 0.0;
-    for i in 0..3 {
-        let mut delta = a[(i, 3)] - b[(i, 3)];
-        for (j, &c) in centre.iter().enumerate() {
-            delta += (a[(i, j)] - b[(i, j)]) * c;
-        }
-        moved += delta * delta;
-    }
-    moved.sqrt() / t
-}
-
-/// The mean of a point set, for [`cloud_deviation`].
-#[cfg(feature = "gpu")]
-fn centroid(points: &[[f64; 3]]) -> [f64; 3] {
-    if points.is_empty() {
-        return [0.0; 3];
-    }
-    let mut sum = [0.0; 3];
-    for p in points {
-        for (out, value) in sum.iter_mut().zip(p) {
-            *out += value;
-        }
-    }
-    #[allow(clippy::cast_precision_loss, reason = "cloud sizes are far below 2^53")]
-    let n = points.len() as f64;
-    [sum[0] / n, sum[1] / n, sum[2] / n]
+    sherd_core::matching::icp::pose_gap::cloud_t(a, b, centre, t)
 }
 
 /// Everything one pair contributes to the table: the same batches, answered twice.
@@ -1142,7 +1099,7 @@ fn compare_pair(
     use sherd_core::executor::batch::{CoarseBatch, IcpBatch, Poses};
     use sherd_core::executor::{CPU, Engine, Executor};
     use sherd_core::matching::coarse::{NORMAL_AGREE, Target};
-    use sherd_core::matching::icp::{IcpTarget, Options, cloud_points, homogeneous};
+    use sherd_core::matching::icp::{IcpTarget, Options, centroid_of, cloud_points, homogeneous};
     use sherd_core::matching::ladder;
     use sherd_core::spatial::grid::NearMask;
 
@@ -1197,7 +1154,7 @@ fn compare_pair(
         control = CPU.icp_rung(&batch).iter().map(|r| r.transform).collect();
     }
     let stage1_control = control;
-    let stage1_centre = centroid(&source);
+    let stage1_centre = centroid_of(&source);
     let icp_after_s1 = executor.stats().icp.snapshot();
 
     // R §5.4's re-score, over the poses stage 1 actually produced: `Pair::stage1`'s own batch,
@@ -1248,7 +1205,7 @@ fn compare_pair(
         control2 = CPU.icp_rung(&batch).iter().map(|r| r.transform).collect();
     }
     let stage2_control = control2;
-    let stage2_centre = rungs2.last().map_or([0.0; 3], |rung| centroid(rung.source));
+    let stage2_centre = rungs2.last().map_or([0.0; 3], |rung| centroid_of(rung.source));
     let icp_after_s2 = executor.stats().icp.snapshot();
     let pose = poses2
         .first()

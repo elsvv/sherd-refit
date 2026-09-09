@@ -44,7 +44,7 @@ use nalgebra::Matrix4;
 use sherd_core::Params;
 use sherd_core::error::{Error, Result};
 use sherd_core::executor::Engine;
-use sherd_core::matching::icp::Numerics;
+use sherd_core::matching::icp::{self, Numerics};
 use sherd_core::matching::ladder::{Rung, climb};
 use sherd_core::mesh::Mesh;
 
@@ -400,18 +400,7 @@ impl Collection {
 /// translation is the displacement of the *origin*, so a pure rotation difference shows up in both
 /// rows — which is the conservative way round.
 pub fn pose_gap(ours: &Matrix4<f64>, theirs: &Matrix4<f64>, t: f64) -> (f64, f64) {
-    let mut trace = 0.0;
-    for i in 0..3 {
-        for j in 0..3 {
-            trace += ours[(i, j)] * theirs[(i, j)];
-        }
-    }
-    let angle = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos().to_degrees();
-    let mut distance = 0.0;
-    for i in 0..3 {
-        distance += (ours[(i, 3)] - theirs[(i, 3)]).powi(2);
-    }
-    (angle, distance.sqrt() / t)
+    (icp::pose_gap::trace_deg(ours, theirs), icp::pose_gap::origin_t(ours, theirs, t))
 }
 
 /// Whether a candidate's ICP ladder is a function of its input at double precision — task C2's

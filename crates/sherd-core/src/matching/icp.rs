@@ -508,7 +508,11 @@ fn apply<T: Real>(points: &mut [[f64; 3]], m: &Matrix4<f64>) {
 }
 
 /// The mean of a point set, summed in index order (D §7).
-fn centroid_of(points: &[[f64; 3]]) -> [f64; 3] {
+///
+/// `pub` because `sherd-gpu` and `gpu-check` each had a copy of these nine lines (audit §B.10) and
+/// the summation order is the thing that has to be the same everywhere.
+#[must_use]
+pub fn centroid_of(points: &[[f64; 3]]) -> [f64; 3] {
     if points.is_empty() {
         return [0.0; 3];
     }
@@ -784,6 +788,99 @@ pub type Translation = Vector3<f64>;
 /// dependency of its own can hold one (the CLI's `gpu-check`).
 pub type Pose = Matrix4<f64>;
 
+/// The distance between two poses, in the two units every pose row of D §10.2 is stated in.
+///
+/// There used to be four of these in three crates and two conventions (audit §B.9), which is one
+/// too many of each: the parity harness and R §8's consistency test read the angle off a trace,
+/// `gpu-check` and the adapter tests read it off a Frobenius norm, and the difference is not
+/// cosmetic. Both live here now, named, with the reason each exists written down, and the callers
+/// pick — the arithmetic of each is unchanged, term for term and in the same order, because two of
+/// the callers are on a byte-identical path.
+pub mod pose_gap {
+    use super::Pose;
+
+    /// R §8's `rotation_angle_deg`, from a rotation's trace: `degrees(arccos(clip((tr − 1)/2)))`.
+    ///
+    /// The clip is not decoration. A pose composed from `f64` frames has `RᵀR = I` only to about
+    /// 2.6e-14, so the trace can sit just above 3 and `arccos` would answer `NaN` without it.
+    #[inline]
+    #[must_use]
+    pub fn angle_from_trace(trace: f64) -> f64 {
+        ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos().to_degrees()
+    }
+
+    /// The **trace** form: the angle of `Rᵀ R'`, whose trace is `1 + 2cos θ`.
+    ///
+    /// This is what D §10.2's rows were calibrated with and the right reading for a comparison
+    /// against the *reference's* poses, where the two rotations are independently built and the
+    /// question is how far apart they are.
+    ///
+    /// It has a floor a cross-check of two executors cannot live with: `Σ Rᵢⱼ R'ᵢⱼ` is 3 only for
+    /// exactly orthonormal blocks, and R §5.1's hypothesis rotations come out of an `f32` cloud
+    /// orthonormal to about 1e-7, so `trace_deg(T, T)` — a pose against **itself** — already
+    /// reports 3.6e-2 degrees, most of the 0.05 the row allows. Use [`frobenius_deg`] there.
+    #[must_use]
+    pub fn trace_deg(ours: &Pose, theirs: &Pose) -> f64 {
+        let mut trace = 0.0;
+        for i in 0..3 {
+            for j in 0..3 {
+                trace += ours[(i, j)] * theirs[(i, j)];
+            }
+        }
+        angle_from_trace(trace)
+    }
+
+    /// The **Frobenius** form: `‖R − R'‖_F = 2√2·|sin(θ/2)|` for true rotations.
+    ///
+    /// The same angle wherever the trace form is meaningful, and **exactly zero** when the two
+    /// poses are the same bits — which is what a cross-check of two executors needs. Measured on
+    /// terracotta: the two executors returned bit-identical stage-1 poses and the trace form
+    /// called 223 of 500 of them different.
+    #[must_use]
+    pub fn frobenius_deg(a: &Pose, b: &Pose) -> f64 {
+        let mut frobenius = 0.0;
+        for i in 0..3 {
+            for j in 0..3 {
+                frobenius += (a[(i, j)] - b[(i, j)]).powi(2);
+            }
+        }
+        let half = (frobenius.sqrt() / (2.0 * std::f64::consts::SQRT_2)).clamp(-1.0, 1.0);
+        2.0 * half.asin().to_degrees()
+    }
+
+    /// `|τ − τ'| / t`: the displacement of the **origin**, which is the row D §10.2 writes.
+    ///
+    /// A pure rotation difference shows up in this row as well as in the angle — the conservative
+    /// way round — and on scans sitting 100–150 units from the origin that conservatism is the
+    /// whole number rather than a rounding. [`cloud_t`] is the same disagreement read where the
+    /// fragment is.
+    #[must_use]
+    pub fn origin_t(ours: &Pose, theirs: &Pose, t: f64) -> f64 {
+        let mut distance = 0.0;
+        for i in 0..3 {
+            distance += (ours[(i, 3)] - theirs[(i, 3)]).powi(2);
+        }
+        distance.sqrt() / t
+    }
+
+    /// How far the point at `centre` travels between two poses, in wall thicknesses.
+    ///
+    /// Read at the moving cloud's centroid, which is where a reader asking "did the fragment
+    /// move" is looking, and the row `gpu-check`'s translation criterion is stated over.
+    #[must_use]
+    pub fn cloud_t(a: &Pose, b: &Pose, centre: &[f64; 3], t: f64) -> f64 {
+        let mut moved = 0.0;
+        for i in 0..3 {
+            let mut delta = a[(i, 3)] - b[(i, 3)];
+            for (j, &c) in centre.iter().enumerate() {
+                delta += (a[(i, j)] - b[(i, j)]) * c;
+            }
+            moved += delta * delta;
+        }
+        moved.sqrt() / t
+    }
+}
+
 /// A 4×4 from a rotation and a translation.
 pub fn homogeneous(rotation: &Matrix3<f64>, translation: &Vector3<f64>) -> Matrix4<f64> {
     let mut m = Matrix4::identity();
@@ -798,7 +895,7 @@ mod tests {
 
     use super::{
         Assembly, IcpTarget, Numerics, Options, Precision, eigen_pivots, euler_zyx, homogeneous,
-        register, solve_ldlt,
+        pose_gap, register, solve_ldlt,
     };
     use nalgebra::{Matrix3, Matrix4, Vector3};
 
@@ -1170,5 +1267,62 @@ mod tests {
         let x = solve_ldlt(&singular, &[6.0, 8.0, 1.0, 0.0, 0.0, 0.0]).expect("finite");
         assert!((x[0] - 3.0).abs() < 1e-15 && (x[1] - 2.0).abs() < 1e-15);
         assert!(x[2..].iter().all(|v| *v == 0.0), "{x:?}");
+    }
+
+    /// Both forms of [`pose_gap`], and why the port carries two of them (audit §B.9).
+    ///
+    /// The two agree on a true rotation, and they part company on exactly the case each was
+    /// chosen for: a block that is orthonormal only to `1e-7` — R §5.1's hypothesis rotations,
+    /// which come out of an `f32` cloud — reports a floor of degrees through the trace and
+    /// **exactly zero** through the Frobenius norm.
+    #[test]
+    fn the_two_pose_gaps_agree_on_a_rotation_and_part_on_a_near_rotation() {
+        let axis = Vector3::z_axis();
+        let turn = |deg: f64| {
+            let r = nalgebra::UnitQuaternion::from_axis_angle(&axis, deg.to_radians())
+                .to_rotation_matrix();
+            homogeneous(r.matrix(), &Vector3::zeros())
+        };
+        use approx::assert_relative_eq;
+
+        let (a, b) = (turn(0.0), turn(7.5));
+        assert_relative_eq!(pose_gap::trace_deg(&a, &b), 7.5, epsilon = 1e-10);
+        assert_relative_eq!(pose_gap::frobenius_deg(&a, &b), 7.5, epsilon = 1e-10);
+
+        // R §8's conversion clips, because a composed `f64` rotation's trace can sit above 3.
+        assert_eq!(pose_gap::angle_from_trace(3.0), 0.0);
+        assert_eq!(pose_gap::angle_from_trace(3.0 + 2.6e-14), 0.0);
+
+        // A pose against itself, orthonormal only to 1e-7: the floor the cross-check cannot live
+        // with, and the form that has none.
+        let mut near = turn(30.0);
+        near[(0, 0)] -= 1e-7;
+        assert_eq!(pose_gap::frobenius_deg(&near, &near), 0.0);
+        assert!(
+            pose_gap::trace_deg(&near, &near) > 1e-3,
+            "the trace form has a floor on a near-rotation: {}",
+            pose_gap::trace_deg(&near, &near)
+        );
+
+        // The two translation readings: a rotation about the cloud's own centre moves the origin
+        // and leaves the fragment where it is, which is the whole of D §10.2's conservatism.
+        let centre = [100.0, 0.0, 0.0];
+        let about_centre = {
+            let mut m = turn(1.0);
+            let c = Vector3::new(centre[0], centre[1], centre[2]);
+            let moved = c - m.fixed_view::<3, 3>(0, 0) * c;
+            m.fixed_view_mut::<3, 1>(0, 3).copy_from(&moved);
+            m
+        };
+        let identity = turn(0.0);
+        assert!(pose_gap::origin_t(&identity, &about_centre, 1.0) > 1.0);
+        assert!(pose_gap::cloud_t(&identity, &about_centre, &centre, 1.0) < 1e-12);
+    }
+
+    /// D §7's centroid: summed in index order, divided once, and empty is the origin.
+    #[test]
+    fn the_shared_centroid_is_summed_in_index_order() {
+        assert_eq!(super::centroid_of(&[]), [0.0; 3]);
+        assert_eq!(super::centroid_of(&[[1.0, 2.0, 3.0], [3.0, 4.0, 9.0]]), [2.0, 3.0, 6.0]);
     }
 }

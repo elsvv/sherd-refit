@@ -9,6 +9,7 @@
 use nalgebra::Matrix4;
 
 use crate::executor::Executor;
+use crate::matching::icp;
 use crate::matching::scales::Scales;
 use crate::matching::verify::{penetration_share, pose_inverse};
 use crate::params::Params;
@@ -71,7 +72,7 @@ pub fn disagreement(d: &Matrix4<f64>, tg: f64) -> (f64, f64) {
 /// 2.6e-14, so its trace can sit just above 3 and `arccos` would return `NaN` without it.
 pub fn rotation_angle_deg(d: &Matrix4<f64>) -> f64 {
     let trace = d[(0, 0)] + d[(1, 1)] + d[(2, 2)];
-    ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos().to_degrees()
+    icp::pose_gap::angle_from_trace(trace)
 }
 
 /// Whether two poses agree within R §8's tolerances.

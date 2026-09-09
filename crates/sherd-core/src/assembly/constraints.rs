@@ -406,34 +406,52 @@ pub fn apply(
         });
     }
 
-    let count = |k: (FragId, FragId), candidates: &[Candidate]| {
-        candidates.iter().filter(|c| key(c.a, c.b) == k).count()
+    // Two counts, and the difference between them is the whole content of these two sentences: how
+    // many candidates the pair produced at all, and how many of them R §8 would have been allowed
+    // to build with under the gate this run is using. A pair whose candidates R §6.5 refused was
+    // never offered to R §8, so saying "R §8 refused it" of that pair would be an overclaim.
+    let scored = |k: (FragId, FragId)| candidates.iter().filter(|c| key(c.a, c.b) == k).count();
+    let admitted = |k: (FragId, FragId)| {
+        candidates
+            .iter()
+            .filter(|c| {
+                key(c.a, c.b) == k && if banded { c.tier == Tier::Confirmed } else { c.accepted }
+            })
+            .count()
     };
     for &k in &resolved.forbidden {
-        let seen = count(k, candidates);
+        let (all, seen) = (scored(k), admitted(k));
         entries.push(Applied {
             list: "must_not_join".to_owned(),
             a: name(k.0),
             b: name(k.1),
             satisfied: true,
-            outcome: if seen == 0 {
+            outcome: if all == 0 {
                 "the pair was removed before matching and was never scored".to_owned()
+            } else if seen == 0 {
+                format!("{all} candidate(s) were scored and none reached the assembly")
             } else {
-                format!("{seen} candidate(s) reached the assembly and every one was refused")
+                format!("{seen} of {all} candidate(s) reached the assembly and were refused")
             },
         });
     }
     for &k in &resolved.different {
-        let seen = count(k, candidates);
+        let (all, seen) = (scored(k), admitted(k));
         entries.push(Applied {
             list: "different_object".to_owned(),
             a: name(k.0),
             b: name(k.1),
             satisfied: true,
-            outcome: if seen == 0 {
+            outcome: if all == 0 {
                 "the pair produced no candidate; nothing to refuse".to_owned()
+            } else if seen == 0 {
+                format!(
+                    "{all} candidate(s) were scored and none was good enough to reach the assembly"
+                )
             } else {
-                format!("{seen} candidate(s) were scored and R §8 refused the pair")
+                format!(
+                    "{seen} of {all} candidate(s) reached the assembly and the pair was refused"
+                )
             },
         });
     }

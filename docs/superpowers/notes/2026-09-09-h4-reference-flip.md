@@ -1,6 +1,6 @@
 # H4 — the reference flips to Rust, and the first five-seed sweep of the port
 
-**Date:** 2026-09-09. **Tree:** branch `rust-core`, `30a0e4e` (H3) → `H4.1…H4.4`. **Machine:**
+**Date:** 2026-09-09. **Tree:** branch `rust-core`, `30a0e4e` (H3) → `H4.1…H4.5`. **Machine:**
 Apple M2 Pro, 10 cores (6P + 4E), 16-core GPU, 16 GB, macOS 24.6.0, rustc 1.97.0, `--release`.
 Nothing above 24 fragments was matched. Task H4 executes step 6 of the audit's plan §E
 (`notes/2026-09-09-fable-audit.md`), which is §C.1's recommendation.
@@ -275,17 +275,23 @@ output, so it belongs behind the algorithm work and not beside it.
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | **pass** |
 | `cargo fmt --all --check` | **pass** |
 | `parity --stage all`, both modes, eight dumps | **pass** — 256 rows, **23 804 checks, 0 failed**, `cdec069`'s number to the check |
-| `pytest -q` | **pass** — 60 passed in 100.7 s |
-| **byte-identity** against H3 (`30a0e4e`), both backends | **pass** — **142 files, 120 byte-identical, 22 exempt, 0 differing**; per backend 71 / 60 / 11, the same split H3 reported |
+| `pytest -q` | **pass** — 60 passed |
+| **byte-identity** against H3 (`30a0e4e`), both backends | **pass** — **142 files (71 per backend), 0 differing**, run four times over the task's commits; the exempt files are each set's `transforms.json`, `report.json` and `report.md`, and they differ in nothing but `engine.commit`, `timings`, `memory` and the `## Timing` section |
 | `quality_gate.py` under 25 min | **pass** — 421.7 s = **7.0 min** |
 | nothing above 27 fragments matched | **pass** — nothing above 24 (`mixed_ABG`) |
-| disk ≥ 4 GiB free | **pass** — 8.4 GiB at the end |
+| disk ≥ 4 GiB free | **pass** — 8.2 GiB at the end |
 
-**The test count is unchanged at 388 and so is every byte of the four development sets**, which is
-the property this task had to have: H4 adds one Python file and four documents and touches no crate.
-The eleven exempt files per backend are the same four differences H3 named — `report.json`'s sampled
-`memory` block, `timings`, `report.md`'s `## Timing` section, and `engine.commit`, which changes with
-every commit. `engine.seed` is 0 on both sides and identical this time, because it existed at H3 too.
+**Every gate above was run on the tree this note ships with**, and the test count is unchanged at
+388, as is
+every byte of the four development sets: H4 adds one Python file and four documents and touches no
+crate. The exempt files are the same four differences H3 named — `report.json`'s sampled `memory`
+block, `timings`, `report.md`'s `## Timing` section, and `engine.commit`, which changes with every
+commit. `engine.seed` is 0 on both sides and identical this time, because it existed at H3 too. The
+comparison was made four times over the course of the task and counted 21 to 23 exempt files: what
+moves between runs is a `report.md` whose `## Timing` section happens to be byte-identical anyway,
+because a wall clock can round to the same digits, and the count of those is a property of the clock
+rather than of the tree. **0 differing every time.** Nothing outside the `## Timing` section of a
+`report.md`, and nothing outside those four keys, moved.
 
 ## 8. What this task did not do
 
@@ -312,4 +318,4 @@ the logs. Under `output/quality/`: the gate's own `quality.md`, `quality.json` a
 `evaluation.json` files — data, not committed; the table of §3 is what the repository keeps. The
 eight identity run trees (1.5 GB) were deleted once compared, which is what the comparison was for.
 The branch was never switched, and nothing under `input/`, `output/fixtures/` or `fixtures/` was
-written or deleted. The commits are `H4.1`…`H4.4`.
+written or deleted. The commits are `H4.1`…`H4.5`.

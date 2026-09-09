@@ -1855,7 +1855,9 @@ seeds each — 15 runs — not derived from the port.
    silently pass.
 4. **Determinism**: two runs, `--threads 1` vs `N`, byte-identical `report.json` per backend.
 5. **Golden fixtures**: `sherd-refit parity` against the stored Python fixtures, injected and
-   native, every stage (§10.2).
+   native, every stage (§10.2). **Frozen at the sixteen stages it has** (§13 question 7, task H4):
+   kept green at 23 804 / 0, never extended, because nothing built after the reference hand-over
+   has a Python side to compare against.
 6. **Benchmark gates** (§10.3) on a self-hosted M2 Pro runner, manual/nightly.
 
 **Local gates, run before every commit.** Layers 1, 2 and 4 above are what `cargo nextest` runs,
@@ -1942,8 +1944,14 @@ shorten phase 1+2 to ≈ 14 weeks because GPU work can start once the CPU ICP is
 
 Cross-cutting risks: (1) the algorithm is still moving (segmentation precision is the known
 blocker per the scale-pairs note) — mitigated by freezing at `9d4b9d3` and porting behind
-fixtures; subsequent algorithm changes go into the Python first, produce new fixtures, then into
-Rust, until phase 3a flips the reference; (2) decimation non-identity makes native-mode parity
+fixtures. The second half of this clause used to read "subsequent algorithm changes go into the
+Python first, produce new fixtures, then into Rust, until phase 3a flips the reference", and
+**task H4 flipped the reference instead** (§13 question 7, audit §C.1): from that commit an
+algorithm change is made in Rust, `sherd_refit/` is frozen at `9cbcbbc` as the parity oracle for
+R's existing stages, the parity harness is kept green rather than extended, and new work is judged
+by `tools/quality_gate.py` — `tools/evaluate.py` over the ground-truth sets at seeds 0–4 — not by
+a fixture dump. The mitigation the clause names still holds for everything R describes; what it
+no longer describes is the route a *new* stage takes, because there is none; (2) decimation non-identity makes native-mode parity
 statistical rather than exact — accepted and measured; (3) the 2 h CPU-only target is not
 guaranteed by the estimates; (4) GPU driver diversity — mitigated by the self-test and the
 automatic fallback.
@@ -1973,9 +1981,46 @@ automatic fallback.
 6. **Naming during the transition:** the Rust binary takes the name `sherd-refit` and the
    Python entry point becomes `sherd-refit-py` once phase 1 passes the gates; or keep
    `sherd-refit-rs` until phase 3?
-7. **Reference hand-over:** at which gate does the Rust core become the algorithm's reference
-   (proposed: end of phase 3a), after which algorithm changes are made in Rust and the Python
-   package is retired?
+7. **Reference hand-over — answered (2026-09-09, task H4; audit §C.1).** The question was "at
+   which gate", with the end of phase 3a proposed. The answer is **not at a gate and not at
+   phase 3a: from task H4's first commit the Rust core is the algorithm's reference.** The
+   proposal assumed roadmap item 7's own premise — that the port would arrive after a settled
+   algorithm — and events reversed the order: item 2's partner search hit a geometric ceiling
+   (`notes/2026-09-06-scale-pairs.md` §4.4), all-pairs became the design, and the port was built
+   before items 3–6 on an algorithm whose known blocker, fracture-mask precision on thin walls,
+   is unsettled. Under the old rule every one of roadmap items 3–6 would have to be written in
+   Python, dumped as fixtures, ported and re-gated, three times the work for a Python path that
+   is 9.6× slower and that nothing downstream uses. Four terms, and they are what "the reference"
+   now means:
+
+   * **Algorithm changes are made in Rust.** Items 3–6 and everything after them are designed,
+     written and gated in `crates/`. Nothing is prototyped in `sherd_refit/` first.
+   * **`sherd_refit/` is frozen at `9cbcbbc`** — the last commit that touched it, the one the
+     committed slab dump comes from (§10.1) — and stays in the repository as **the parity oracle
+     for the stages R already describes, and for nothing else**. It is not deleted and not
+     retired: `ALGO_REF` names `9d4b9d3`'s algorithm, the sixteen parity rows are the port's
+     evidence that its sixteen stages do what R says, and that evidence is worth keeping green
+     for as long as those stages exist. What ends is the *direction*: no change flows Python →
+     fixtures → Rust again.
+   * **The parity harness is frozen with it.** `sherd-parity`'s sixteen stages,
+     `tools/dump_fixtures.py`, `tools/dump_outputs.py`, `tools/compare_fixtures.py` and the eight
+     dumps are **kept green, not extended**: `parity --stage all` in both modes on the eight dumps
+     stays a gate at 23 804 checks / 0 failures, and **no row is ever added for anything built
+     after this commit**, because a new stage has no Python side to be compared against. A row
+     that changes its count from now on is a regression in a stage R describes, which is exactly
+     what the harness is still for.
+   * **The quality gate for all new work is `tools/evaluate.py` over the ground-truth sets at
+     seeds 0–4**, run by `tools/quality_gate.py` (§10.4 layer 7). A single run cannot be compared
+     with R §13, whose rows are *bands* over a seed sweep; five seeds on eight sets is what makes
+     "the join counts did not get worse" a statement. `parity` answers "does the port still
+     reproduce the reference"; `quality_gate.py` answers "is the algorithm better", and after
+     this commit only the second question can be asked of new work.
+
+   Two consequences follow. **Phase 3a (pyo3) is dropped** unless the museum asks for a Python
+   API: its stated exit criterion — "Python pipeline with Rust kernels reproduces the Rust CLI" —
+   is a bridge back to a package that no longer holds the algorithm. And **question 6's naming
+   proposal is now due**: `sherd-refit` is the Rust binary's name to take whenever the team wants
+   it, since the Python is a test oracle rather than the product.
 8. **Out-of-core decimation** for scans above ≈ 10 M faces on 8 GB machines: needed for the
    museum's scans, or is a "fewer workers" budget enough?
 9. **Code signing:** an Apple Developer account and a Windows certificate are needed for the

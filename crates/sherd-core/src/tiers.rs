@@ -84,14 +84,12 @@ use serde::{Deserialize, Serialize};
 use crate::assembly::consistency::{agrees, rotation_angle_deg};
 use crate::executor::Engine;
 use crate::fragment::Fragment;
-use crate::matching::coarse::NORMAL_AGREE;
 use crate::matching::icp::{self, pose_gap};
 use crate::matching::ladder;
 use crate::matching::pair::{Candidate, Pair, SurfaceLadder};
 use crate::matching::scales::Scales;
 use crate::matching::verify::{self, Scores, Surfaces, over, pose_inverse, under};
 use crate::params::Params;
-use crate::spatial::kdtree::PointTree;
 use crate::types::FragId;
 
 /// How far apart two candidates must place the sherd before they count as **different
@@ -859,31 +857,14 @@ fn seam_direction(
     transform: &Matrix4<f64>,
     sc: &Scales,
 ) -> Option<[f64; 3]> {
-    let moved: Vec<[f64; 3]> =
-        b.brk_p.iter().map(|p| crate::types::apply_transform(transform, *p)).collect();
-    let normals: Vec<[f64; 3]> = b.brk_ns.iter().map(|n| rotate(transform, *n)).collect();
-    let tree = PointTree::build(&moved)?;
-    let mut seam: Vec<[f64; 3]> = Vec::new();
-    for (point, normal) in a.brk_p.iter().zip(&a.brk_ns) {
-        let Some((j, _)) = tree.nearest_below(point, sc.seam) else { continue };
-        let n = normals[j as usize];
-        if normal[0] * n[0] + normal[1] * n[1] + normal[2] * n[2] > NORMAL_AGREE {
-            seam.push(*point);
-        }
-    }
+    let seam: Vec<[f64; 3]> = crate::matching::verify::seam_points(a, b, transform, sc)
+        .iter()
+        .map(|&i| a.brk_p[i as usize])
+        .collect();
     if seam.len() < 2 {
         return None;
     }
     principal_axis(&seam)
-}
-
-/// `R·n` as R §6.2 rotates a macro normal: the rotation block alone, not renormalised.
-fn rotate(t: &Matrix4<f64>, n: [f64; 3]) -> [f64; 3] {
-    [
-        t[(0, 0)] * n[0] + t[(0, 1)] * n[1] + t[(0, 2)] * n[2],
-        t[(1, 0)] * n[0] + t[(1, 1)] * n[1] + t[(1, 2)] * n[2],
-        t[(2, 0)] * n[0] + t[(2, 1)] * n[1] + t[(2, 2)] * n[2],
-    ]
 }
 
 /// The direction of largest variance of a point set, unit, with its largest component made

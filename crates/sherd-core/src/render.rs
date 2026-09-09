@@ -310,6 +310,17 @@ impl Frame {
 
 /// R §11.5's `_splat`: one view of one point set into one image.
 pub fn splat(meshes: &[Splat], view: View, frame: &Frame) -> Rgb {
+    splat_z(meshes, view, frame).0
+}
+
+/// [`splat`] with the z-buffer it filled, so that a caller can tell a drawn pixel from the
+/// background without guessing at its colour.
+///
+/// Every pixel a point reached holds a finite depth and every pixel none reached holds
+/// `-inf`, which is the mask [`render_pair`]'s overlay is composited through. The image is
+/// [`splat`]'s own, pixel for pixel — this *is* [`splat`], with the buffer it already had returned
+/// beside the image instead of dropped.
+fn splat_z(meshes: &[Splat], view: View, frame: &Frame) -> (Rgb, Vec<f32>) {
     let (width, height) = (frame.width, frame.height);
     let rotation = view_basis(view);
     let light = unit(LIGHT);
@@ -393,7 +404,7 @@ pub fn splat(meshes: &[Splat], view: View, frame: &Frame) -> Rgb {
             pass += 1;
         }
     }
-    image
+    (image, zbuffer)
 }
 
 /// R §11.5's pixel of one projected point, or `None` when the reference's mask drops it.
@@ -484,6 +495,149 @@ pub fn placed_splat(
         normals: faces.iter().map(|&f| rotate_fused(pose, normals[f as usize])).collect(),
         paint,
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Review images (audit §D.1, roadmap item 3)
+
+/// The colour a review image paints a seam voxel.
+pub const SEAM_COLOUR: [f64; 3] = [1.0, 1.0, 1.0];
+
+/// The three colours a review image paints B's fracture samples by their distance to A's fracture
+/// surface: under `tight`, under the pair's gap limit, and beyond it.
+pub const CONTACT_COLOURS: [[f64; 3]; 3] =
+    [[0.25, 0.85, 0.35], [0.95, 0.85, 0.25], [0.90, 0.25, 0.25]];
+
+/// One review view's width in pixels; the strip is [`PAIR_VIEWS`] of them.
+pub const PAIR_WIDTH: usize = 900;
+
+/// One review view's height in pixels.
+pub const PAIR_HEIGHT: usize = 700;
+
+/// How many views a review image carries (audit §D.1: the seam's mean shell normal, and the two
+/// shells).
+pub const PAIR_VIEWS: usize = 3;
+
+/// What audit §D.1's review image draws on top of the two fragments, and where it looks from.
+///
+/// Everything here is measured by [`crate::review`] from the pair's own scores — the seam is the
+/// voxel list [`seam_score`](crate::matching::verify::seam_score) counts and the contact classes
+/// are the distances [`fracture_scores`](crate::matching::verify::fracture_scores) reduces — so
+/// the picture and the numbers under it are the same computation.
+#[derive(Clone, Debug)]
+pub struct PairEvidence {
+    /// The three directions to look along, with their up vectors.
+    pub views: [View; PAIR_VIEWS],
+    /// The centres of the seam's `t/3` voxels, in A's frame.
+    pub seam: Vec<[f64; 3]>,
+    /// B's fracture samples at the candidate's pose, in A's frame.
+    pub contact: Vec<[f64; 3]>,
+    /// One index into [`CONTACT_COLOURS`] per point of `contact`.
+    pub contact_class: Vec<u8>,
+    /// The caption, one entry per line, drawn at the top left of the strip.
+    pub caption: Vec<String>,
+    /// Samples drawn per fragment.
+    pub points: usize,
+    /// The seed the sampler was started from — the number the caption prints.
+    pub seed: u64,
+}
+
+/// Audit §D.1's review image: two fragments at a candidate's pose, with the seam and the fracture
+/// contact drawn on top.
+///
+/// A is grey and B orange ([`PALETTE`]`[0]` and `[1]`, the colours a group preview gives the first
+/// two members of a group), both sampled on their working meshes with one `rng(seed)` per image so
+/// that two runs of the same collection draw the same points. The seam's voxels are white and B's
+/// fracture samples carry [`CONTACT_COLOURS`].
+///
+/// # Why the annotations are composited rather than splatted with the geometry
+///
+/// A fracture surface is roughly perpendicular to the wall, so from any view down a shell normal
+/// it lies *behind* the two shells and a shared z-buffer would hide every one of its points. The
+/// two overlays are therefore drawn into a second image over the same [`Frame`] and composited
+/// wherever they wrote a pixel: from outside the wall the fracture samples project into a narrow
+/// band along the seam, which is exactly where a conservator looks, and the colour of that band is
+/// the tight/gap/beyond classification of the join. The overlay resolves depth against itself, so
+/// a seam voxel and a fracture sample at the same pixel are still ordered by which is nearer.
+pub fn render_pair(
+    a: &crate::fragment::Fragment,
+    b: &crate::fragment::Fragment,
+    transform: &Matrix4<f64>,
+    evidence: &PairEvidence,
+) -> Rgb {
+    let mut rng = crate::rng::seeded(evidence.seed);
+    let identity = Matrix4::<f64>::identity();
+    let grey = fragment_splat(a, &identity, PALETTE[0], evidence.points, &mut rng);
+    let orange = fragment_splat(b, transform, PALETTE[1], evidence.points, &mut rng);
+
+    let lit = unit(LIGHT);
+    let seam = Splat {
+        points: evidence.seam.clone(),
+        normals: vec![lit; evidence.seam.len()],
+        paint: Paint::Uniform(SEAM_COLOUR),
+    };
+    let contact = Splat {
+        points: evidence.contact.clone(),
+        normals: vec![lit; evidence.contact.len()],
+        paint: Paint::PerPoint(
+            evidence
+                .contact_class
+                .iter()
+                .map(|&k| CONTACT_COLOURS[(k as usize).min(CONTACT_COLOURS.len() - 1)])
+                .collect(),
+        ),
+    };
+
+    // The framing is shared by the geometry and the overlay, and computed over the geometry alone:
+    // an overlay point lies on one of the two fragments by construction, so it cannot widen the
+    // frame, and computing it over both would let a stray sample move the picture.
+    let geometry = [grey, orange];
+    let frame = Frame::of(&geometry, PAIR_WIDTH, PAIR_HEIGHT);
+    let overlay = [contact, seam];
+    let images: Vec<Rgb> = evidence
+        .views
+        .par_iter()
+        .map(|&view| {
+            let (mut image, _) = splat_z(&geometry, view, &frame);
+            let (over, mask) = splat_z(&overlay, view, &frame);
+            for y in 0..frame.height {
+                for x in 0..frame.width {
+                    if mask[y * frame.width + x].is_finite() {
+                        image.set(x, y, over.pixel(x, y));
+                    }
+                }
+            }
+            image
+        })
+        .collect();
+    let mut strip = Rgb::strip(&images);
+    for (line, text) in evidence.caption.iter().enumerate() {
+        draw_label(&mut strip, 10, 10 + 12 * line, text);
+    }
+    strip
+}
+
+/// One fragment sampled on its working mesh and placed at a pose, in one colour.
+fn fragment_splat(
+    fragment: &crate::fragment::Fragment,
+    pose: &Matrix4<f64>,
+    colour: [f64; 3],
+    points: usize,
+    rng: &mut rand_chacha::ChaCha8Rng,
+) -> Splat {
+    let v64: Vec<[f64; 3]> = fragment.mesh.v.iter().map(|v| v.to_f64()).collect();
+    let geometry = crate::mesh::geometry::face_geometry(&v64, &fragment.mesh.f);
+    let faces: Vec<u32> =
+        (0..u32::try_from(fragment.mesh.f.len()).expect("fewer than 2^32 faces")).collect();
+    let (drawn, picks) = crate::fragment::samples::sample_on_faces(
+        &v64,
+        &fragment.mesh.f,
+        &geometry.areas,
+        &faces,
+        points,
+        rng,
+    );
+    placed_splat(&drawn, &picks, &geometry.normals, pose, Paint::Uniform(colour))
 }
 
 // ---------------------------------------------------------------------------------------------

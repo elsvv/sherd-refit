@@ -93,6 +93,7 @@ pub mod progress;
 pub mod refine;
 pub mod render;
 pub mod report;
+pub mod review;
 pub mod rng;
 pub mod spatial;
 pub mod tiers;

@@ -381,28 +381,64 @@ pub fn seam_score(
     transform: &Matrix4<f64>,
     sc: &Scales,
 ) -> f64 {
+    let cells = seam_cells(a, b, transform, sc);
+    if cells.is_empty() {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss, reason = "a breakline is thousands of points")]
+    let count = cells.len() as f64;
+    count / SEAM_VOXEL
+}
+
+/// The voxels [`seam_score`] counts: `⌊A.brk_P / (t/3)⌋` for the seam points, sorted and deduped.
+///
+/// The count of them **is** the score, so this is R §6.2 with the last division left off. It exists
+/// because the seam is the one thing a review image has to draw (audit §D.1: *"the seam's `t/3`
+/// voxels … drawn white"*), and drawing what the score is computed from — rather than a second
+/// notion of "the seam" written for the picture — is what makes the picture evidence.
+#[must_use]
+pub fn seam_cells(
+    a: &Surfaces<'_>,
+    b: &Surfaces<'_>,
+    transform: &Matrix4<f64>,
+    sc: &Scales,
+) -> Vec<[i64; 3]> {
+    let voxel = sc.t / SEAM_VOXEL;
+    let mut cells: Vec<[i64; 3]> = seam_points(a, b, transform, sc)
+        .iter()
+        .map(|&i| cell(a.brk_p[i as usize], voxel))
+        .collect();
+    cells.sort_unstable();
+    cells.dedup();
+    cells
+}
+
+/// The indices into `a.brk_p` of the breakline points R §6.2 counts as shared seam.
+///
+/// The loop [`seam_score`] and [`crate::tiers`]'s seam direction both used to carry a copy of: a
+/// point of A is on the seam when the nearest **moved** point of B's breakline is within
+/// `sc.seam` of it and the two shell macro-normals agree.
+#[must_use]
+pub fn seam_points(
+    a: &Surfaces<'_>,
+    b: &Surfaces<'_>,
+    transform: &Matrix4<f64>,
+    sc: &Scales,
+) -> Vec<u32> {
     let moved: Vec<[f64; 3]> = b.brk_p.iter().map(|p| apply(transform, *p)).collect();
     let normals: Vec<[f64; 3]> = b.brk_ns.iter().map(|n| rotate(transform, *n)).collect();
-    let Some(tree) = PointTree::build(&moved) else { return 0.0 };
-    let voxel = sc.t / SEAM_VOXEL;
-    let mut cells: Vec<[i64; 3]> = Vec::new();
-    for (point, normal) in a.brk_p.iter().zip(&a.brk_ns) {
+    let Some(tree) = PointTree::build(&moved) else { return Vec::new() };
+    let mut found: Vec<u32> = Vec::new();
+    for (i, (point, normal)) in a.brk_p.iter().zip(&a.brk_ns).enumerate() {
         // R §6.2 is `dA, jA = cKDTree(...).query(A.brk_P)` — unbounded — and then `dA < sc.seam`.
         // `nearest_below` is that pair of steps, computed through a bounded traversal that is
         // provably the same answer, ties and radius boundary included (see its documentation).
         let Some((j, _)) = tree.nearest_below(point, sc.seam) else { continue };
         if dot(*normal, normals[j as usize]) > NORMAL_AGREE {
-            cells.push(cell(*point, voxel));
+            found.push(u32::try_from(i).expect("fewer than 2^32 breakline points"));
         }
     }
-    if cells.is_empty() {
-        return 0.0;
-    }
-    cells.sort_unstable();
-    cells.dedup();
-    #[allow(clippy::cast_precision_loss, reason = "a breakline is thousands of points")]
-    let count = cells.len() as f64;
-    count / SEAM_VOXEL
+    found
 }
 
 /// R §6.3: the median step height of the outer shell across the seam, in `t`, and the median

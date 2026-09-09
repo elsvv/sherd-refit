@@ -318,8 +318,8 @@ reproducible needs the adapter to itself.
 
 | gate | result |
 |---|---|
-| `cargo test --workspace --locked`, **debug** | **pass** — 19 suites, **394 passed**, 0 failed, 2 ignored |
-| `cargo test --release --workspace --locked` | **pass** — 19 suites, **394 passed**, 0 failed, 2 ignored |
+| `cargo test --workspace --locked`, **debug** | **pass** — 19 suites, **391 passed**, 0 failed, 2 ignored |
+| `cargo test --release --workspace --locked` | **pass** — 19 suites, **391 passed**, 0 failed, 2 ignored |
 | `cargo build -p sherd-cli --no-default-features --locked` | **pass** |
 | `cargo clippy -p sherd-cli --no-default-features --all-targets --locked -- -D warnings` | **pass** |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | **pass** |
@@ -350,8 +350,9 @@ Parity per dump, all failures 0:
 
 ## 6. The quality gate
 
-`python tools/quality_gate.py`, backend `cpu`: **exit 0, 425.5 s = 7.1 min for 40 runs**, against
-the 25-minute budget and V7's 419.8 s. **Its table is identical to V7's and H4's in every quality
+`python tools/quality_gate.py`, backend `cpu`: **exit 0, 416.6 s = 6.9 min for 40 runs**, against
+the 25-minute budget and V7's 419.8 s. (Twice on this tree, at 425.5 s and 416.6 s; the table below
+is the same in every column but `wall s`.) **Its table is identical to V7's and H4's in every quality
 column** — fragment accuracy, precision, the four join buckets, purity and joins, on all 40 rows of
 all eight sets. The only column that moves is `wall s`, which is a clock.
 
@@ -366,7 +367,7 @@ all eight sets. The only column that moves is `wall s`, which is a clock.
 | `synthetic_20` | 90.0 / 90.0 / 85.0 / 90.0 / 95.0 % | 1.000 throughout | 0 | 1.000 | gate pass, band inside |
 | `mixed_ABG` | 58.3 / 50.0 / 54.2 / 66.7 / 58.3 % | 0.667 / 0.625 / 0.688 / 0.789 / 0.706 | 3 / 4 / 3 / 2 / 1 | 0.864 / 0.750 / 0.850 / 0.850 / 0.952 | baseline, not gated |
 
-The table is in `output/quality/quality.md`.
+The table is in `output/quality/quality.md`, written by the final run of it on this tree.
 
 ---
 

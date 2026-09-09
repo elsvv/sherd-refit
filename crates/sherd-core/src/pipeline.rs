@@ -39,13 +39,13 @@ use std::time::Instant;
 use nalgebra::Matrix4;
 use rayon::prelude::*;
 
-use crate::assembly::{Piece, assemble, recenter};
+use crate::assembly::{Piece, assemble_with, recenter};
 use crate::collection::{self, Entry};
 use crate::error::{Error, Result};
 use crate::executor::{Backend, Engine, Executor};
 use crate::fragment::{Fragment, cache, samples};
 use crate::matching::hypotheses::Frames;
-use crate::matching::pair::{self, Candidate};
+use crate::matching::pair::{self, Candidate, Gate};
 use crate::matching::screen::{Screened, screen_pair, top_partners};
 use crate::memory::{self, Budget, MemorySemaphore, reservation};
 use crate::mesh::geometry;
@@ -504,6 +504,15 @@ pub fn run_with(
         "matching done"
     );
 
+    // 2c. the confidence tier (audit §D.1, roadmap item 3), off unless `Params::tiers` is set.
+    //
+    // Here and not after R §8: the assembly is built from the **confirmed** joins, so the tier has
+    // to be decided first. It needs nothing the assembly produces — the support count walks the
+    // accepted-candidate graph and not the groups — and it needs R §6.1's fracture BVHs, which are
+    // alive from the last pair until the block that releases them below.
+    let mut tiered = tier_pass(engine, &fragments, &mut candidates, params, &mut stages);
+    let gate = if params.tiers.is_some() { Gate::Confirmed } else { Gate::Accepted };
+
     // 3. assembly (R §8). The timer starts here, not at `assemble`: the reference builds the
     // stage's own `MatchData` inside `timings["assembly"]`, and PMC-8's cheaper equivalent — the
     // fragments' own samples and their whole-mesh BVHs — belongs in the same place.
@@ -527,7 +536,7 @@ pub fn run_with(
             s_pen: s,
         })
         .collect();
-    let mut assembly = assemble(engine.exec, &pieces, &candidates, params);
+    let mut assembly = assemble_with(engine.exec, &pieces, &candidates, params, gate);
     stages.finish("assembly", started.elapsed().as_secs_f64());
 
     // 3a. second pass (R §8.1, off by default)
@@ -556,7 +565,12 @@ pub fn run_with(
         }
         candidates = per_pair.iter().flatten().copied().collect();
         stages.finish("second_pass", started.elapsed().as_secs_f64());
-        assembly = assemble(engine.exec, &pieces, &candidates, params);
+        // The candidate list is a different list, so its tiers are a different answer: the
+        // margin, the placements and the support count are all statements about the list as a
+        // whole, and a pair rematched with the larger budget changes them for pairs it never
+        // touched. The pass is repeated rather than patched for that reason.
+        tiered = tier_pass(engine, &fragments, &mut candidates, params, &mut stages);
+        assembly = assemble_with(engine.exec, &pieces, &candidates, params, gate);
         tracing::info!(
             pairs = retry.len(),
             seconds = stages.timings["second_pass"],
@@ -585,6 +599,7 @@ pub fn run_with(
             &assembly.used,
             params,
             thickness,
+            tiered.as_ref().map(|t| t.probes.as_slice()),
         );
         let json = serde_json::to_string_pretty(&report)
             .map_err(|e| Error::write(path, std::io::Error::other(e)))?;
@@ -654,7 +669,9 @@ pub fn run_with(
         used: &assembly.used,
         rejected: &rejected,
         groups: &assembly.groups,
+        tiers: tiered.as_ref(),
     };
+    let tier_joins = tiered.as_ref().map(|_| crate::tiers::joins(&candidates, &names));
     write_transforms(
         out_dir.join("transforms.json"),
         &names,
@@ -664,6 +681,7 @@ pub fn run_with(
         thickness,
         params,
         Some(&options.backend_label()),
+        tier_joins.as_deref(),
     )?;
     written.push(out_dir.join("transforms.json"));
     write_report(
@@ -803,6 +821,37 @@ fn with_device_slack<T: Send>(exec: &dyn Executor, body: impl FnOnce() -> T + Se
             body()
         }
     }
+}
+
+/// Audit §D.1's tier pass over a finished candidate list, writing each band onto its candidate.
+///
+/// `None` — and no stage, no log line and no cost — when [`Params::tiers`] is `None`, which is the
+/// library default and what `--tiers off` sets: every candidate then keeps
+/// [`Tier::of_accept`](crate::tiers::Tier::of_accept)'s band, R §8's gate is `accepted`, and the
+/// run is byte for byte the run it was before this pass existed.
+fn tier_pass(
+    engine: Engine<'_>,
+    fragments: &[Fragment],
+    candidates: &mut [Candidate],
+    params: &Params,
+    stages: &mut StageLog,
+) -> Option<crate::tiers::TierReport> {
+    let thresholds = params.tiers?;
+    let started = Instant::now();
+    let report = crate::tiers::classify(engine, fragments, candidates, params, &thresholds);
+    for (c, &tier) in candidates.iter_mut().zip(&report.tiers) {
+        c.tier = tier;
+    }
+    stages.finish("tiers", started.elapsed().as_secs_f64());
+    let (confirmed, probable, rejected) = report.counts();
+    tracing::info!(
+        confirmed,
+        probable,
+        rejected,
+        seconds = stages.timings["tiers"],
+        "tiers decided"
+    );
+    Some(report)
 }
 
 /// R §4–§6 over a list of pairs, in the reference's block order, candidates back in pair order.
@@ -1339,6 +1388,7 @@ mod tests {
         let names: Vec<String> = ["a", "b", "c", "d"].map(str::to_owned).to_vec();
         let pairs = all_pairs(4);
         let candidate = |a: FragId, b: FragId, brk_best: f64| Candidate {
+            tier: crate::tiers::Tier::of_accept(true),
             a,
             b,
             transform: Matrix4::identity(),

@@ -156,6 +156,7 @@ fn main() -> Result<()> {
         thickness,
         &params,
         Some("cpu"),
+        None,
     )?;
     let rejected: Vec<(usize, String)> =
         assembly.rejected.iter().map(|r| (r.candidate, r.reason.message(&names))).collect();
@@ -165,6 +166,7 @@ fn main() -> Result<()> {
         used: &assembly.used,
         rejected: &rejected,
         groups: &assembly.groups,
+        tiers: None,
     };
     let timings = Timings::from_iter([("output".to_owned(), 0.0)]);
     // No memory block: the harness rebuilds the reference's own file, and audit §B.3's

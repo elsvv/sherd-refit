@@ -41,6 +41,7 @@ use crate::matching::verify::Scores;
 use crate::memory::{self, Budget, MemorySemaphore, reservation};
 use crate::mesh::Mesh;
 use crate::params::Params;
+use crate::tiers::{Evidence, Tier, TierCounts, TierJoin, TierReport};
 use crate::types::{FragId, apply_transform_fused};
 use crate::{ALGO_REF, CACHE_VERSION, CORE_VERSION, GIT_COMMIT};
 
@@ -287,6 +288,14 @@ pub struct Transforms {
     /// four keys keep their order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<Engine>,
+    /// Roadmap item 3's band for every pair that produced a candidate (audit §D.1), the pair's
+    /// best band first; absent from a run with the tier pass off.
+    ///
+    /// The *set* those bands were decided with is in `params.tiers`, so a reader holding this file
+    /// has both halves of the statement: which joins the tool stands behind, and what standing
+    /// behind one means.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tiers: Option<Vec<TierJoin>>,
 }
 
 /// One candidate as `report.json` writes it: the reference's `Candidate.to_json()`.
@@ -309,6 +318,12 @@ pub struct CandidateJson {
     /// Why R §8 did not use an accepted join — only on `joins_rejected`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub reason: Option<String>,
+    /// Roadmap item 3's band (audit §D.1); absent from a run with the tier pass off.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tier: Option<Tier>,
+    /// What the band was decided on; absent for a candidate R §6.5 refused, which is never probed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub evidence: Option<Evidence>,
 }
 
 impl CandidateJson {
@@ -322,12 +337,27 @@ impl CandidateJson {
             score: candidate.score(),
             scores: candidate.scores,
             reason: None,
+            tier: None,
+            evidence: None,
         }
     }
 
     /// The same with R §8's rejection sentence attached.
     pub fn rejected(candidate: &Candidate, names: &[String], reason: &str) -> Self {
         Self { reason: Some(reason.to_owned()), ..Self::of(candidate, names) }
+    }
+
+    /// The same with roadmap item 3's band and its evidence, when the run computed one.
+    ///
+    /// `index` is the candidate's place in the run's own list, which is what
+    /// [`TierReport`](crate::tiers::TierReport) is indexed by.
+    #[must_use]
+    pub fn tiered(mut self, tiers: Option<&TierReport>, index: usize) -> Self {
+        if let Some(t) = tiers {
+            self.tier = t.tiers.get(index).copied();
+            self.evidence = t.evidence.get(index).cloned().flatten();
+        }
+        self
     }
 }
 
@@ -418,6 +448,10 @@ pub struct ReportJson {
     /// which is why it is optional and why it is skipped when it is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryReport>,
+    /// How many candidates fell in each of roadmap item 3's bands (audit §D.1); absent from a run
+    /// with the tier pass off. The set they were decided with is `params.tiers`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tiers: Option<TierCounts>,
 }
 
 /// A 4×4 as the nested lists both JSON files carry.
@@ -455,8 +489,12 @@ pub fn write_transforms(
     thickness: f64,
     params: &Params,
     backend: Option<&str>,
+    tiers: Option<&[TierJoin]>,
 ) -> Result<()> {
-    write_json(path.as_ref(), &transforms(names, poses, groups, order, thickness, params, backend))
+    write_json(
+        path.as_ref(),
+        &transforms(names, poses, groups, order, thickness, params, backend, tiers),
+    )
 }
 
 /// The value [`write_transforms`] serialises, for callers that want it in memory.
@@ -469,6 +507,7 @@ pub fn transforms(
     thickness: f64,
     params: &Params,
     backend: Option<&str>,
+    tiers: Option<&[TierJoin]>,
 ) -> Transforms {
     let mut group_of = vec![0_usize; names.len()];
     let mut placed = vec![false; names.len()];
@@ -501,6 +540,7 @@ pub fn transforms(
             .map(|g| g.iter().map(|&n| names[n as usize].clone()).collect())
             .collect(),
         engine: backend.map(|b| Engine::of(b, params.seed)),
+        tiers: tiers.map(<[TierJoin]>::to_vec),
     }
 }
 
@@ -517,6 +557,10 @@ pub struct Outcome<'a> {
     pub rejected: &'a [(usize, String)],
     /// The groups, in R §8's final order.
     pub groups: &'a [Vec<FragId>],
+    /// Roadmap item 3's bands and their evidence, or `None` on a run with the tier pass off — in
+    /// which case every section this adds to `report.md` and every key it adds to the two JSON
+    /// files is absent, and the outputs are the bytes they were.
+    pub tiers: Option<&'a TierReport>,
 }
 
 /// R §11.2's `report.json` and R §11.3's `report.md`, both into `out_dir`.
@@ -570,16 +614,25 @@ pub fn report_json(
         joins_used: outcome
             .used
             .iter()
-            .map(|&i| CandidateJson::of(&outcome.candidates[i], names))
+            .map(|&i| CandidateJson::of(&outcome.candidates[i], names).tiered(outcome.tiers, i))
             .collect(),
         joins_rejected: outcome
             .rejected
             .iter()
-            .map(|(i, why)| CandidateJson::rejected(&outcome.candidates[*i], names, why))
+            .map(|(i, why)| {
+                CandidateJson::rejected(&outcome.candidates[*i], names, why)
+                    .tiered(outcome.tiers, *i)
+            })
             .collect(),
-        candidates: outcome.candidates.iter().map(|c| CandidateJson::of(c, names)).collect(),
+        candidates: outcome
+            .candidates
+            .iter()
+            .enumerate()
+            .map(|(i, c)| CandidateJson::of(c, names).tiered(outcome.tiers, i))
+            .collect(),
         engine: Some(Engine::of(backend, params.seed)),
         memory: memory.cloned(),
+        tiers: outcome.tiers.map(|t| t.pair_counts(outcome.candidates)),
     }
 }
 
@@ -676,9 +729,17 @@ pub fn report_markdown(
             s.pen,
         ));
     }
+    lines.extend(tier_sections(outcome, params));
     if !outcome.rejected.is_empty() {
         lines.push(String::new());
-        lines.push("## Accepted joins not used".to_owned());
+        lines.push(
+            if outcome.tiers.is_some() {
+                "## Confirmed joins not used"
+            } else {
+                "## Accepted joins not used"
+            }
+            .to_owned(),
+        );
         lines.push(String::new());
         for (i, why) in outcome.rejected {
             let c = &outcome.candidates[*i];
@@ -733,6 +794,259 @@ pub fn report_markdown(
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+/// How many refused pairs the `Rejected` section lists before it stops and points at the table
+/// that holds them all.
+///
+/// A 24-fragment collection refuses two hundred pairs and a conservator reads none of them; the
+/// tally above the table says how many there were and which limit each one failed, and R §11.3's
+/// own "Best candidate per pair" — which this report still writes in full — is where the rest are.
+const REJECTED_LISTED: usize = 25;
+
+/// Roadmap item 3's three sections and the per-fragment index (audit §D.1), or nothing at all when
+/// the run had the tier pass off.
+///
+/// The order is the order a bench reads them in: what the tool stands behind, what it wants a
+/// person to look at, what it threw away, and then the same thing again arranged by fragment —
+/// audit §C.8(a): *"the most useful output for a bench is not the assembly but, per fragment, its
+/// best two or three candidate partners with pictures and numbers"*.
+#[allow(clippy::too_many_lines, reason = "four tables, and this is the four tables")]
+fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
+    let Some(report) = outcome.tiers else { return Vec::new() };
+    let names = outcome.names;
+    let th = &report.thresholds;
+    let mut lines: Vec<String> = Vec::new();
+    let representatives = crate::tiers::representatives(outcome.candidates);
+    let pair_name = |i: usize| {
+        let c = &outcome.candidates[i];
+        (names[c.a as usize].as_str(), names[c.b as usize].as_str())
+    };
+    let evidence_of = |i: usize| report.evidence.get(i).and_then(Option::as_ref);
+    let optional = |x: Option<f64>, spec: fn(f64) -> String| x.map_or("—".to_owned(), spec);
+    let exp = |x: f64| format!("{x:.2e}");
+    let two = |x: f64| format!("{x:.2}");
+
+    let of_tier = |want: Tier| -> Vec<usize> {
+        let mut found: Vec<usize> = representatives
+            .iter()
+            .copied()
+            .filter(|&i| outcome.candidates[i].tier == want)
+            .collect();
+        found.sort_by(|&x, &y| {
+            outcome.candidates[y]
+                .score()
+                .partial_cmp(&outcome.candidates[x].score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        found
+    };
+    // One row of the evidence table, shared by the confirmed and the probable list.
+    let row = |i: usize| -> String {
+        let candidate = &outcome.candidates[i];
+        let (a, b) = pair_name(i);
+        let s = &candidate.scores;
+        let e = evidence_of(i);
+        format!(
+            "| {a} | {b} | {:.2} | {:.1} | {:.2} | {:.4} | {:.3} | {:.4} | {} | {} | {} | {} | \
+             {} | {} |",
+            candidate.score(),
+            s.seam,
+            s.tight,
+            s.gap,
+            s.cont_n,
+            s.pen,
+            optional(e.and_then(|e| e.slide_t), exp),
+            optional(e.and_then(|e| e.margin), two),
+            e.map_or_else(|| "—".to_owned(), |e| e.support.to_string()),
+            e.map_or_else(|| "—".to_owned(), |e| e.placements.to_string()),
+            e.map_or_else(|| "—".to_owned(), |e| format!("{}/3", e.resample_accept)),
+            optional(e.and_then(|e| e.determined_deg), exp),
+        )
+    };
+    let head = "| A | B | score | seam (t) | tight | gap (t) | normal agr. | penetration | slide \
+                (t) | margin | support | placements | redraws | determined (deg) |";
+    let rule = "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|";
+
+    let confirmed = of_tier(Tier::Confirmed);
+    lines.push(String::new());
+    lines.push("## Confirmed joins".to_owned());
+    lines.push(String::new());
+    lines.push(format!(
+        "A **confirmed** join clears R §6.5 and then a stricter set on top of it: tight ≥ {}, gap \
+         ≤ {} t, seam ≥ {} t, normal agreement ≥ {}, penetration ≤ {}, the pose returns to within \
+         {} t after being pushed half a wall along the seam, and either at least {} independent \
+         join{} of the collection agree{} with where it puts the sherd or it beats the pair's \
+         second placement by a factor of {}. The assembly above is built from these and from \
+         nothing else.",
+        th.min_tight,
+        th.max_gap_t,
+        th.min_seam,
+        th.min_cont_n,
+        th.max_pen,
+        th.max_slide_t,
+        th.min_support,
+        if th.min_support == 1 { "" } else { "s" },
+        if th.min_support == 1 { "s" } else { "" },
+        th.min_margin,
+    ));
+    lines.push(String::new());
+    if confirmed.is_empty() {
+        lines.push(
+            "No candidate of this collection is confirmed. Every accepted join is listed as \
+             probable below, with the test it failed."
+                .to_owned(),
+        );
+    } else {
+        lines.push(head.to_owned());
+        lines.push(rule.to_owned());
+        lines.extend(confirmed.iter().map(|&i| row(i)));
+    }
+
+    let probable = of_tier(Tier::Probable);
+    lines.push(String::new());
+    lines.push("## Probable joins".to_owned());
+    lines.push(String::new());
+    lines.push(
+        "R §6.5 accepted these and the tier above did not confirm them. They are **not placed**: \
+         the last column is the test each one failed, and the decision is a conservator's."
+            .to_owned(),
+    );
+    lines.push(String::new());
+    if probable.is_empty() {
+        lines.push("Every accepted join of this collection is confirmed.".to_owned());
+    } else {
+        lines.push(format!("{head} why not confirmed |"));
+        lines.push(format!("{rule}---|"));
+        for &i in &probable {
+            let why =
+                evidence_of(i).map_or_else(|| "not probed".to_owned(), |e| e.failed.join("; "));
+            lines.push(format!("{} {why} |", row(i)));
+        }
+    }
+
+    let rejected = of_tier(Tier::Rejected);
+    lines.push(String::new());
+    lines.push("## Rejected".to_owned());
+    lines.push(String::new());
+    let mut tally: BTreeMap<String, usize> = BTreeMap::new();
+    for &i in &rejected {
+        for why in crate::matching::verify::refusals(&outcome.candidates[i].scores, params) {
+            let limit = why.split_whitespace().next().unwrap_or("?").to_owned();
+            *tally.entry(limit).or_default() += 1;
+        }
+    }
+    lines.push(format!(
+        "{} pair{} produced a candidate R §6.5 refused, for the reason it has today{}",
+        rejected.len(),
+        if rejected.len() == 1 { "" } else { "s" },
+        if tally.is_empty() {
+            ".".to_owned()
+        } else {
+            format!(
+                ": {}. A pair can fail more than one limit.",
+                tally.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", ")
+            )
+        },
+    ));
+    if !rejected.is_empty() {
+        lines.push(String::new());
+        lines.push(
+            "| A | B | score | tight | gap (t) | gap limit (t) | seam (t) | normal agr. | \
+             penetration | why |"
+                .to_owned(),
+        );
+        lines.push("|---|---|---:|---:|---:|---:|---:|---:|---:|---|".to_owned());
+        for &i in rejected.iter().take(REJECTED_LISTED) {
+            let candidate = &outcome.candidates[i];
+            let (a, b) = pair_name(i);
+            let s = &candidate.scores;
+            let why = crate::matching::verify::refusals(s, params);
+            let why = if why.is_empty() { "refused by R §6.5".to_owned() } else { why.join("; ") };
+            lines.push(format!(
+                "| {a} | {b} | {:.2} | {:.2} | {:.4} | {:.4} | {:.1} | {:.3} | {:.4} | {why} |",
+                candidate.score(),
+                s.tight,
+                s.gap,
+                s.gap_limit,
+                s.seam,
+                s.cont_n,
+                s.pen,
+            ));
+        }
+        if rejected.len() > REJECTED_LISTED {
+            lines.push(String::new());
+            lines.push(format!(
+                "The {} highest-scoring of {} refused pairs are listed; every one of them is in \
+                 **Best candidate per pair** below.",
+                REJECTED_LISTED,
+                rejected.len()
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("## Candidates by fragment".to_owned());
+    lines.push(String::new());
+    lines.push(
+        "Every fragment with the partners R §6.5 accepted for it, best band first and best score \
+         inside a band — the list to work through on the bench. A pair appears twice, once under \
+         each of its two fragments. Partners R §6.5 refused are in **Rejected** above and in \
+         **Best candidate per pair** below."
+            .to_owned(),
+    );
+    lines.push(String::new());
+    lines.push(
+        "| fragment | partner | tier | score | seam (t) | tight | gap (t) | slide (t) | margin | \
+         support | why not confirmed |"
+            .to_owned(),
+    );
+    lines.push("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|".to_owned());
+    let mut listed = 0_usize;
+    for (index, name) in names.iter().enumerate() {
+        let here = u32::try_from(index).unwrap_or(u32::MAX);
+        let mut mine: Vec<usize> = representatives
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let candidate = &outcome.candidates[i];
+                (candidate.a == here || candidate.b == here) && candidate.tier != Tier::Rejected
+            })
+            .collect();
+        mine.sort_by(|&x, &y| {
+            let key = |i: usize| {
+                let candidate = &outcome.candidates[i];
+                (u8::from(candidate.tier != Tier::Confirmed), -candidate.score())
+            };
+            key(x).partial_cmp(&key(y)).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for i in mine {
+            let candidate = &outcome.candidates[i];
+            let (into, moved) = pair_name(i);
+            let partner = if candidate.a == here { moved } else { into };
+            let e = evidence_of(i);
+            let why = e.map_or_else(
+                || "not probed".to_owned(),
+                |e| if e.failed.is_empty() { "—".to_owned() } else { e.failed.join("; ") },
+            );
+            lines.push(format!(
+                "| {name} | {partner} | {} | {:.2} | {:.1} | {:.2} | {:.4} | {} | {} | {} | {why} |",
+                candidate.tier.label(),
+                candidate.score(),
+                candidate.scores.seam,
+                candidate.scores.tight,
+                candidate.scores.gap,
+                optional(e.and_then(|e| e.slide_t), exp),
+                optional(e.and_then(|e| e.margin), two),
+                e.map_or_else(|| "—".to_owned(), |e| e.support.to_string()),
+            ));
+            listed += 1;
+        }
+    }
+    if listed == 0 {
+        lines.push("| — | — | — | — | — | — | — | — | — | — | no accepted candidate |".to_owned());
+    }
+    lines
 }
 
 /// The best candidate of every pair, pairs sorted by name — R §11.3's last table.
@@ -954,6 +1268,7 @@ mod tests {
     use crate::matching::verify::Scores;
     use crate::mesh::Mesh;
     use crate::params::Params;
+    use crate::tiers::Tier;
     use nalgebra::Matrix4;
 
     fn names() -> Vec<String> {
@@ -962,7 +1277,15 @@ mod tests {
 
     fn candidate(a: u32, b: u32, seam: f64, tight: f64) -> Candidate {
         let scores = Scores { seam, tight, tight_a: tight, tight_b: tight, ..Scores::default() };
-        Candidate { a, b, transform: Matrix4::identity(), scores, accepted: seam > 0.0 }
+        let accepted = seam > 0.0;
+        Candidate {
+            a,
+            b,
+            transform: Matrix4::identity(),
+            scores,
+            accepted,
+            tier: Tier::of_accept(accepted),
+        }
     }
 
     fn tetra() -> Mesh {
@@ -991,6 +1314,7 @@ mod tests {
             3.75,
             &Params::default(),
             Some("gpu:Apple M2 Pro"),
+            None,
         );
         assert_eq!(value.fragments.keys().collect::<Vec<&str>>(), ["two", "one", "three"]);
         let text = serde_json::to_string(&value).expect("transforms serialise");
@@ -1048,6 +1372,7 @@ mod tests {
             used: &[],
             rejected: &[],
             groups: &[vec![0], vec![1], vec![2]],
+            tiers: None,
         };
         let timings = super::Timings::from_iter([
             ("preprocess".to_owned(), 16.3),
@@ -1090,6 +1415,7 @@ mod tests {
             used: &[0],
             rejected: &rejected,
             groups: &[vec![0, 1], vec![2]],
+            tiers: None,
         };
         let stats = Vec::new();
         let timings = super::Timings::from_iter([("matching".to_owned(), 1.25)]);
@@ -1145,6 +1471,7 @@ mod tests {
             used: &[0],
             rejected: &rejected,
             groups: &[vec![0, 1], vec![2]],
+            tiers: None,
         };
         let timings = super::Timings::from_iter([("matching".to_owned(), 12.34)]);
         let md = report_markdown(&stats, 3.75, &outcome, &timings, &Params::default());
@@ -1223,5 +1550,100 @@ mod tests {
         };
         assert_eq!(cut(&a), cut(&b), "only the header differs");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Roadmap item 3's four sections, and the fact that they are absent without a tier.
+    ///
+    /// The band is the same `Outcome` with and without `tiers`, so this is the off switch stated
+    /// at the level `report.md` is written at: the same call, one field apart, and the sections
+    /// appear or they do not.
+    #[test]
+    fn the_tier_sections_appear_only_when_a_run_computed_a_band() {
+        use crate::tiers::{Evidence, Thresholds, TierReport};
+
+        // The pipeline copies `TierReport::tiers` onto the candidates before it writes anything
+        // (`pipeline::tier_pass`), so the two agree by construction; the fixture does the same.
+        let banded = |a, b, seam, tight, tier| Candidate { tier, ..candidate(a, b, seam, tight) };
+        let cands = [
+            banded(0, 1, 20.0, 0.5, Tier::Confirmed),
+            banded(1, 2, 3.0, 0.25, Tier::Probable),
+            banded(0, 2, 0.0, 0.0, Tier::Rejected),
+        ];
+        let evidence = |failed: Vec<String>| Evidence {
+            margin: Some(4.5),
+            rival_moved_t: Some(9.0),
+            placements: 2,
+            determined_deg: Some(2.7e-14),
+            determined_t: Some(1.8e-15),
+            slide_t: Some(1.9e-15),
+            resample_tight_min: 0.49,
+            resample_gap_max: 0.008,
+            resample_accept: 3,
+            support: 1,
+            failed,
+        };
+        let report = TierReport {
+            thresholds: Thresholds::default(),
+            tiers: vec![Tier::Confirmed, Tier::Probable, Tier::Rejected],
+            evidence: vec![
+                Some(evidence(Vec::new())),
+                Some(evidence(vec!["tight 0.2500 < 0.35".to_owned()])),
+                None,
+            ],
+            probes: vec![None, None, None],
+        };
+        let stats = Vec::new();
+        let timings = super::Timings::from_iter([("matching".to_owned(), 1.0)]);
+        let make = |tiers: Option<&TierReport>| {
+            let outcome = Outcome {
+                names: &names(),
+                candidates: &cands,
+                used: &[0],
+                rejected: &[],
+                groups: &[vec![0, 1], vec![2]],
+                tiers,
+            };
+            report_markdown(&stats, 3.75, &outcome, &timings, &Params::default())
+        };
+
+        let without = make(None);
+        for section in ["## Confirmed joins", "## Probable joins", "## Candidates by fragment"] {
+            assert!(!without.contains(section), "{section} without a tier");
+        }
+
+        let with = make(Some(&report));
+        let sections: Vec<&str> = with.lines().filter(|l| l.starts_with("## ")).collect();
+        assert_eq!(
+            sections,
+            [
+                "## Fragments",
+                "## Assembly",
+                "## Joins used",
+                "## Confirmed joins",
+                "## Probable joins",
+                "## Rejected",
+                "## Candidates by fragment",
+                "## Best candidate per pair",
+                "## Timing",
+            ],
+            "the order a bench reads them in"
+        );
+        assert!(with.contains("tight ≥ 0.35, gap ≤ 0.015 t, seam ≥ 5 t"), "{with}");
+        let confirmed = with
+            .split("## Confirmed joins")
+            .nth(1)
+            .and_then(|t| t.lines().find(|l| l.starts_with("| one | two |")))
+            .expect("the confirmed row");
+        assert!(confirmed.starts_with("| one | two | 10.00 | 20.0 | 0.50 |"), "{confirmed}");
+        assert!(confirmed.contains("| 1.90e-15 | 4.50 | 1 | 2 | 3/3 | 2.70e-14 |"), "{confirmed}");
+        assert!(with.contains("tight 0.2500 < 0.35 |"), "the probable row names its refusal");
+        assert!(with.contains("1 pair produced a candidate R §6.5 refused"), "{with}");
+        // The per-fragment index shows a pair once under each of its two fragments, and never a
+        // partner R §6.5 refused.
+        let index = with.split("## Candidates by fragment").nth(1).expect("the index");
+        let index = index.split("## Best candidate").next().expect("its end");
+        assert_eq!(index.matches("| confirmed |").count(), 2);
+        assert_eq!(index.matches("| probable |").count(), 2);
+        assert_eq!(index.matches("| rejected |").count(), 0);
     }
 }

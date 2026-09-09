@@ -182,6 +182,7 @@ fn transforms_rows(collection: &Collection, report: &mut StageReport) -> Result<
         thickness,
         &collection.manifest.collection.params,
         None,
+        None,
     );
     let theirs: report::Transforms = npy::read_json_as(&path)?;
 
@@ -365,6 +366,20 @@ fn report_rows(collection: &Collection, report: &mut StageReport) -> Result<()> 
 /// two runs of one input disagree on them, and the dump carries them as `null`
 /// (`pipeline._dump_outputs`), so there is nothing there to compare. The *order* of that block is
 /// R §11.2's and is checked in `sherd-core`'s own tests instead (V4-D4).
+/// The reference's groups as [`FragId`] lists, or `None` when one of them names a fragment the
+/// manifest does not have.
+fn group_ids(groups: &[Vec<String>], id: &impl Fn(&str) -> Option<usize>) -> Option<Vec<Vec<u32>>> {
+    groups
+        .iter()
+        .map(|group| {
+            group
+                .iter()
+                .map(|name| id(name).map(|i| u32::try_from(i).expect("fewer than 2^32 fragments")))
+                .collect::<Option<Vec<u32>>>()
+        })
+        .collect()
+}
+
 fn markdown_row(
     collection: &Collection,
     report: &mut StageReport,
@@ -423,25 +438,17 @@ fn markdown_row(
         };
         rejected.push((i, c.reason.clone().unwrap_or_default()));
     }
-    let mut groups = Vec::with_capacity(theirs.groups.len());
-    for group in &theirs.groups {
-        let mut members = Vec::with_capacity(group.len());
-        for name in group {
-            let Some(i) = id(name) else {
-                report.skip(SCOPE, "a group of report.json names a fragment the manifest does not");
-                return Ok(());
-            };
-            members.push(u32::try_from(i).expect("fewer than 2^32 fragments"));
-        }
-        groups.push(members);
-    }
-
+    let Some(groups) = group_ids(&theirs.groups, &id) else {
+        report.skip(SCOPE, "a group of report.json names a fragment the manifest does not");
+        return Ok(());
+    };
     let outcome = Outcome {
         names: &names,
         candidates: &candidates,
         used: &used,
         rejected: &rejected,
         groups: &groups,
+        tiers: None, // the reference wrote no band, and this is compared against its own file
     };
     let ours = report::report_markdown(
         &theirs.fragments,
@@ -988,6 +995,7 @@ fn native(collection: &Collection, report: &mut StageReport) -> Result<()> {
             &[],
             collection.manifest.pairs.thickness_median,
             &collection.manifest.collection.params,
+            None,
             None,
         )?;
         let back: report::Transforms = npy::read_json_as(&file)?;

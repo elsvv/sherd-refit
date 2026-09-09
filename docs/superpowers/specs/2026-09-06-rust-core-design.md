@@ -1859,6 +1859,48 @@ seeds each — 15 runs — not derived from the port.
    kept green at 23 804 / 0, never extended, because nothing built after the reference hand-over
    has a Python side to compare against.
 6. **Benchmark gates** (§10.3) on a self-hosted M2 Pro runner, manual/nightly.
+7. **Quality gate** (`tools/quality_gate.py`, task H4): the eight development sets — terracotta,
+   pots A/B/C/G/H, `synthetic_20`, `mixed_ABG` — run at **seeds 0–4** on the CPU with
+   `--no-preview --no-meshes`, each scored by `tools/evaluate.py`, into one table (fragment
+   accuracy, precision, the four join buckets, group purity, wall) written as
+   `output/quality/quality.{md,json}`. **This is the layer that replaces layer 5 for *new* work**:
+   after the reference hand-over (§13 question 7) an algorithm change is judged by what it does to
+   the ground truth, and one run cannot be judged at all, because R §13's rows are bands over a
+   seed sweep. **Measured: 40 runs in 7.0 min** on this machine (421.7 s, cold caches, the work
+   directory of a set reused across its five seeds so only the first pays for the fragment cache —
+   R §3.7: another seed recomputes R §3.5's three sampled arrays and nothing else), against the
+   25-minute budget the hand-over was made under.
+
+   The script prints **two** verdicts per set and they are different things.
+
+   * The **gate** is what R §13 states as a *prohibition*: its last row — cross-object joins 0 and
+     group purity 1.000 — on the seven single-object collections, pot_G's "at most two joins used,
+     every one a wrong-pose join on a ground-truth-adjacent pair" with its 0 % accuracy, and the
+     terracotta's decision row. A failure of one of those exits non-zero. All of them hold at all
+     five seeds on this tree.
+   * The **band** is R §13's quoted *spread* of fragment accuracy and precision, and it is
+     reported, not gated. Those bands are the reference's own five draws (tasks Y and Z); the
+     port's five are a second sample of the same chaotic quantity, not a subset of the first, and
+     **task H4 measured the port's to be wider on three sets of seven** — pot_A 0.750 at seed 2
+     against 0.875–1.000, pot_B 0.778 / 0.857 at seeds 2 and 4 against 0.889–1.000 / 1.000, pot_H
+     0.000 at seed 2 against 0.273–0.364. Gating one five-draw sample with another fails a run for
+     a *draw* rather than for a *change*; the band line exists so that a step which moves a set out
+     of the reference's spread, or back into it, has to say so. Removing that spread is what steps
+     8 and 10 of §12 are for.
+
+   The terracotta has no staged ground truth — the museum's assembly was never written as poses —
+   so its row is R §13's set of *decisions*, read straight off `report.json`: the two joins and no
+   others, 007 unplaced, both penetrations 0, both tight contacts ≥ 0.27, the two seams within
+   20 % of 20.3 t and 10.7 t. Its `evaluate.py` columns read `—`, which is a missing ground truth
+   and not a missing measurement. `mixed_ABG` carries §10.3's baseline instead of a gate.
+
+   The script is Python, next to the metric it calls, and not a subcommand of the binary: a Rust
+   twin would have to reimplement `evaluate.py`'s buckets, its centroid-referenced pose error and
+   its purity weighting, and two scorers that can disagree are worse than one in the environment
+   the metric already needs. It imports `evaluate` as a module rather than shelling out, so Open3D
+   loads once for all forty runs and each set's vertex centroids are read once instead of five
+   times; `--render-only` rebuilds the table from a finished run's JSON, so a change of wording
+   costs nothing rather than forty runs.
 
 **Local gates, run before every commit.** Layers 1, 2 and 4 above are what `cargo nextest` runs,
 and a default `cargo build`/`cargo clippy` compiles neither shape of `sherd-cli` — the

@@ -906,6 +906,34 @@ type) as a diagnostic, not a production mode.
 **Built in phase 2a (task G1); the numbers below are measured on this machine, not planned.**
 `notes/2026-09-08-g1-gpu-foundation.md` carries the run.
 
+**No device readback is believed on the strength of `Ok` alone (task H1, 2026-09-09).** wgpu's
+`Ok` says the *host* did not fail; §7's "two processes on one adapter" row is the measurement of
+what it does not say. Every buffer the kernels write is created `mapped_at_creation` and filled
+with `buffers::SENTINEL` (`0xFFFF_FFFF` — a NaN as an `f32`, `u32::MAX` as a `u32`), every ICP
+call writes a per-call nonce into word 16 of each candidate's state block which the kernel gives
+back as `nonce + 1`, and every coarse call writes one into the word past the last pose. The
+decoders then check what they can:
+
+| decoder | checks |
+|---|---|
+| `icp::registration` | every word finite; word 16 is `nonce + 1`; the rotation orthonormal to 1e-3 with `det > 0`; `0 ≤ count ≤ n_src` and integral; `error² ≥ 0`; `0 ≤ iterations ≤ max_iter` and integral; the convergence flag 0 or 1 |
+| `coarse::counts_of` | the last word is this call's nonce; every count is `≤ points` |
+
+One refused block condemns the **whole batch** — a readback is one copy of one buffer, so a block
+the device did not write says nothing about the blocks beside it — and the batch is answered by
+`CpuExecutor` and counted in `MethodStats::corrupt`, which the run's device lines print beside
+`host_errors`. The cost is one memset per readback buffer, one word per candidate and one branch;
+the measured matching stage does not move.
+
+On an idle adapter the checks fire **once** over the seven development collections, and on a real
+defect rather than on a corrupt readback: `synthetic_20` has one stage-1 candidate whose covariance
+is rank-deficient, and `umeyama_rotation` completes a rank-1 `U` to zero columns instead of to an
+orthonormal basis, so the kernel returns a matrix with `det = 0`. Task H1 records it as **H1-D1**;
+until the kernel is fixed that batch is answered by the CPU, which is R §5.4's own answer to it, so
+a `--backend gpu` run of `synthetic_20` is one stage-1 rung less on the device than at `cdec069`
+and its poses move accordingly — with the same 376 candidates, the same 19 used joins and the same
+groups.
+
 - **Adapter selection:** `wgpu::Instance` over Metal | Vulkan | DX12 (no GL: the four backend
   features are named in `Cargo.toml`); `--gpu-adapter NAME|INDEX`, where an all-digit argument is
   an index and anything else a case-insensitive substring of the adapter's name or backend;
@@ -1003,7 +1031,7 @@ type) as a diagnostic, not a production mode.
 | ICP convergence | per-candidate `done` flag exactly as the sequential loop (R§7); converged candidates are never iterated further |
 | thread count | results must be identical for `--threads 1` and `--threads N` (CI test) |
 | CPU vs GPU | within §10.2; not bit-identical (different ULP behaviour); the report records the backend |
-| **two processes on one adapter** | **not held — measured, task W, defect W-D1.** Two `run --backend gpu` of one collection are byte-identical whenever this machine's adapter has one user, which is what every verification so far measured. It is *not* a function of the batch when a second process is driving the same adapter: `examples/repeat_probe` answers **one** `IcpBatch` value 64 times through one `GpuExecutor` and finds 5–6 of the 64 answers differing from the first — every candidate moved, up to thirty iterations apart, with 0 device errors and 0 delegations — while the same probe on an idle adapter and the same probe under a CPU-only load of ten cores report 0 of 64. The same condition made two of eight `gpu-check --set input/sfspp/pot_H` runs print 4.081° where the other six print 1.466°, and made two `--backend gpu` runs of `synthetic_20` return 376 and 375 candidates on one pair with byte-identical fragment caches. Nothing in the port is the obvious cause — the kernel's barriers, the submitter's one-submission-one-wait pairing and the buffer lifetimes were all re-read — so it is recorded, reproduced by a committed probe, and left to a task of its own. **Until it is closed, a run whose output has to be reproducible must have the adapter to itself.** |
+| **two processes on one adapter** | **diagnosed and mitigated — task H1, `notes/2026-09-09-h1-wd1.md`; found as task W's defect W-D1.** The cause is not in the port and not in the kernels: on this Metal adapter a second process driving the same GPU makes the driver **abort** command buffers — `MTLCommandBufferStatus::Error`, *"Execution of the command buffer was aborted due to an error during execution. Internal Error (0000000e)"*, 29 of them over four 64-repeat probe runs — and **wgpu reports none of it**: `wgpu-hal`'s Metal `Fence::get_latest` counts `Error` as completion (`wgpu-hal-30.0.1/src/metal/mod.rs:1272-1284`), and its fence handler is on the *last* command buffer of a submission while the compute pass that aborts is the fourth of five, so `device.poll(Wait)` and `map_async` both return `Ok` and the host reads a buffer the device never wrote. Measured with a local wgpu-hal that logs the status: every one of the 29 aborts is matched one-for-one by a differing repeat, and the readback of a differing repeat is **the state block the host itself uploaded** — 512 of 1088 words zero, the nonce not incremented, no word ever left over from an older call. **The port now detects it** (D §6.8): a per-call nonce in word 16 of the state block, a sentinel fill of every readback buffer, and validity checks in `icp::registration` and the coarse decoder; a refused block sends the whole batch to the CPU executor and is counted as `MethodStats::corrupt` in the run's device lines. `MethodStats::host_errors` (task W's `errors`) is named for what it can see: a failed map or poll on this side of the bus, never a device-side abort. Under contention `examples/repeat_probe` now reports every differing repeat accounted for by a refusal — 29 differing, 29 refused, 0 unexplained — and on an idle adapter 0 of 64 as before. **The operational rule stands**: a refused batch is a batch the CPU answered, so its last bits are the CPU's, and a run whose output has to be reproducible must still have the adapter to itself. `sherd-refit-rs info` says so. |
 | platforms | same backend, same binary → identical; across OS/compilers → f32 ULP-level differences are possible in `libm` calls (`acos`, `sin`); tolerance-based |
 | ill-conditioning | **measured in task C2 and not adopted.** Assembling the point-to-plane system about the target centroid and re-expressing the update about the origin is an exact re-parameterisation of the *linear* Gauss–Newton step but not of the finite update, which differs by `(R − I − ω̂)c = O(|ω|²·|c|)` per iteration. That was estimated at 1e-6 t; on terracotta it is 0.044 t at the median of stage 2 and 0.61 t at p90 (`|c| ≈ 100–150` units, `|ω| ≈ 0.1` rad, thirty unconverged iterations), so the poses of §10.2 are computed in world coordinates as R §7 writes them. Shrinking coordinates for an `f32` path means translating **both clouds** by `−c` — a rigid change of frame R §7 is equivariant under — not re-parameterising the Jacobian alone. `icp::Assembly` keeps both forms because it is what measured this. **Phase 2b then measured the other half of the row.** Translating both clouds by `−c` is indeed what the `f32` path needs — and it is *not* sufficient, because R §7 is equivariant under it only for the point-to-point estimator. Umeyama's translation is `mean_q − R·mean_p` and moves with the clouds; the point-to-plane step's comes from a linearisation about the origin of whatever frame it is in, so a rung run entirely in the shifted frame *is* `Centred`, with the same `|c|` and the same 0.044 t. `kernels/icp.wgsl` adds `(R − I − ω̂)·c` to the update, which makes the shifted composition the world composition exactly; with that and an equilibrated 6×6 the `f32` rung is inside §10.2's stage-1 row on seven development sets of eight |
 

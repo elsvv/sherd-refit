@@ -527,6 +527,19 @@ fn info(args: &InfoArgs) {
     let threads = std::thread::available_parallelism().map_or(0, std::num::NonZero::get);
     println!("  cores available:     {threads}");
     println!("  default seed:        {}", Params::default().seed);
+    // D §7's "two processes on one adapter" row, in one sentence, where an operator will meet it.
+    // Task H1 measured the mechanism and the port now detects it (`--backend gpu` refuses a
+    // readback the device did not write and answers that batch on the CPU), but a refused batch is
+    // a batch the two backends answered differently, so the rule still stands for reproducibility.
+    for line in [
+        "  gpu, two processes:  a `--backend gpu` run wants the adapter to itself. macOS aborts",
+        "                       command buffers when two processes drive one GPU, wgpu reports",
+        "                       neither the abort nor the fence it resolves as success, and the",
+        "                       port answers such a batch on the CPU and counts it `corrupt` in",
+        "                       the run's device lines (task H1, D §7).",
+    ] {
+        println!("{line}");
+    }
     if args.no_selftest {
         println!("  gpu self-test:       skipped (--no-selftest)");
         return;

@@ -121,25 +121,101 @@ pub fn upload<T: Pod>(gpu: &Gpu, label: &str, data: &[T]) -> Buffer {
     })
 }
 
-/// A buffer the kernels write and the host reads back.
+/// The word every buffer the device is meant to write starts life holding.
+///
+/// It is a quiet NaN as an `f32` and `u32::MAX` as a `u32`, so a word that comes back still
+/// carrying it fails **both** decoders' validity checks — `is_finite` in
+/// [`icp::registration`](crate::icp) and `agree <= points` in the coarse one — without either of
+/// them having to know about this constant.
+///
+/// Task H1 measured why it is here (`notes/2026-09-09-h1-wd1.md`). A command buffer the driver
+/// aborts leaves the staging buffer exactly as it was, and `MAP_READ | COPY_DST` allocations of
+/// one size are handed straight back by Metal's allocator: without the fill the host reads either
+/// a page of zeros — which decodes as a plausible "zero iterations, not converged" answer — or the
+/// **previous** call's answer, which decodes as a plausible pose of the wrong pair.
+pub const SENTINEL: u32 = 0xFFFF_FFFF;
+
+/// A buffer the kernels write and the host reads back, pre-filled with [`SENTINEL`].
+///
+/// `mapped_at_creation` costs one memset of a few hundred KB on a unified-memory adapter and turns
+/// "the kernel did not write this word" from an undetectable state into a detected one.
 pub fn output(gpu: &Gpu, label: &str, bytes: u64) -> Buffer {
-    gpu.device().create_buffer(&wgpu::BufferDescriptor {
+    let buffer = gpu.device().create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: bytes.max(4),
         usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    })
+        mapped_at_creation: true,
+    });
+    fill_with_sentinel(&buffer);
+    buffer
 }
 
-/// A `MAP_READ` buffer a command buffer can copy into and the host can then map.
+/// A `MAP_READ` buffer a command buffer can copy into and the host can then map, pre-filled with
+/// [`SENTINEL`].
 #[must_use]
 pub fn staging(gpu: &Gpu, bytes: u64) -> Buffer {
-    gpu.device().create_buffer(&wgpu::BufferDescriptor {
+    let buffer = gpu.device().create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
         size: bytes.max(4),
         usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })
+        mapped_at_creation: true,
+    });
+    fill_with_sentinel(&buffer);
+    buffer
+}
+
+/// Writes [`SENTINEL`] over a buffer that was mapped at creation, and unmaps it.
+///
+/// The map cannot fail on a buffer this function was handed straight from `mapped_at_creation`,
+/// and a buffer that came back unfilled is not a reason to abandon the batch — it is a buffer the
+/// decoders then have to judge on the kernel's nonce alone, which they do.
+fn fill_with_sentinel(buffer: &Buffer) {
+    if let Ok(mut view) = buffer.slice(..).get_mapped_range_mut() {
+        view.slice(..).fill(0xFF);
+    }
+    buffer.unmap();
+}
+
+/// How many of `words` are still [`SENTINEL`], how many are exactly zero, and how many are not
+/// finite — the census a refused readback reports (task H1, experiment E1).
+#[must_use]
+pub fn census(words: &[f32]) -> Census {
+    let mut out = Census { words: words.len(), sentinel: 0, zero: 0, nonfinite: 0 };
+    for &w in words {
+        if w.to_bits() == SENTINEL {
+            out.sentinel += 1;
+        }
+        if w == 0.0 {
+            out.zero += 1;
+        }
+        if !w.is_finite() {
+            out.nonfinite += 1;
+        }
+    }
+    out
+}
+
+/// What [`census`] counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Census {
+    /// Words examined.
+    pub words: usize,
+    /// Words still holding [`SENTINEL`]: the device never wrote them.
+    pub sentinel: usize,
+    /// Words that are exactly zero: a fresh allocation the device never wrote.
+    pub zero: usize,
+    /// Words that are not finite, [`SENTINEL`] included.
+    pub nonfinite: usize,
+}
+
+impl std::fmt::Display for Census {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} words: {} still the sentinel, {} zero, {} not finite",
+            self.words, self.sentinel, self.zero, self.nonfinite
+        )
+    }
 }
 
 /// Runs one command buffer whose last recorded act is a copy into `staging`, on D §6.4's

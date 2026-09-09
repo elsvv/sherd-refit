@@ -21,7 +21,16 @@
 //! It falls back to the CPU for that batch and is counted, rather than aborting the run. D §6.8
 //! says a device loss mid-run "falls back to the CPU for the remaining blocks and is recorded in
 //! the report", and this is the per-batch form of that: the answer is still the reference
-//! implementation's, and [`Stats::errors`] says how often the device could not give one.
+//! implementation's, and [`MethodStats::host_errors`] says how often the device could not give
+//! one.
+//!
+//! **`host_errors` is named for what it can see.** It counts a `Result::Err` on this side of the
+//! bus — a map that failed, a poll that failed — and task H1 measured that a command buffer the
+//! driver *aborts* is none of those: `wgpu-hal`'s Metal fence resolves an aborted command buffer
+//! as success and wgpu-core never looks at the status, so the host is told the submission ran and
+//! reads whatever the readback buffer holds. [`MethodStats::corrupt`] is the counter that sees
+//! that one: the decoders refuse a readback that fails their validity checks, the whole batch goes
+//! to the CPU, and the run's device lines print how often.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -31,9 +40,9 @@ use sherd_core::executor::batch::{CoarseBatch, DistBatch, IcpBatch, InsideBatch,
 use sherd_core::executor::{CPU, Executor};
 use sherd_core::matching::icp::Registration;
 
-use crate::coarse::{CoarseKernel, score_of};
+use crate::coarse::{CoarseAnswer, CoarseKernel, score_of};
 use crate::device::Gpu;
-use crate::icp::IcpKernel;
+use crate::icp::{IcpAnswer, IcpKernel};
 use crate::selftest::SelfTest;
 
 /// What one `Executor` method did, over the life of the executor.
@@ -53,8 +62,11 @@ pub struct MethodStats {
     /// The method's own unit of work: point-queries for the coarse score, candidate-iterations
     /// for the ICP rung.
     pub items: AtomicU64,
-    /// Device errors that sent a batch to the CPU.
-    pub errors: AtomicU64,
+    /// Errors **on this side of the bus** — a failed map or poll — that sent a batch to the CPU.
+    /// A command buffer the driver aborted is not one of them; see [`MethodStats::corrupt`].
+    pub host_errors: AtomicU64,
+    /// Readbacks the decoder refused, each of which sent its **whole batch** to the CPU (task H1).
+    pub corrupt: AtomicU64,
 }
 
 impl MethodStats {
@@ -82,11 +94,20 @@ impl MethodStats {
     }
 
     fn error(&self) {
-        self.errors.fetch_add(1, Ordering::Relaxed);
+        self.host_errors.fetch_add(1, Ordering::Relaxed);
         self.delegate();
     }
 
-    /// `(calls, delegated, on_device, dispatches, gpu, items, errors)`.
+    /// A readback the decoder refused: the batch is the CPU's, and it is counted twice over —
+    /// once as a delegation, because that is what happened to the work, and once as `corrupt`,
+    /// because a delegation for this reason is not the same event as a batch that was never the
+    /// device's.
+    fn corrupt(&self) {
+        self.corrupt.fetch_add(1, Ordering::Relaxed);
+        self.delegate();
+    }
+
+    /// `(calls, delegated, on_device, dispatches, gpu, items, host_errors, corrupt)`.
     #[must_use]
     pub fn snapshot(&self) -> MethodSnapshot {
         MethodSnapshot {
@@ -96,7 +117,8 @@ impl MethodStats {
             dispatches: self.dispatches.load(Ordering::Relaxed),
             gpu: Duration::from_nanos(self.gpu_nanos.load(Ordering::Relaxed)),
             items: self.items.load(Ordering::Relaxed),
-            errors: self.errors.load(Ordering::Relaxed),
+            host_errors: self.host_errors.load(Ordering::Relaxed),
+            corrupt: self.corrupt.load(Ordering::Relaxed),
         }
     }
 }
@@ -116,8 +138,10 @@ pub struct MethodSnapshot {
     pub gpu: Duration,
     /// The method's own unit of work.
     pub items: u64,
-    /// Device errors.
-    pub errors: u64,
+    /// Errors on the host side of the bus — a failed map or poll.
+    pub host_errors: u64,
+    /// Readbacks the decoder refused (task H1).
+    pub corrupt: u64,
 }
 
 /// Per-method counters for the whole run (the note's timing table, `gpu-check`'s rows).
@@ -167,12 +191,13 @@ impl Stats {
         .map(|(name, stats)| {
             let s = stats.snapshot();
             format!(
-                "{name}: {} calls, {} on device, {} delegated ({} device errors), {} dispatches, \
-                 {:.1} ms gpu, {} items",
+                "{name}: {} calls, {} on device, {} delegated ({} host errors, {} corrupt \
+                 readbacks), {} dispatches, {:.1} ms gpu, {} items",
                 s.calls,
                 s.on_device,
                 s.delegated,
-                s.errors,
+                s.host_errors,
+                s.corrupt,
                 s.dispatches,
                 s.gpu.as_secs_f64() * 1e3,
                 s.items,
@@ -385,12 +410,17 @@ impl Executor for GpuExecutor {
     fn coarse_scores(&self, batch: &CoarseBatch<'_>) -> Vec<f64> {
         self.stats.coarse.call();
         match self.kernels.coarse.run(&self.gpu, batch, self.forced()) {
-            Ok(Some((counts, run))) => {
+            Ok(CoarseAnswer::Device(counts, run)) => {
                 self.stats.coarse.device(run.dispatches, run.gpu, run.queries);
                 counts.into_iter().map(|k| score_of(k, batch.points.len())).collect()
             }
-            Ok(None) => {
+            Ok(CoarseAnswer::Cpu) => {
                 self.stats.coarse.delegate();
+                CPU.coarse_scores(batch)
+            }
+            Ok(CoarseAnswer::Corrupt(why)) => {
+                tracing::warn!(%why, "coarse_scores refused a device readback: the batch is the CPU's");
+                self.stats.coarse.corrupt();
                 CPU.coarse_scores(batch)
             }
             Err(e) => {
@@ -404,12 +434,17 @@ impl Executor for GpuExecutor {
     fn icp_rung(&self, batch: &IcpBatch<'_>) -> Vec<Registration> {
         self.stats.icp.call();
         match self.kernels.icp.run(&self.gpu, batch, self.forced()) {
-            Ok(Some((out, run))) => {
+            Ok(IcpAnswer::Device(out, run)) => {
                 self.stats.icp.device(run.dispatches, run.gpu, run.iterations);
                 out
             }
-            Ok(None) => {
+            Ok(IcpAnswer::Cpu) => {
                 self.stats.icp.delegate();
+                CPU.icp_rung(batch)
+            }
+            Ok(IcpAnswer::Corrupt(why)) => {
+                tracing::warn!(%why, "icp_rung refused a device readback: the batch is the CPU's");
+                self.stats.icp.corrupt();
                 CPU.icp_rung(batch)
             }
             Err(e) => {
@@ -475,8 +510,8 @@ mod tests {
         assert_eq!(slack(1, 1), 1);
     }
 
-    /// The counters are per method, and a device error counts as a delegation as well as an
-    /// error — the run still gets the CPU's answer.
+    /// The counters are per method; a host error and a refused readback each count as a
+    /// delegation as well as themselves — the run still gets the CPU's answer.
     #[test]
     fn the_counters_are_per_method_and_an_error_is_also_a_delegation() {
         let stats = Stats::default();
@@ -493,12 +528,14 @@ mod tests {
         assert_eq!((coarse.calls, coarse.on_device, coarse.dispatches), (1, 1, 2));
         assert_eq!(coarse.items, 1_200_000);
         assert_eq!(stats.gpu_busy(), Duration::from_millis(5));
-        assert_eq!(stats.icp.snapshot().errors, 1);
+        assert_eq!(stats.icp.snapshot().host_errors, 1);
+        assert_eq!(stats.icp.snapshot().corrupt, 0);
+        stats.coarse.corrupt();
+        assert_eq!(stats.coarse.snapshot().corrupt, 1);
+        assert_eq!(stats.delegated_counts(), (1, 1, 0, 1), "a corrupt readback is a delegation");
         assert_eq!(stats.lines().len(), 4);
-        assert!(
-            stats.lines()[0].starts_with("coarse: 1 calls, 1 on device"),
-            "{:?}",
-            stats.lines()
-        );
+        let expected = "coarse: 1 calls, 1 on device, 1 delegated (0 host errors, 1 corrupt \
+                        readbacks)";
+        assert!(stats.lines()[0].starts_with(expected), "{:?}", stats.lines());
     }
 }

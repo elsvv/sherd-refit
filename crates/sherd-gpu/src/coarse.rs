@@ -21,6 +21,7 @@
 //! linear index from `params.wg_x` (E7 §2). At 60 probe points a chunk is 333 333 poses, so the
 //! 2-D path is reached by the pose count and not by the query count.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use sherd_core::executor::batch::CoarseBatch;
@@ -110,7 +111,33 @@ struct CoarseParams {
     normal_agree: f32,
     wg_x: u32,
     first_pose: u32,
-    pad: [u32; 2],
+    nonce: u32,
+    nonce_slot: u32,
+}
+
+/// What [`CoarseKernel::run`] decided about one batch — the coarse twin of
+/// [`IcpAnswer`](crate::icp::IcpAnswer).
+#[derive(Debug)]
+pub enum CoarseAnswer {
+    /// The device answered and every count passed [`counts_of`]'s checks.
+    Device(Vec<u32>, CoarseRun),
+    /// The batch is not the device's; the CPU executor answers it and the call is counted as
+    /// delegated, exactly as before.
+    Cpu,
+    /// The device was asked and what came back could not be believed (task H1): the whole batch
+    /// goes to the CPU and is counted as `corrupt`.
+    Corrupt(String),
+}
+
+/// The per-call nonce every coarse readback carries back in its last word (task H1, audit §A.1.6).
+static NONCE: AtomicU32 = AtomicU32::new(0);
+
+/// The nonce of the next call.
+///
+/// The range is `0x8000_0000 ..= 0xFFFF_FFFE`, so neither a zero-filled readback nor one still
+/// holding [`buffers::SENTINEL`] can be mistaken for a nonce this call issued.
+fn next_nonce() -> u32 {
+    0x8000_0000 | (NONCE.fetch_add(1, Ordering::Relaxed) % 0x7FFF_FFFF)
 }
 
 /// The compiled coarse-score pipeline.
@@ -163,32 +190,32 @@ impl CoarseKernel {
         gpu: &Gpu,
         batch: &CoarseBatch<'_>,
         force: bool,
-    ) -> Result<Option<(Vec<u32>, CoarseRun)>, GpuError> {
+    ) -> Result<CoarseAnswer, GpuError> {
         let poses = batch.poses.len();
         let points = batch.points.len();
         if poses == 0 || points == 0 || batch.target.points.is_empty() {
-            return Ok(None);
+            return Ok(CoarseAnswer::Cpu);
         }
         if batch.target.normals.len() != batch.target.points.len() || batch.normals.len() != points
         {
-            return Ok(None);
+            return Ok(CoarseAnswer::Cpu);
         }
         // Too small to be worth a submission and a readback (see `MIN_QUERIES`).
         if !force && poses * points < MIN_QUERIES {
-            return Ok(None);
+            return Ok(CoarseAnswer::Cpu);
         }
         // Too large to be worth a dispatch: past this the device costs the machine more than it
         // saves (see `MAX_QUERIES`).
         if !force && poses * points > MAX_QUERIES {
-            return Ok(None);
+            return Ok(CoarseAnswer::Cpu);
         }
         let Some(grid) = HashGrid::build(batch.target.points, batch.radius) else {
-            return Ok(None);
+            return Ok(CoarseAnswer::Cpu);
         };
         // D §1's device-memory ceiling, taken **before** the first buffer exists: what does not
         // fit is the CPU's, and it is counted as a refusal rather than allocated anyway.
         let Some(_held) = gpu.allocations().reserve(device_bytes(&grid, points, poses)) else {
-            return Ok(None);
+            return Ok(CoarseAnswer::Cpu);
         };
 
         // The device side of the batch (D §6.3): the grid's three arrays, the target cloud and the
@@ -215,14 +242,17 @@ impl CoarseKernel {
         let indices = buffers::upload(gpu, "coarse sorted_idx", grid.sorted_idx());
         let cloud = buffers::upload(gpu, "coarse target", &target);
         let probe_buffer = buffers::upload(gpu, "coarse probe", &probe);
-        let out = buffers::output(gpu, "coarse agree", (poses * 4) as u64);
+        // One word past the last pose: the slot every chunk's first workgroup writes the nonce
+        // into (task H1).
+        let nonce = next_nonce();
+        let out = buffers::output(gpu, "coarse agree", ((poses + 1) * 4) as u64);
 
         // Two caps, whichever bites first (D §6.3, D §6.4 step 2).
         let by_queries = (MAX_POINT_QUERIES / points).max(1);
         let by_binding = Chunking::of(poses, 3 * 16, DEFAULT_BINDING_CAP).per_chunk;
         let split = Chunking::of(poses, 1, by_queries.min(by_binding) as u64);
 
-        let staging = buffers::staging(gpu, (poses * 4) as u64);
+        let staging = buffers::staging(gpu, ((poses + 1) * 4) as u64);
         let mut encoder = self.kernel.encoder(gpu);
         let mut binds = Vec::with_capacity(split.chunks);
         let mut run = CoarseRun { dispatches: 0, gpu: Duration::ZERO, queries: poses * points };
@@ -239,7 +269,8 @@ impl CoarseKernel {
                 normal_agree: narrow(batch.normal_agree),
                 wg_x: grid_shape.x,
                 first_pose: u32::try_from(range.start).unwrap_or(0),
-                pad: [0; 2],
+                nonce,
+                nonce_slot: u32::try_from(poses).unwrap_or(u32::MAX),
             };
             let params_buffer = uniform(gpu, "coarse params", &params);
             let pose_buffer = buffers::upload(gpu, "coarse poses", chunk);
@@ -264,13 +295,48 @@ impl CoarseKernel {
             self.kernel.record(&mut encoder, bind, grid_shape);
             run.dispatches += 1;
         }
-        encoder.copy_buffer_to_buffer(&out, 0, &staging, 0, (poses * 4) as u64);
+        encoder.copy_buffer_to_buffer(&out, 0, &staging, 0, ((poses + 1) * 4) as u64);
         let started = Instant::now();
-        let counts =
-            buffers::submit_and_read::<u32>(gpu, "coarse agree", encoder.finish(), staging, poses)?;
+        let words = buffers::submit_and_read::<u32>(
+            gpu,
+            "coarse agree",
+            encoder.finish(),
+            staging,
+            poses + 1,
+        )?;
         run.gpu = started.elapsed();
-        Ok(Some((counts, run)))
+        match counts_of(&words, points, nonce) {
+            Ok(counts) => Ok(CoarseAnswer::Device(counts, run)),
+            Err(why) => Ok(CoarseAnswer::Corrupt(why)),
+        }
     }
+}
+
+/// The agreement counts of a readback, or the check it failed (task H1, audit §A.1.6).
+///
+/// The coarse kernel's answer is `poses` integers and one nonce, and both of the shapes a readback
+/// the device never wrote takes are visible in them: the
+/// [`SENTINEL`](crate::buffers::SENTINEL) fill of an unwritten word is `u32::MAX`, which is over
+/// every probe size this pipeline forms, and a **recycled** buffer holding a previous call's
+/// counts — plausible integers of exactly the right size — carries that call's nonce and not this
+/// one's. A count can be anything from 0 to `points` and nothing else: it is the number of probe
+/// points of one hypothesis that agreed.
+fn counts_of(words: &[u32], points: usize, nonce: u32) -> Result<Vec<u32>, String> {
+    let Some((&back, counts)) = words.split_last() else {
+        return Err("an empty readback".to_owned());
+    };
+    if back != nonce {
+        return Err(format!("nonce {nonce:#010x} came back as {back:#010x}"));
+    }
+    let limit = u32::try_from(points).unwrap_or(u32::MAX);
+    if let Some(k) = counts.iter().position(|&c| c > limit) {
+        return Err(format!(
+            "pose {k} of {} agrees on {} of {points} probe points",
+            counts.len(),
+            counts[k]
+        ));
+    }
+    Ok(counts.to_vec())
 }
 
 /// What one call of this kernel puts on the device (D §1, `--gpu-memory`).
@@ -287,7 +353,7 @@ fn device_bytes(grid: &HashGrid, points: usize, poses: usize) -> u64 {
         + cell(grid.sorted_idx().len(), 4)
         + cell(grid.points().len(), 32)
         + cell(points, 32)
-        + cell(poses, 4) * 2
+        + cell(poses + 1, 4) * 2
         + cell(poses, 48)
         + 256
 }

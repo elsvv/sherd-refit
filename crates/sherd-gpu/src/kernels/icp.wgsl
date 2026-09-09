@@ -84,15 +84,23 @@ struct Params {
 // cloud (`2j` a point, `2j + 1` its normal), all in the shifted frame.
 // The source cloud, shifted by its own centroid; `w` unused.
 @group(0) @binding(6) var<storage, read> source: array<vec4<f32>>;
-// Per candidate, sixteen words: twelve of the pose `[R | τ]` row-major (in and out), then the
-// correspondence count, the squared error, the iterations applied and the convergence flag.
+// Per candidate, seventeen words: twelve of the pose `[R | τ]` row-major (in and out), then the
+// correspondence count, the squared error, the iterations applied, the convergence flag and the
+// **nonce** — word 16, which the host writes and this kernel must give back as `nonce + 1`.
+//
+// The nonce is task H1's receipt (`notes/2026-09-09-h1-wd1.md`). A command buffer the driver
+// aborts leaves the state buffer holding what the host uploaded and the staging buffer holding
+// what it held before, and neither the fence nor `map_async` says so, so the host has no other way
+// to tell "this block is the answer to my batch" from "this block is the answer to somebody
+// else's, or to none". The host's nonce is an exact `f32` integer below 2^23, so `nonce + 1.0` is
+// exact and one comparison decides it.
 @group(0) @binding(7) var<storage, read_write> state: array<f32>;
 // One target index per (candidate, source point), or `MISS`. Only `point_to_point` reads it back,
 // in its second pass; writing it in both keeps one code path for the correspondence search.
 @group(0) @binding(8) var<storage, read_write> corres: array<u32>;
 
 const LANES: u32 = 256u;
-const STATE_WORDS: u32 = 16u;
+const STATE_WORDS: u32 = 17u;
 // Open3D's `ICPConvergenceCriteria` (R §7).
 const RELATIVE_FITNESS: f32 = 1e-6;
 const RELATIVE_RMSE: f32 = 1e-6;
@@ -111,6 +119,8 @@ var<workgroup> done: u32;
 var<workgroup> applied: u32;
 var<workgroup> corres_count: u32;
 var<workgroup> error2: f32;
+// The per-call nonce this candidate arrived with (word 16), given back incremented.
+var<workgroup> nonce: f32;
 
 // One fixed-order fold of eight per-lane values into `total[base .. base + 8]`.
 //
@@ -480,6 +490,7 @@ fn load_state(candidate: u32) {
     for (var k = 0u; k < 12u; k = k + 1u) {
         pose[k] = state[base + k];
     }
+    nonce = state[base + 16u];
     fitness = 0.0;
     rmse = 0.0;
     done = 0u;
@@ -498,6 +509,7 @@ fn store_state(candidate: u32) {
     state[base + 13u] = error2;
     state[base + 14u] = f32(applied);
     state[base + 15u] = f32(done);
+    state[base + 16u] = nonce + 1.0;
 }
 
 // R §7's `corr`: the nearest target strictly inside the radius of each source point, its index

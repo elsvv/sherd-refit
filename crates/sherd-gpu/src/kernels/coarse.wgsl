@@ -65,8 +65,13 @@ struct Params {
     // only this chunk, so a batch whose poses exceed one binding is uploaded in pieces while the
     // scores stay in one array at their own indices.
     first_pose: u32,
-    pad0: u32,
-    pad1: u32,
+    // Task H1's receipt: the host's per-call nonce, and the index one past the last pose of the
+    // whole batch, where the first workgroup of every chunk writes it back. A command buffer the
+    // driver aborts leaves the readback holding a previous call's counts — plausible integers of
+    // the right size — and neither the fence nor `map_async` says so
+    // (`notes/2026-09-09-h1-wd1.md`).
+    nonce: u32,
+    nonce_slot: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -146,5 +151,10 @@ fn coarse(
     }
     if (lane == 0u && group < params.poses) {
         agree_out[params.first_pose + group] = tally[0];
+    }
+    // Every chunk's first workgroup writes the same nonce into the same slot: one word, written
+    // with the same value however many chunks a batch became.
+    if (lane == 0u && group == 0u) {
+        agree_out[params.nonce_slot] = params.nonce;
     }
 }

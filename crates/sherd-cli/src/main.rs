@@ -1439,7 +1439,10 @@ mod tests {
         let objects = params(&base).objects.expect("`run` reads the objects unless told not to");
         assert_eq!(objects, ObjectParams::default(), "M1 §4's verdict, flag for flag");
         assert!(objects.demote.is_empty(), "no feature reached audit §D.2's own AUC of 0.800");
-        assert!(!objects.disagreement, "and audit §D.2 (b) removes no false join on this benchmark");
+        assert!(
+            !objects.disagreement,
+            "and audit §D.2 (b) removes no false join on this benchmark"
+        );
 
         // The object rules take their own flags, and an unknown feature name is refused rather
         // than dropped -- the same rule `constraints.json` applies to a fragment name.
@@ -1452,7 +1455,7 @@ mod tests {
         assert!(rules.demote.contains(sherd_core::objects::FeatureKey::ShellRadius));
         assert!(rules.demote.contains(sherd_core::objects::FeatureKey::Thick));
         assert!(!rules.demote.contains(sherd_core::objects::FeatureKey::FracRough));
-        assert_eq!(rules.k_mad, 2.5);
+        assert!((rules.k_mad - 2.5).abs() < 1e-12, "{}", rules.k_mad);
 
         let tuned: Vec<&str> = base
             .iter()

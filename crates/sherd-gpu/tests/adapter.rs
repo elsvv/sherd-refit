@@ -152,6 +152,123 @@ fn the_self_test_holds_on_this_machines_adapter() {
 /// agree **exactly** — the same integer count and therefore, since the host does the CPU's own
 /// `f64` division, the same bits. That is the assertion, and it is what makes the second test's
 /// tolerance meaningful: a disagreement there is a boundary case and not a broken traversal.
+/// The unit test H1-D1 asks for: `kernels/umeyama.wgsl` returns a **rotation** at every rank of
+/// the covariance, and the CPU's own rule is what it is held to.
+///
+/// The five cases are the four ranks and the one alignment that would break a lazy completion
+/// (`u₀` on a coordinate axis, where a cross product with the wrong axis is zero). Where the
+/// rotation is determined by the data — ranks 3, 2 and 0 — the kernel is compared with
+/// `matching::icp::umeyama`'s last three lines, `U · diag(1, 1, d) · Vᵀ` off `nalgebra`'s SVD.
+/// At rank 1 it is not determined by the data: every rotation carrying `v₀` to `u₀` minimises
+/// Umeyama's objective equally, so the two implementations pick different members of that family
+/// and the test asserts what they must agree on — that the answer is a rotation, and that it
+/// carries `v₀` to `u₀`.
+///
+/// Before the completion was fixed the rank-1 and rank-0 rows came back with `det = 0` and
+/// `max |RᵀR − I| = 1.0`, which is what `icp::registration`'s orthonormality check refused on
+/// `synthetic_20` on every `--backend gpu` run (`notes/2026-09-09-h1-wd1.md` §4).
+#[test]
+fn the_umeyama_kernel_is_a_rotation_at_every_rank_of_the_covariance() {
+    let Some(gpu) = device("umeyama rank completion") else { return };
+
+    // `s · u vᵀ` summed over the terms given: a covariance of exactly the rank of the list.
+    let outer = |terms: &[(f64, [f64; 3], [f64; 3])]| -> Rotation {
+        let mut m = Rotation::zeros();
+        for (s, u, v) in terms {
+            let (u, v) = (Translation::from_row_slice(u), Translation::from_row_slice(v));
+            m += *s * u * v.transpose();
+        }
+        m
+    };
+    let unit = |v: [f64; 3]| {
+        let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        [v[0] / n, v[1] / n, v[2] / n]
+    };
+    // Two orthonormal pairs to build the deficient cases from.
+    let (u0, v0) = (unit([0.6, -0.48, 0.64]), unit([-0.36, 0.8, 0.48]));
+    let (u1, v1) = (unit([0.8, 0.36, -0.48]), unit([0.48, 0.6, 0.64]));
+
+    let cases: [(&str, Rotation); 5] = [
+        ("rank 0", Rotation::zeros()),
+        ("rank 1", outer(&[(37.0, u0, v0)])),
+        ("rank 1, on an axis", outer(&[(2.5, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])])),
+        ("rank 2", outer(&[(37.0, u0, v0), (11.0, u1, v1)])),
+        ("rank 3", Rotation::new(41.0, -3.0, 7.5, 2.25, 33.0, -1.5, -6.0, 4.5, 28.0)),
+    ];
+
+    #[allow(clippy::cast_possible_truncation)]
+    let sigma: Vec<[f32; 9]> = cases
+        .iter()
+        .map(|(_, m)| {
+            let mut out = [0.0_f32; 9];
+            for i in 0..3 {
+                for j in 0..3 {
+                    out[i * 3 + j] = m[(i, j)] as f32;
+                }
+            }
+            out
+        })
+        .collect();
+    let device_rotations =
+        sherd_gpu::icp::umeyama_rotations(&gpu, &sigma).expect("the probe dispatches");
+    assert_eq!(device_rotations.len(), cases.len());
+
+    // `max |RᵀR − I|` and `|det R − 1|`, `icp::registration`'s own two numbers.
+    let defect = |r: &Rotation| -> (f64, f64) {
+        let mut worst = 0.0_f64;
+        for i in 0..3 {
+            for j in 0..3 {
+                let target = if i == j { 1.0 } else { 0.0 };
+                worst = worst.max(((r.transpose() * r)[(i, j)] - target).abs());
+            }
+        }
+        (worst, (r.determinant() - 1.0).abs())
+    };
+
+    for ((name, m), got) in cases.iter().zip(&device_rotations) {
+        let r = Rotation::from_iterator(
+            (0..9).map(|k| f64::from(got[(k % 3) * 3 + k / 3])), // column-major from row-major
+        );
+        let (ortho, det) = defect(&r);
+        assert!(ortho < 1e-5 && det < 1e-5, "{name}: |RᵀR − I| {ortho:e}, |det − 1| {det:e}");
+
+        // The CPU's rule, term for term: `U · diag(1, 1, d) · Vᵀ` (`matching::icp::umeyama`).
+        let svd = m.svd(true, true);
+        let (u, v_t) = (svd.u.expect("U"), svd.v_t.expect("Vᵀ"));
+        let mut d = Rotation::identity();
+        if u.determinant() * v_t.determinant() < 0.0 {
+            d[(2, 2)] = -1.0;
+        }
+        let cpu = u * d * v_t;
+        let (cpu_ortho, cpu_det) = defect(&cpu);
+        assert!(
+            cpu_ortho < 1e-12 && cpu_det < 1e-12,
+            "{name}: the CPU rule is a rotation too ({cpu_ortho:e}, {cpu_det:e})"
+        );
+
+        if name.starts_with("rank 1") {
+            // Undetermined: assert only what the data fixes, `R v₀ = u₀`.
+            let (uu, vv) = if *name == "rank 1" {
+                (Translation::from_row_slice(&u0), Translation::from_row_slice(&v0))
+            } else {
+                (Translation::new(1.0, 0.0, 0.0), Translation::new(0.0, 1.0, 0.0))
+            };
+            for (side, rot) in [("kernel", r), ("cpu", cpu)] {
+                let moved = rot * vv;
+                assert!(
+                    (moved - uu).norm() < 1e-5,
+                    "{name}, {side}: R v₀ − u₀ {:e}",
+                    (moved - uu).norm()
+                );
+            }
+        } else {
+            let gap = (r - cpu).norm();
+            assert!(gap < 1e-4, "{name}: the kernel and the CPU rule differ by {gap:e}\n{r}{cpu}");
+        }
+    }
+    println!("umeyama rank completion: {} cases, all rotations", cases.len());
+}
+
 #[test]
 fn the_coarse_kernel_is_exact_where_nothing_is_a_boundary_case() {
     let Some(gpu) = device("coarse kernel, clean batch") else { return };

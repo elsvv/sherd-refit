@@ -167,8 +167,17 @@ fn next_nonce() -> f32 {
 /// executor, which is the reference implementation's answer to it.
 pub const ORTHONORMAL_TOLERANCE: f64 = 1e-3;
 
-/// The WGSL source: D §6.2's grid, then the rung that queries it.
-const SOURCE: &str = concat!(include_str!("kernels/grid.wgsl"), include_str!("kernels/icp.wgsl"));
+/// The WGSL source: D §6.2's grid, R §5.4's linear algebra, then the rung that uses both.
+const SOURCE: &str = concat!(
+    include_str!("kernels/grid.wgsl"),
+    include_str!("kernels/umeyama.wgsl"),
+    include_str!("kernels/icp.wgsl")
+);
+
+/// [`umeyama_rotations`]'s shader: the same linear algebra, with a test entry point instead of a
+/// rung. It binds one buffer and none of the grid, so it shares no layout with [`SOURCE`].
+const PROBE_SOURCE: &str =
+    concat!(include_str!("kernels/umeyama.wgsl"), include_str!("kernels/umeyama_probe.wgsl"));
 
 /// `kernels/icp.wgsl`'s `Params`.
 #[repr(C)]
@@ -445,6 +454,57 @@ fn device_bytes(grid: &HashGrid, n_src: usize, candidates: usize) -> u64 {
         + cell(per_dispatch, 4) * (n_src as u64)
         + cell(candidates, 4 * STATE_WORDS) * 2
         + 256
+}
+
+/// `kernels/umeyama.wgsl`'s `umeyama_rotation` on the device, one covariance per case.
+///
+/// R §5.4's estimator reduces to a pure function of nine floats, and this is the only way to ask
+/// it a question directly: through a rung it is reachable only with a point cloud contrived to
+/// produce the covariance one wants, and the rank-deficient cases — H1-D1's, the ones the
+/// completion of `umeyama.wgsl` exists for — cannot be reached from real breakline clouds at all.
+///
+/// `sigma` and the result are **row-major**: `sigma[k][3r + c]` is `Σ_rc` and the result's
+/// `[3i + j]` is `R_ij`, which is `matching::icp::umeyama`'s own convention. One workgroup of one
+/// lane per case; the caller is `tests/adapter.rs`.
+///
+/// # Errors
+///
+/// The device errors of any other kernel call: a pipeline that will not build, a submission that
+/// will not complete, a readback that will not map.
+pub fn umeyama_rotations(gpu: &Gpu, sigma: &[[f32; 9]]) -> Result<Vec<[f32; 9]>, GpuError> {
+    if sigma.is_empty() {
+        return Ok(Vec::new());
+    }
+    let kernel = Kernel::build(gpu, "umeyama probe", PROBE_SOURCE, "umeyama_probe", 0, &[false]);
+    let cases = sigma.len();
+    let mut words = vec![0.0_f32; cases * 18];
+    for (k, case) in sigma.iter().enumerate() {
+        words[k * 9..(k + 1) * 9].copy_from_slice(case);
+    }
+    let io = buffers::upload(gpu, "umeyama probe io", &words);
+    let staging = buffers::staging(gpu, (words.len() * 4) as u64);
+    let bind = kernel.bind(gpu, &[io.as_entire_binding()]);
+    let mut encoder = kernel.encoder(gpu);
+    kernel.record(
+        &mut encoder,
+        &bind,
+        Dispatch::for_workgroups(u32::try_from(cases).unwrap_or(u32::MAX)),
+    );
+    encoder.copy_buffer_to_buffer(&io, 0, &staging, 0, (words.len() * 4) as u64);
+    let back = buffers::submit_and_read::<f32>(
+        gpu,
+        "umeyama probe",
+        encoder.finish(),
+        staging,
+        words.len(),
+    )?;
+    Ok((0..cases)
+        .map(|k| {
+            let mut out = [0.0_f32; 9];
+            out.copy_from_slice(&back[(cases + k) * 9..(cases + k + 1) * 9]);
+            out
+        })
+        .collect())
 }
 
 /// The poses the device actually starts from, back in world coordinates: `init` through the

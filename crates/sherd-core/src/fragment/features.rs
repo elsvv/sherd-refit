@@ -5,9 +5,20 @@
 //! invariant per fragment is worth more than any seam search. The audit's rule for what may then
 //! *veto* a pair is a measurement and not a guess — "object features veto only where their
 //! measured AUC exceeds 0.8, otherwise they report" — so this module computes the features and
-//! nothing else. It decides nothing, it is not in the cache (`CACHE_VERSION` is untouched), and
-//! no stage of a run reads it: `sherd-refit-rs segment --features FILE` writes the table task M1
-//! measures, and step 10 is where a shortlist of these numbers may start vetoing.
+//! nothing else. It still decides nothing: task M1 measured every one of them on every collection
+//! that carries real object ids and the best AUC is **0.740**, under audit §D.2's own 0.800 rule,
+//! so the shortlist that may demote a join is empty and these numbers *report*
+//! ([`crate::objects`]).
+//!
+//! # Where they are computed, and where they live
+//!
+//! Task O1 moved the pass into R §3's preprocessing and the answer into the cache
+//! ([`CACHE_VERSION`](crate::CACHE_VERSION) 6, audit §D.2's own number): every fragment carries
+//! its [`Features`] from the moment it is built, a warm run reads them back with the rest of
+//! R §3, and a cache written before they existed is refused by its version and rebuilt. The pass
+//! costs **0.15 s of `mixed_ABG`'s 3.2 s cold preprocessing** (27 fragments, measured) and nothing
+//! at all on a warm cache. `sherd-refit-rs segment --features FILE` still writes task M1's table,
+//! and now writes the fragments' own stored numbers rather than a second computation of them.
 //!
 //! # The seven features, and how each is defined
 //!
@@ -155,11 +166,18 @@ impl Features {
         }
     }
 
-    /// Fills the four colour fields from a mesh read back from the fragment's own file.
+    /// Fills the four colour fields from the fragment's source mesh, **as the file spells it**.
     ///
-    /// The working mesh has no colours — decimation drops them (R §3.3) — so the only way to the
-    /// fabric is a second read of the source, which is why this is a separate call the caller pays
-    /// for deliberately. A file without colours leaves the fields as they are.
+    /// The working mesh has no colours — decimation drops them (R §3.3) — so the fabric has to be
+    /// read from the source. Preprocessing takes it through
+    /// [`io::load_mesh_with`](crate::io::load_mesh_with), before `clean` merges duplicate
+    /// vertices, which is the vertex multiset M1 §4's table was measured over; a file without
+    /// colours leaves the fields as they are.
+    ///
+    /// The Lab of each distinct RGB triple is computed once and looked up after that. The
+    /// accumulation order is the vertex order either way, so the sums are the same bits as the
+    /// straight loop M1 measured with — what the memo buys is a museum scan with 500 000 vertices
+    /// and 30 000 distinct colours, where the transform would otherwise run half a million times.
     pub fn with_colour(mut self, mesh: &crate::Mesh) -> Self {
         let Some(colours) = mesh.colors.as_ref() else { return self };
         if colours.is_empty() {
@@ -167,10 +185,10 @@ impl Features {
         }
         let mut sum = [0.0_f64; 3];
         let mut sum2 = [0.0_f64; 3];
-        let mut seen = std::collections::BTreeSet::new();
+        let mut seen: std::collections::BTreeMap<[u8; 3], [f64; 3]> =
+            std::collections::BTreeMap::new();
         for &rgb in colours {
-            seen.insert(rgb);
-            let lab = srgb_to_lab(rgb);
+            let lab = *seen.entry(rgb).or_insert_with(|| srgb_to_lab(rgb));
             for c in 0..3 {
                 sum[c] += lab[c];
                 sum2[c] += lab[c] * lab[c];
@@ -184,6 +202,21 @@ impl Features {
         self.lab_spread = Some(spread);
         self.colour_points = colours.len();
         self.colour_distinct = seen.len();
+        self
+    }
+
+    /// The four colour fields of `from`, carried onto a freshly computed geometric table.
+    ///
+    /// [`Fragment::rebuild_features`](crate::fragment::Fragment::rebuild_features) is the caller:
+    /// R §3.5's samples move when the seed does and every geometric feature moves with them, but
+    /// the fabric is a property of the file and re-reading a 500 000-vertex scan to learn it again
+    /// would be the most expensive thing a warm run did.
+    #[must_use]
+    pub fn with_colour_of(mut self, from: &Self) -> Self {
+        self.lab_mean = from.lab_mean;
+        self.lab_spread = from.lab_spread;
+        self.colour_points = from.colour_points;
+        self.colour_distinct = from.colour_distinct;
         self
     }
 }
@@ -200,8 +233,13 @@ pub fn table(fragments: &[Fragment], colour: bool) -> Vec<Features> {
     fragments
         .par_iter()
         .map(|fragment| {
-            let features = Features::of(fragment);
-            if !colour {
+            // Since task O1 the fragment carries its own table from preprocessing, colours and
+            // all, and the cache holds it; recomputing here would answer with the same numbers at
+            // the price of a second `MatchData`. `colour` then only decides whether a fragment
+            // whose *stored* table has no colours is worth a second read of its file — which is
+            // the case for a cache written by a build that could not read one.
+            let features = fragment.features.clone().unwrap_or_else(|| Features::of(fragment));
+            if !colour || features.colour_points > 0 {
                 return features;
             }
             match crate::io::read_mesh(&fragment.source.path) {

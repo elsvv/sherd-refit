@@ -85,6 +85,15 @@ pub struct Fragment {
     /// Area of the faces labelled fracture (R §3.4's `fracture_area`) — what R §6.1's `contact`
     /// scales by, and what R §3.5.2's sample count is a density over.
     pub frac_area: f64,
+    /// Audit §D.2's object features, computed with the rest of R §3 and stored in the cache
+    /// (task O1, [`CACHE_VERSION`](crate::CACHE_VERSION) 6).
+    ///
+    /// `None` only where a fragment was built by something other than
+    /// [`Fragment::from_mesh_file_named`] — the parity harness's injected fragments, a unit test's
+    /// hand-made one — which is why every reader treats the absence as "this collection has no
+    /// consensus to offer" rather than as an error. Roadmap item 4 reads them
+    /// ([`crate::objects`]); nothing else in a run does.
+    pub features: Option<features::Features>,
     /// A BVH over the whole working mesh, built on first use — R §6.4's signed distance.
     bvh_full: OnceLock<Option<Arc<RayScene>>>,
     /// A BVH over the **fracture faces alone**, built on first use — R §6.1's point-to-surface
@@ -124,7 +133,14 @@ impl Fragment {
     ) -> Result<Self> {
         let path = path.as_ref();
         let source = source_ref(path)?;
-        let mut mesh = crate::io::load_mesh(path)?;
+        // Audit §D.2's fabric colour is read here and nowhere else: the vertex colours have to be
+        // taken from the mesh as the file spells it, before `clean` merges duplicate vertices and
+        // before R §3.3's decimation drops them altogether, and that is the multiset task M1 §4
+        // measured its table over.
+        let mut colours = features::Features::default();
+        let mut mesh = crate::io::load_mesh_with(path, |raw| {
+            colours = std::mem::take(&mut colours).with_colour(raw);
+        })?;
 
         let n_orig_vertices = u32::try_from(mesh.v.len()).unwrap_or(u32::MAX);
         let n_orig_faces = u32::try_from(mesh.f.len()).unwrap_or(u32::MAX);
@@ -133,28 +149,7 @@ impl Fragment {
         // --- R §3.2: the wall, measured on the original component ------------------------------
         let geom0 = face_geometry(&mesh.v, &mesh.f);
         let area0 = geom0.total_area();
-        let estimate = thickness::estimate_thickness(&mesh.v, &mesh.f, &geom0);
-        let (thick, raw_mode) = match estimate {
-            Some((t, m)) if t > 0.0 => (f64::from(t), f64::from(m)),
-            other => {
-                let fallback = thickness::obb_min_extent(&mesh.v) / 10.0;
-                tracing::warn!(
-                    fragment = name,
-                    thickness = fallback,
-                    "thickness estimate failed, using the OBB fallback"
-                );
-                (fallback, other.map_or(0.0, |(_, m)| f64::from(m)))
-            }
-        };
-        let thick_mode = if raw_mode == 0.0 { thick } else { raw_mode };
-        if thick_mode > 1.15 * thick {
-            tracing::info!(
-                fragment = name,
-                thick,
-                thick_mode,
-                "the plain ray mode disagrees with the wall -- a rim or a collar"
-            );
-        }
+        let (thick, thick_mode) = wall_of(&mesh, &geom0, name);
 
         // --- R §3.3: the working mesh ----------------------------------------------------------
         let budget = face_budget(area0, thick, target_faces);
@@ -215,7 +210,7 @@ impl Fragment {
             name,
         );
 
-        Ok(Self {
+        let mut fragment = Self {
             id: 0,
             name: name.to_owned(),
             source,
@@ -234,9 +229,14 @@ impl Fragment {
             area0,
             area: seg.area,
             frac_area: seg.frac_area,
+            features: None,
             bvh_full: OnceLock::new(),
             bvh_frac: OnceLock::new(),
-        })
+        };
+        // Last, because every one of them is measured on the finished fragment: the samples R §3.5
+        // has just drawn, the labels R §3.4 has just written, and the wall R §3.2 measured.
+        fragment.features = Some(features::Features::of(&fragment).with_colour_of(&colours));
+        Ok(fragment)
     }
 
     /// R §3.7's cache path through [`Fragment::from_mesh_file_named`]: the cached fragment when
@@ -282,7 +282,16 @@ impl Fragment {
                 );
                 fragment.rebuild_samples(seed);
             }
-            if (stale_brk || stale_md)
+            // Audit §D.2's features are measured on those arrays, so they move with them; and a
+            // cache that carries none at all is one written by a build whose `CACHE_VERSION` this
+            // one shares but whose fragment could not compute them (the parity harness's sink).
+            // Either way the fragment gets a table rather than an absence, and the file is
+            // updated so the next run reads it back.
+            let stale_features = stale_md || fragment.features.is_none();
+            if stale_features {
+                fragment.rebuild_features();
+            }
+            if (stale_brk || stale_md || stale_features)
                 && let Err(e) = cache::write(&fragment, cache)
             {
                 tracing::warn!(fragment = name, "the cache could not be updated: {e}");
@@ -325,6 +334,17 @@ impl Fragment {
             &self.brk.points_f64(),
             SampleParams::at(self.thick, seed),
         );
+    }
+
+    /// Audit §D.2's object features again, at the samples the fragment holds now.
+    ///
+    /// Every geometric feature is measured on R §3.5's draw, so a fragment whose samples were
+    /// rebuilt at another seed has a stale table and this is what refreshes it. The four colour
+    /// fields are carried over rather than recomputed: the fabric is a property of the file and
+    /// re-reading a full-resolution scan for it would be the most expensive thing a warm run did.
+    pub fn rebuild_features(&mut self) {
+        let carried = self.features.take().unwrap_or_default();
+        self.features = Some(features::Features::of(self).with_colour_of(&carried));
     }
 
     /// Number of faces of the working mesh.
@@ -419,6 +439,37 @@ impl Fragment {
         self.bvh_frac = OnceLock::new();
         self.bvh_full = OnceLock::new();
     }
+}
+
+/// R §3.2's wall of one cleaned, largest-component mesh: the filtered ray thickness and the plain
+/// ray mode, with the OBB fallback the reference takes when the estimator refuses.
+///
+/// Split out of [`Fragment::from_mesh_file_named`] for its length and for nothing else; the order,
+/// the fallback and the two log lines are the reference's.
+fn wall_of(mesh: &crate::Mesh, geom0: &FaceGeometry, name: &str) -> (f64, f64) {
+    let estimate = thickness::estimate_thickness(&mesh.v, &mesh.f, geom0);
+    let (thick, raw_mode) = match estimate {
+        Some((t, m)) if t > 0.0 => (f64::from(t), f64::from(m)),
+        other => {
+            let fallback = thickness::obb_min_extent(&mesh.v) / 10.0;
+            tracing::warn!(
+                fragment = name,
+                thickness = fallback,
+                "thickness estimate failed, using the OBB fallback"
+            );
+            (fallback, other.map_or(0.0, |(_, m)| f64::from(m)))
+        }
+    };
+    let thick_mode = if raw_mode == 0.0 { thick } else { raw_mode };
+    if thick_mode > 1.15 * thick {
+        tracing::info!(
+            fragment = name,
+            thick,
+            thick_mode,
+            "the plain ray mode disagrees with the wall -- a rim or a collar"
+        );
+    }
+    (thick, thick_mode)
 }
 
 /// What [`segment_working_mesh`] hands back: R §3.4's labels and the two areas it summed on the

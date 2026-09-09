@@ -157,9 +157,15 @@ pub struct CacheMeta {
     /// recomputed and rewritten, and nothing else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub md_params: Option<SampleParams>,
-    /// Roadmap items 4 and 6 (D §11); absent in phase 1.
+    /// Audit §D.2's object features, measured on this fragment's own samples (task O1).
+    ///
+    /// D §4.2 sketched these as optional `features/*` **tensors**; what they turned out to be is
+    /// twenty scalars and two triples, which belong in the metadata block beside `thick` rather
+    /// than in a tensor of length one. They are `None` only in a cache written by a build that
+    /// could not compute them, and [`Fragment::load_or_build`] fills that in and rewrites the
+    /// file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub features: Option<serde_json::Value>,
+    pub features: Option<super::features::Features>,
 }
 
 impl CacheMeta {
@@ -190,7 +196,7 @@ impl CacheMeta {
             backend: "cpu".to_owned(),
             brk_params: Some(fragment.brk.params),
             md_params: Some(fragment.samples.params),
-            features: None,
+            features: fragment.features.clone(),
         }
     }
 
@@ -356,27 +362,7 @@ pub fn from_bytes(bytes: &[u8], path: impl AsRef<Path>) -> Result<Fragment> {
     }
 
     let md_params = meta.md_params.ok_or_else(|| Error::cache(path, "no md_params"))?;
-    let samples = Samples {
-        params: md_params,
-        s: read_points(&file, "S", path)?,
-        sp: read_u32(&file, "sp", path)?,
-        pf: read_points(&file, "Pf", path)?,
-        fp: read_u32(&file, "fp", path)?,
-        margin_idx: read_u32(&file, "margin_idx", path)?,
-    };
-    // The three rules the writer cannot break but a file from elsewhere can: every sample has a
-    // face, every face index is a face, and every margin index is a surface sample.
-    if samples.sp.len() != samples.s.len() || samples.fp.len() != samples.pf.len() {
-        return Err(Error::cache(path, "sp/fp do not describe S/Pf"));
-    }
-    let n_faces = u32::try_from(f.len()).unwrap_or(u32::MAX);
-    if let Some(bad) = samples.sp.iter().chain(&samples.fp).find(|&&i| i >= n_faces) {
-        return Err(Error::cache(path, format!("sample face {bad} is outside F ({n_faces})")));
-    }
-    let n_s = u32::try_from(samples.s.len()).unwrap_or(u32::MAX);
-    if let Some(bad) = samples.margin_idx.iter().find(|&&i| i >= n_s) {
-        return Err(Error::cache(path, format!("margin_idx {bad} is outside S ({n_s})")));
-    }
+    let samples = read_samples(&file, md_params, f.len(), path)?;
 
     #[allow(
         clippy::cast_possible_truncation,
@@ -407,9 +393,41 @@ pub fn from_bytes(bytes: &[u8], path: impl AsRef<Path>) -> Result<Fragment> {
         area0: meta.area0,
         area: meta.area,
         frac_area: meta.frac_area,
+        features: meta.features,
         bvh_full: std::sync::OnceLock::new(),
         bvh_frac: std::sync::OnceLock::new(),
     })
+}
+
+/// R §3.5's five sampled tensors, with the three rules the writer cannot break but a file from
+/// elsewhere can: every sample has a face, every face index is a face of `F`, and every margin
+/// index is a surface sample.
+fn read_samples(
+    file: &safetensors::SafeTensors<'_>,
+    params: SampleParams,
+    n_faces: usize,
+    path: &Path,
+) -> Result<Samples> {
+    let samples = Samples {
+        params,
+        s: read_points(file, "S", path)?,
+        sp: read_u32(file, "sp", path)?,
+        pf: read_points(file, "Pf", path)?,
+        fp: read_u32(file, "fp", path)?,
+        margin_idx: read_u32(file, "margin_idx", path)?,
+    };
+    if samples.sp.len() != samples.s.len() || samples.fp.len() != samples.pf.len() {
+        return Err(Error::cache(path, "sp/fp do not describe S/Pf"));
+    }
+    let n_faces = u32::try_from(n_faces).unwrap_or(u32::MAX);
+    if let Some(bad) = samples.sp.iter().chain(&samples.fp).find(|&&i| i >= n_faces) {
+        return Err(Error::cache(path, format!("sample face {bad} is outside F ({n_faces})")));
+    }
+    let n_s = u32::try_from(samples.s.len()).unwrap_or(u32::MAX);
+    if let Some(bad) = samples.margin_idx.iter().find(|&&i| i >= n_s) {
+        return Err(Error::cache(path, format!("margin_idx {bad} is outside S ({n_s})")));
+    }
+    Ok(samples)
 }
 
 /// Reads `<out>/cache/<name>.sherd`.
@@ -609,6 +627,7 @@ mod tests {
     };
     use crate::fragment::Fragment;
     use crate::fragment::breakline::{Breaklines, BrkParams};
+    use crate::fragment::features::Features;
     use crate::fragment::samples::{SampleParams, Samples};
     use crate::types::{FaceLabel, SourceRef, WorkingMesh};
     use crate::vec3::vec3;
@@ -674,6 +693,27 @@ mod tests {
             area0: 17.529_384_756_291_3,
             area: 2.115_384_756_291_31,
             frac_area: 1.015_384_756_291_31,
+            // Audit §D.2's table, with every optional fit both present and absent, so that the
+            // round trip has to carry an `Option<f64>`, a `[f64; 3]` and a bare `usize`.
+            features: Some(Features {
+                name: "pieceA".to_owned(),
+                thick: 3.531_017_303_466_797,
+                thick_mode: 4.044_1,
+                rim: true,
+                shell_radius: Some(109.234_567_891_234_5),
+                shell_rms: Some(0.220_4),
+                shell_points: 1_234,
+                frac_rough: None,
+                frac_rough_points: 0,
+                axis_residual: Some(0.042_61),
+                axis_diameter: Some(72.110_1),
+                axis_rms: Some(1.245),
+                rim_diameter: Some(72.110_1),
+                lab_mean: Some([57.93, 12.31, 20.69]),
+                lab_spread: Some([5.608, 1.0, 2.0]),
+                colour_points: 24_191,
+                colour_distinct: 24_191,
+            }),
             bvh_full: std::sync::OnceLock::new(),
             bvh_frac: std::sync::OnceLock::new(),
         }
@@ -726,6 +766,46 @@ mod tests {
         assert_eq!(back.mesh.face_normals, fr.mesh.face_normals, "face normals");
         assert_eq!(back.mesh.face_areas, fr.mesh.face_areas, "face areas");
         assert_eq!(back.mesh.face_centroids, fr.mesh.face_centroids, "face centroids");
+        // Audit §D.2's table (task O1, `cache_version` 6). Compared as a whole and then, for the
+        // three fields a `f64` round trip could quietly round, by their bits: the group consensus
+        // of roadmap item 4 subtracts these numbers from each other and a warm run must reach the
+        // same median and the same MAD as a cold one.
+        let (there, here) = (back.features.expect("a table"), fr.features.expect("a table"));
+        assert_eq!(there, here, "the object features");
+        assert_eq!(
+            there.shell_radius.map(f64::to_bits),
+            here.shell_radius.map(f64::to_bits),
+            "shell_radius"
+        );
+        assert_eq!(
+            there.lab_mean.map(|l| l.map(f64::to_bits)),
+            here.lab_mean.map(|l| l.map(f64::to_bits)),
+            "lab_mean"
+        );
+        assert_eq!(there.colour_distinct, here.colour_distinct, "colour_distinct");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A cache whose metadata carries no `features` block is still read, and the fragment comes
+    /// back without a table rather than failing.
+    ///
+    /// That is the shape `Fragment::load_or_build` then fills in and rewrites: the absence has to
+    /// be a fact about the file, not an error, or a cache written by a build that could not
+    /// compute the table would take a collection down.
+    #[test]
+    fn a_cache_without_the_feature_block_is_read_and_reports_the_absence() {
+        let dir = scratch("no-features");
+        let source = dir.join("pieceA.ply");
+        std::fs::write(&source, b"x").unwrap();
+        let mut fr = sample(&source);
+        fr.features = None;
+        let bytes = to_bytes(&fr).expect("the cache is written");
+        assert!(
+            !String::from_utf8_lossy(&bytes[..800.min(bytes.len())]).contains("shell_radius"),
+            "a fragment with no table writes no block"
+        );
+        let back = from_bytes(&bytes, &source).expect("the cache is read");
+        assert!(back.features.is_none(), "and the absence survives the round trip");
         std::fs::remove_dir_all(&dir).ok();
     }
 

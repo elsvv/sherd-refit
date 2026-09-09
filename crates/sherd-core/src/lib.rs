@@ -135,7 +135,10 @@ pub const ALGO_REF: &str = "2026-09-06/9d4b9d3";
 /// `Pf` (f32 `[n, 3]`), `sp`, `fp`, `margin_idx` (u32 `[n]`) of R §3.5.1–3.5.2 and §3.5.6 — with
 /// their `md_params` and the two face areas of R §3.4. `5`: task T1 added `brk_valid` (bool `[k]`),
 /// R §3.5.4's frame-validity mask, which used to be recomputed from the narrowed frames and is now
-/// the one the subset was filtered with (defect D3 of the phase-1b verification). Every tensor the
+/// the one the subset was filtered with (defect D3 of the phase-1b verification). `6`: task O1
+/// added audit §D.2's `features` block to the metadata — the twenty scalars roadmap item 4's group
+/// consensus is built from ([`fragment::features::Features`]), measured on R §3.5's own draw and
+/// therefore a function of the same key the rest of the file is. Every tensor the
 /// port reads back must be in the file, so an older cache is refused and its fragment recomputed,
 /// rather than being read back half empty.
-pub const CACHE_VERSION: u32 = 5;
+pub const CACHE_VERSION: u32 = 6;

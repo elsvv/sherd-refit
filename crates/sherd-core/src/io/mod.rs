@@ -112,11 +112,26 @@ pub fn read_mesh(path: impl AsRef<Path>) -> Result<Mesh> {
 /// the reference applies it to the fragment's own mesh only, while `report.write_placed_meshes`
 /// writes all components of the cleaned original (R §11.4).
 pub fn load_mesh(path: impl AsRef<Path>) -> Result<Mesh> {
+    load_mesh_with(path, |_| {})
+}
+
+/// [`load_mesh`], with the mesh **as the file spells it** handed to `observe` before it is cleaned.
+///
+/// One caller: R §3.1's preprocessing, which reads a fragment's vertex colours here and nowhere
+/// else ([`Features::with_colour`](crate::fragment::features::Features::with_colour)). The colour
+/// has to be taken before [`clean`](crate::mesh::clean::clean) merges duplicate vertices, because
+/// that is the point at which task M1 measured the table roadmap item 4's consensus is calibrated
+/// on, and a Lab mean over a different vertex multiset is a different number under the same name.
+///
+/// It is a hook on [`load_mesh`] rather than a second read of the file, and `load_mesh` is written
+/// in terms of it rather than beside it, so the two cannot come to clean differently.
+pub fn load_mesh_with(path: impl AsRef<Path>, observe: impl FnOnce(&Mesh)) -> Result<Mesh> {
     let path = path.as_ref();
     let mut mesh = read_mesh(path)?;
     if mesh.is_empty() {
         return Err(Error::read(path, "no triangles"));
     }
+    observe(&mesh);
     clean::clean(&mut mesh);
     Ok(mesh)
 }

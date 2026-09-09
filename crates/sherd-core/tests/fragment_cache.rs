@@ -256,3 +256,43 @@ fn the_seed_moves_the_sampled_arrays_and_nothing_else() {
     assert_eq!(warm.samples.params.seed, 1, "the arrays were redrawn at this run's seed");
     assert_eq!(warm.samples.s, one.samples.s, "and they are the seed's own arrays");
 }
+
+/// Audit §D.2's object features are part of R §3, so a warm run reads them back and a run at
+/// another seed redraws them (task O1, `cache_version` 6).
+///
+/// The two halves are different quantities and the test says so. Every *geometric* feature is
+/// measured on R §3.5's draw, so it moves with the seed exactly as the samples do; the *colour* is
+/// a property of the file's vertices and moves with nothing — which is why the cache carries it
+/// through a redraw instead of re-reading a full-resolution scan to learn it again.
+#[test]
+fn the_object_features_are_cached_with_the_fragment_and_redrawn_with_its_samples() {
+    let out = scratch("features");
+    let source = slab_piece("pieceA");
+    let path = cache::cache_path(&out, "pieceA");
+    std::fs::remove_file(&path).ok();
+
+    let (cold, from_cache) =
+        Fragment::load_or_build(&source, TARGET_FACES, "pieceA", Some(&path), 0).expect("cold");
+    assert!(!from_cache);
+    let cold_f = cold.features.clone().expect("a fragment built from its file has a table");
+    assert_eq!(cold_f.name, "pieceA");
+    assert_eq!(cold_f.thick.to_bits(), cold.thick.to_bits(), "the wall is R §3.2's own");
+    assert!(cold_f.shell_radius.is_some(), "the slab's shell fits");
+    assert!(cold_f.frac_rough.is_some(), "and its fracture face has a roughness");
+
+    let (warm, from_cache) =
+        Fragment::load_or_build(&source, TARGET_FACES, "pieceA", Some(&path), 0).expect("warm");
+    assert!(from_cache, "the second run reads the cache it just wrote");
+    assert_eq!(warm.features, cold.features, "a warm run is the same run, features and all");
+
+    // Another seed redraws R §3.5, so the fits move with it; the colour fields do not.
+    let (other, _) =
+        Fragment::load_or_build(&source, TARGET_FACES, "pieceA", Some(&path), 1).expect("seed 1");
+    let other_f = other.features.expect("still a table");
+    assert_eq!(other_f.thick.to_bits(), cold_f.thick.to_bits(), "R §3.2 draws nothing");
+    assert_ne!(other_f.shell_radius, cold_f.shell_radius, "the sphere fit is over R §3.5's draw");
+    assert_eq!(other_f.colour_points, cold_f.colour_points, "the fabric is a fact about the file");
+    assert_eq!(other_f.lab_mean, cold_f.lab_mean);
+
+    std::fs::remove_dir_all(&out).ok();
+}

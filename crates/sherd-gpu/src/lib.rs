@@ -9,7 +9,9 @@
 //!
 //! **Two of the four are on the device and two are not, and the crate says which.** What is here
 //! is the device ([`device`]), the buffer and dispatch arithmetic ([`buffers`]), the self-test of
-//! D §6.8 as E7 §8 corrects it ([`selftest`]), the two matching kernels ([`coarse`], [`icp`]) and
+//! D §6.8 as E7 §8 corrects it ([`selftest`]), the two matching kernels ([`coarse`], [`icp`]), the
+//! cross-check harness `gpu-check` reads its exit code from ([`crosscheck`], moved out of
+//! `sherd-cli` in task H2 so that its rows can be tested without a CLI) and
 //! a [`GpuExecutor`] that routes `bounded_distance` and `inside` to the CPU executor and counts
 //! every such call. Phase 2c's BVH kernels were measured and decided against (D §12, struck).
 //! Nothing here silently pretends to be a GPU result: [`selftest::SelfTest`] reports which kernels
@@ -58,6 +60,7 @@
 
 pub mod buffers;
 pub mod coarse;
+pub mod crosscheck;
 pub mod device;
 pub mod executor;
 pub mod icp;
@@ -122,6 +125,15 @@ pub enum GpuError {
         /// The driver's own message.
         message: String,
     },
+
+    /// The cross-check harness was asked for a table it cannot form (D §10.4 layer 3).
+    #[error("gpu-check: {0}")]
+    CrossCheck(String),
+
+    /// A `sherd-core` failure inside the cross-check harness — reading the collection, or
+    /// preprocessing it. The harness is the only thing in this crate that touches files.
+    #[error(transparent)]
+    Core(#[from] sherd_core::Error),
 
     /// A self-test check did not hold, which under D §6.8 means the CPU path.
     #[error("the GPU self-test failed on {adapter}:\n  {}", failures.join("\n  "))]

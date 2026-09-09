@@ -792,7 +792,7 @@ fn gpu_check(args: &GpuCheckArgs) -> Result<()> {
         GpuStage::Inside => "inside",
         GpuStage::All => "all",
     };
-    let rows = gpu::check(
+    let (lines, failed) = gpu::check(
         stage,
         args.set.as_deref(),
         args.fixture.as_deref(),
@@ -801,25 +801,14 @@ fn gpu_check(args: &GpuCheckArgs) -> Result<()> {
         args.chaos,
         args.force_device,
     )?;
-    println!(
-        "{:<12} {:>10} {:>12} {:>12} {:>10}  status",
-        "stage", "items", "worst", "tol", "differ"
-    );
-    for row in &rows {
-        let (worst, tol) = if row.tolerance > 0.0 {
-            (format!("{:.3e}", row.worst), format!("{:.3e}", row.tolerance))
-        } else {
-            ("-".to_owned(), "-".to_owned())
-        };
-        println!(
-            "{:<12} {:>10} {:>12} {:>12} {:>10}  {}",
-            row.stage, row.items, worst, tol, row.differing, row.status
-        );
+    for line in &lines {
+        println!("{line}");
     }
-    let failed = rows.iter().filter(|r| r.failed()).count();
-    println!("\n{} row(s), {failed} failed", rows.len());
+    // One line for the header, so the row count is the table's own.
+    let rows = lines.len().saturating_sub(1);
+    println!("\n{rows} row(s), {failed} failed");
     if failed > 0 {
-        bail!("{failed} of {} gpu-check rows failed", rows.len());
+        bail!("{failed} of {rows} gpu-check rows failed");
     }
     Ok(())
 }

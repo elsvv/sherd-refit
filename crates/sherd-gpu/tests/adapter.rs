@@ -464,6 +464,64 @@ fn the_icp_kernel_matches_the_cpu_executor_on_synthetic_batches() {
     }
 }
 
+/// `crosscheck`'s rows over a synthetic batch: the machinery `gpu-check` reads its exit code from,
+/// on a batch this file builds rather than on a collection.
+///
+/// The harness itself needs meshes on disk (audit §B.7 moved it here, it did not make it
+/// self-contained), but everything it decides *with* — the columns, the excusing rule, the
+/// tolerances, the exit code — is a function of two answers to one batch, and that is what this
+/// test feeds it. The batch is `icp_batch`'s well-conditioned sheet, so there is nothing chaotic
+/// in it and the rows have to come back `ok` at D §10.2's own numbers.
+#[test]
+fn the_crosscheck_rows_hold_on_a_synthetic_batch() {
+    use sherd_gpu::crosscheck::{Column, cloud_deviation, pose_deviation, table, tolerance};
+
+    let Some(gpu) = device("crosscheck rows") else { return };
+    let Some(test) = selftest("crosscheck rows", &gpu) else { return };
+    let executor = GpuExecutor::new(std::sync::Arc::new(gpu), test);
+    executor.force_device(true);
+
+    let (source, target, inits) = icp_batch(4000, 64);
+    let options = Options {
+        estimation: Estimation::PointToPlane,
+        max_correspondence_distance: 1.0,
+        max_iteration: 30,
+        numerics: sherd_core::matching::icp::Numerics::REFERENCE,
+    };
+    let batch = IcpBatch { source: &source, target: &target, inits: &inits, options };
+    let cpu = CPU.icp_rung(&batch);
+    let device_out = executor.icp_rung(&batch);
+    assert_eq!(cpu.len(), device_out.len());
+    assert!(cpu[0].fitness > 0.5, "the batch has to register for the test to mean anything");
+
+    let centre = sherd_core::matching::icp::centroid_of(&source);
+    let (mut rot, mut cloud, mut fit) = (Column::default(), Column::default(), Column::default());
+    for (c, g) in cpu.iter().zip(&device_out) {
+        let (deg, _) = pose_deviation(&c.transform, &g.transform, SYNTHETIC_T);
+        let moved = cloud_deviation(&c.transform, &g.transform, &centre, SYNTHETIC_T);
+        let df = (c.fitness - g.fitness).abs();
+        // Nothing here is chaotic: the sheet is dense and the initial poses are hundredths of a
+        // degree apart, which is what `icp_batch` is built for.
+        rot.push(deg, c.transform != g.transform, true);
+        cloud.push(moved, moved > 0.0, true);
+        fit.push(df, c.correspondences != g.correspondences, true);
+    }
+    let rows = vec![
+        rot.row("icp s1 deg", tolerance::POSE_DEG),
+        cloud.row("icp s1 t@cloud", tolerance::POSE_T),
+        // One correspondence of 4 000 is already 2.5e-4 of the fitness, and an `f32` search is
+        // entitled to resolve a tie at the radius differently (E7 §5.1) — the same widening the
+        // kernel test above makes, and for the same measured reason.
+        fit.row("icp s1 fit", tolerance::ICP.max(1.0 / 4000.0)),
+    ];
+    for line in table(&rows) {
+        println!("  {line}");
+    }
+    let failed: Vec<_> = rows.iter().filter(|r| r.failed()).map(|r| r.status.clone()).collect();
+    assert!(failed.is_empty(), "{failed:?}");
+    assert_eq!(rows[0].items, cpu.len(), "every candidate is in the row");
+}
+
 /// Where the ICP rung starts paying on this device: the CPU rung against the GPU rung at candidate
 /// counts from one to 256.
 ///

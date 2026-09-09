@@ -1277,14 +1277,14 @@ mod tests {
     /// **exactly zero** through the Frobenius norm.
     #[test]
     fn the_two_pose_gaps_agree_on_a_rotation_and_part_on_a_near_rotation() {
+        use approx::assert_relative_eq;
+
         let axis = Vector3::z_axis();
         let turn = |deg: f64| {
             let r = nalgebra::UnitQuaternion::from_axis_angle(&axis, deg.to_radians())
                 .to_rotation_matrix();
             homogeneous(r.matrix(), &Vector3::zeros())
         };
-        use approx::assert_relative_eq;
-
         let (a, b) = (turn(0.0), turn(7.5));
         assert_relative_eq!(pose_gap::trace_deg(&a, &b), 7.5, epsilon = 1e-10);
         assert_relative_eq!(pose_gap::frobenius_deg(&a, &b), 7.5, epsilon = 1e-10);

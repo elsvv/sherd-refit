@@ -1769,7 +1769,9 @@ seeds each — 15 runs — not derived from the port.
 2. **Slab fixture** (`fixtures/slab/`): the synthetic slab pair from `tests/test_synthetic.py`,
    generated once by the Python and committed (≈ 6 MB); the Rust tests reproduce
    `test_synthetic.py`'s assertions (pose error ≤ 2° / 0.1 t, segmentation bounds, acceptance).
-3. **Kernel cross-checks**: `sherd-refit-rs gpu-check [--set DIR] --stage coarse|icp|distance|inside|all`
+3. **Kernel cross-checks** (`sherd_gpu::crosscheck`, moved there from the CLI in task H2 so that
+   the columns, the excusing rule and the exit code have unit tests that need no device —
+   audit §B.7): `sherd-refit-rs gpu-check [--set DIR] --stage coarse|icp|distance|inside|all`
    feeds identical batches to both executors and prints one row per stage — items, worst
    deviation, §10.2's tolerance for that quantity, and the count of differing nearest-neighbour
    choices (E7 §5.1's form) — above the self-test's own rows. Run on software adapters in CI

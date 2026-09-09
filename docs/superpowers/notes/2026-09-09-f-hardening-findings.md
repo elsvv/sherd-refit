@@ -350,9 +350,10 @@ Parity per dump, all failures 0:
 
 ## 6. The quality gate
 
-`python tools/quality_gate.py`, backend `cpu`: **exit 0, 416.6 s = 6.9 min for 40 runs**, against
-the 25-minute budget and V7's 419.8 s. (Twice on this tree, at 425.5 s and 416.6 s; the table below
-is the same in every column but `wall s`.) **Its table is identical to V7's and H4's in every quality
+`python tools/quality_gate.py`, backend `cpu`: **exit 0, 421.6 s = 7.0 min for 40 runs**, against
+the 25-minute budget and V7's 419.8 s. (Four runs on this tree, 416.6–425.5 s; the table below is
+the same in every column but `wall s` in all four, and `output/quality/quality.md` is the last of
+them, at `bf656e0`.) **Its table is identical to V7's and H4's in every quality
 column** — fragment accuracy, precision, the four join buckets, purity and joins, on all 40 rows of
 all eight sets. The only column that moves is `wall s`, which is a clock.
 
@@ -432,3 +433,13 @@ were deleted once measured; the worktree and its build lived outside the reposit
 repository's branch was never switched. `output/quality/` was rewritten by `quality_gate.py`, which
 is what it is for. Nothing under `input/`, `fixtures/` or `output/fixtures/` was written or deleted.
 Disk stayed at or above 6.4 GiB free throughout. The commits are `F1`…`F6` and this note.
+
+One caution for whoever repeats §7. Building the baseline in a worktree that **shares the
+repository's `CARGO_TARGET_DIR`** is what kept the identity check inside 6.4 GiB of free disk — a
+second dependency tree is 4–6 GB — but it left the *repository's* own binary stamped
+`git commit: unknown` for the two builds that followed, because `sherd-core`'s build script had
+last run from a manifest directory that no longer existed. Nothing about a run's numbers depends on
+the stamp, and the two comparison binaries were both stamped correctly (`c6e38bc` and `eac0abe`,
+read back from `info` before the runs), but two quality tables were written in that window with
+`commit unknown` in their header. `touch crates/sherd-core/build.rs` and one rebuild restore it;
+the table under `output/quality/` is a fourth run, made after that, and carries `bf656e0`.

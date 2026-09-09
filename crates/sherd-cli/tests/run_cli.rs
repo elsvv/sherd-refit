@@ -283,6 +283,174 @@ fn the_tier_is_an_off_switch_and_the_assembly_is_built_from_the_confirmed_band()
     std::fs::remove_dir_all(&on_dir).ok();
 }
 
+/// The two runs of [`the_object_pass_is_an_off_switch_and_reports_a_consensus_without_vetoing`],
+/// compared file for file: the same names, the same bytes, and the object pass's own section,
+/// block and stage the only differences.
+fn same_run_apart_from_the_objects(off_dir: &Path, on_dir: &Path) {
+    let (a, b) = (outputs(off_dir), outputs(on_dir));
+    assert_eq!(a.keys().collect::<Vec<_>>(), b.keys().collect::<Vec<_>>(), "the same files");
+    for (name, off_bytes) in &a {
+        let on_bytes = &b[name];
+        if name == "report.md" {
+            // Every line except the `## Objects` section itself, which is the one thing the pass
+            // adds to the file.
+            let strip = |text: &str| -> String {
+                let mut inside = false;
+                let mut kept = String::new();
+                for line in text.lines() {
+                    // `## Timing` is a wall clock and the object pass is one more row in it.
+                    if line == "## Timing" {
+                        break;
+                    }
+                    if line == "## Objects" {
+                        inside = true;
+                    } else if inside && line.starts_with("## ") {
+                        inside = false;
+                    }
+                    if !inside {
+                        kept.push_str(line);
+                        kept.push('\n');
+                    }
+                }
+                kept
+            };
+            let (x, y) = (String::from_utf8_lossy(off_bytes), String::from_utf8_lossy(on_bytes));
+            assert_eq!(
+                strip(&x),
+                strip(&y),
+                "report.md above `## Timing` and without the `## Objects` section"
+            );
+        } else if std::path::Path::new(name).extension().is_some_and(|e| e == "json") {
+            let parse = |bytes: &[u8]| -> serde_json::Value {
+                if name == "report.json" {
+                    report_without_timings(bytes)
+                } else {
+                    serde_json::from_slice(bytes).expect("valid JSON")
+                }
+            };
+            let mut x = parse(off_bytes);
+            let mut y = parse(on_bytes);
+            for value in [&mut x, &mut y] {
+                if let Some(map) = value.as_object_mut() {
+                    map.remove("objects");
+                    // The pass is one more stage, so it is one more key in the two sampled
+                    // blocks; `report_without_timings` has already reduced both to their names.
+                    for block in ["timings", "memory"] {
+                        if let Some(names) = map.get_mut(block).and_then(|v| v.as_array_mut()) {
+                            names.retain(|n| n != "objects");
+                        }
+                    }
+                }
+                if let Some(map) = value["params"].as_object_mut() {
+                    map.remove("objects");
+                }
+            }
+            assert_eq!(x, y, "{name} apart from the object block and the object stage");
+        } else {
+            assert_eq!(off_bytes, on_bytes, "{name}");
+        }
+    }
+}
+
+/// Roadmap item 4's off switch, and what it turns on (audit §D.2, task O1).
+///
+/// Two things at once, because they are one statement. `--objects off` writes exactly the file set
+/// and the key set task T2's run wrote — no `## Objects` section, no `objects` block in
+/// `report.json`, no object rules in `params` — and every other byte of the run is the same as the
+/// default's, which is what makes the switch an off switch rather than a second algorithm.
+/// `--objects on`, the default, writes one object per group with the consensus its members agree
+/// on, and **demotes nothing**: task M1 §4 measured no feature reaching audit §D.2's own AUC of
+/// 0.800 on any collection with real object ids, so the shortlist is empty and every number
+/// reports.
+#[test]
+fn the_object_pass_is_an_off_switch_and_reports_a_consensus_without_vetoing() {
+    let input = repo_root().join("fixtures/slab/input");
+    let off_dir = scratch("objects-off");
+    let on_dir = scratch("objects-on");
+    run_with(&input, &off_dir, &["--objects", "off"]);
+    run(&input, &on_dir);
+
+    let off = report_of(&off_dir);
+    assert!(off.get("objects").is_none(), "no object block with the pass off");
+    assert!(off["params"].get("objects").is_none(), "and no object rules in the parameters");
+    let off_markdown = std::fs::read_to_string(off_dir.join("report.md")).expect("report.md");
+    assert!(!off_markdown.contains("## Objects"), "and no section");
+
+    // Nothing else moved: the two runs are the same run apart from the section and the block.
+    same_run_apart_from_the_objects(&off_dir, &on_dir);
+
+    let on = report_of(&on_dir);
+    assert_eq!(on["params"]["objects"]["k_mad"], 3.0);
+    assert_eq!(on["params"]["objects"]["min_members"], 3);
+    assert_eq!(on["params"]["objects"]["merge"], true, "the arm that needs no threshold");
+    assert_eq!(
+        on["params"]["objects"]["disagreement"], false,
+        "O1 §2: the arm removes no false join and costs correct ones"
+    );
+    assert!(
+        on["params"]["objects"].get("demote").is_none(),
+        "M1 §4's shortlist is empty, so the key is not even written"
+    );
+    let objects = on["objects"]["objects"].as_array().expect("one object per group");
+    assert_eq!(
+        objects.len(),
+        on["groups"].as_array().expect("groups").len(),
+        "every group is reported as an object"
+    );
+    assert_eq!(on["objects"]["merges"], 0, "the slab has one pair and nothing to merge");
+    assert!(on["objects"].get("demotions").is_none(), "and nothing to demote");
+    let consensus = objects[0]["consensus"].as_array().expect("a consensus");
+    assert!(
+        consensus.iter().any(|c| c["feature"] == "thick"),
+        "the wall is in every object's consensus"
+    );
+    for row in consensus {
+        assert!(row["median"].as_f64().expect("a median").is_finite());
+        assert!(row["mad"].as_f64().expect("a MAD") >= 0.0);
+    }
+    let on_markdown = std::fs::read_to_string(on_dir.join("report.md")).expect("report.md");
+    assert!(on_markdown.contains("## Objects"));
+    assert!(on_markdown.contains("| object | fragments | joins |"));
+
+    std::fs::remove_dir_all(&off_dir).ok();
+    std::fs::remove_dir_all(&on_dir).ok();
+}
+
+/// `different_object` refuses a **merge** as well as a join, and `same_object` is reported rather
+/// than acted on (audit §D.1's *"item 4's consensus and the group purity reporting read them"*).
+///
+/// The slab is one pair, so the merge itself cannot be exercised here; what can is that the two
+/// lists reach the object report at all and that neither of them moves a pose.
+#[test]
+fn the_two_object_constraints_reach_the_object_report_without_moving_a_pose() {
+    let input = repo_root().join("fixtures/slab/input");
+    let plain = scratch("objects-plain");
+    let same = scratch("objects-same");
+    run(&input, &plain);
+    let file = constraints_file(
+        "objects-same",
+        r#"{"version": 1, "same_object": [["pieceA", "pieceB"]]}"#,
+    );
+    run_with(&input, &same, &["--constraints", &file.to_string_lossy()]);
+
+    let report = report_of(&same);
+    assert_eq!(report["constraints"]["entries"][0]["list"], "same_object");
+    assert_eq!(report["constraints"]["entries"][0]["satisfied"], true);
+    // The pair is in one group, so the operator and the geometry agree and the split list is empty.
+    assert!(
+        report["objects"].get("same_object_split").is_none(),
+        "the assembly put them together, which is what the operator said"
+    );
+    assert_eq!(
+        report_of(&plain)["fragments"],
+        report["fragments"],
+        "a constraint never edits a score, and `same_object` never moves a pose"
+    );
+    std::fs::remove_dir_all(&plain).ok();
+    std::fs::remove_dir_all(&same).ok();
+    std::fs::remove_file(&file).ok();
+}
+
 /// `measure`'s "different placement" is the parity harness's, value for value.
 ///
 /// `sherd_core::measure` cannot import the constant — `sherd-parity` sits above it — and the two

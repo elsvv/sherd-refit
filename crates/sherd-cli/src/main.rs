@@ -20,6 +20,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use sherd_core::fragment::cache;
 use sherd_core::memory::Budget;
+use sherd_core::objects::ObjectParams;
 use sherd_core::tiers::Thresholds;
 use sherd_core::{
     ALGO_REF, Backend, CACHE_VERSION, CORE_VERSION, GIT_COMMIT, Params, collection, pipeline,
@@ -358,6 +359,52 @@ struct RunArgs {
     /// A constraint never edits a score. Without the flag the run is unchanged, byte for byte.
     #[arg(long, value_name = "FILE")]
     constraints: Option<PathBuf>,
+    /// Roadmap item 4's object separation (audit §D.2): `on` — the default — or `off`.
+    ///
+    /// With it on, every assembled group is reported as an object with the consensus its members
+    /// agree on — median and MAD of the wall, the shell radius, the fracture roughness and the rim
+    /// diameter — and the members that consensus does not fit; two confirmed joins into one group
+    /// that disagree about a fragment are both demoted to probable; and a confirmed join between
+    /// two groups may merge them, under the penetration test across both groups and consistency
+    /// with every cross-group join the assembly's gate admits.
+    ///
+    /// **No feature vetoes anything on the shipped settings.** Audit §D.2's own rule is that a
+    /// feature may veto only where its measured AUC exceeds 0.800, and task M1 §4 measured the
+    /// best of them at 0.740 on the collections with real object ids, so `--object-demote` ships
+    /// empty and every number is reported instead.
+    ///
+    /// `--objects off` is the off switch: no consensus, no demotion, no merge, no `## Objects`
+    /// section, and every output byte for byte the bytes it was.
+    #[arg(long, default_value_t = Switch::On, value_name = "on|off")]
+    objects: Switch,
+    /// Features whose deviation from an object's consensus demotes a join to probable, comma
+    /// separated (`thick`, `thick_mode`, `shell_radius`, `frac_rough`, `axis_diameter`,
+    /// `rim_diameter`, `lab_L`, `lab_a`, `lab_b`).
+    ///
+    /// **Empty by default, on the measurement**: M1 §4 found no feature reaching audit §D.2's own
+    /// AUC of 0.800 on any collection with real object ids. Turning one on without a table that
+    /// justifies it is exactly what the audit's quality principles forbid.
+    #[arg(long, value_name = "LIST", value_delimiter = ',')]
+    object_demote: Vec<String>,
+    /// How many MADs from its object's median a fragment may sit before the consensus rejects it.
+    #[arg(long, default_value_t = ObjectParams::default().k_mad, value_name = "K")]
+    object_k_mad: f64,
+    /// Fewest members an object needs before its consensus may reject one of them.
+    #[arg(long, default_value_t = ObjectParams::default().min_members, value_name = "N")]
+    object_min_members: usize,
+    /// Audit §D.2 (b): two confirmed joins into one group that disagree about a fragment are both
+    /// demoted to probable.
+    ///
+    /// **Off by default, on the measurement.** Task T1 measured 0 false joins in the confirmed
+    /// tier over the eight development sets at seeds 0-4, so a contradiction has no false join to
+    /// catch here; switching the arm on takes mixed_ABG seed 0 from 11 confirmed joins to 2, every
+    /// one of them a correct join R §8 had already reconciled on its own.
+    #[arg(long, default_value_t = Switch::Off, value_name = "on|off")]
+    object_disagreement: Switch,
+    /// Audit §D.2 (c): a confirmed join between two groups merges them. `off` restores R §8's own
+    /// refusal, "would merge two groups (not supported)".
+    #[arg(long, default_value_t = Switch::On, value_name = "on|off")]
+    object_merge: Switch,
     /// Write audit §D.1's review images to `<OUT>/review/<a>__<b>.png`
     /// (`sherd_core::review`).
     ///
@@ -413,8 +460,42 @@ impl RunArgs {
                     min_resample_accept: self.tier_resample_accept,
                 }),
             },
+            objects: match self.objects {
+                Switch::Off => None,
+                Switch::On => Some(ObjectParams {
+                    demote: self.demote_set(),
+                    k_mad: self.object_k_mad,
+                    min_members: self.object_min_members,
+                    disagreement: self.object_disagreement == Switch::On,
+                    merge: self.object_merge == Switch::On,
+                }),
+            },
             ..Params::default()
         }
+    }
+
+    /// `--object-demote`'s list, with an unknown name refused rather than ignored.
+    ///
+    /// A typo that quietly became "no feature" is the same failure `constraints.json`'s name
+    /// validation exists to prevent, and here it would silently turn a demotion rule off.
+    fn demote_set(&self) -> sherd_core::objects::FeatureSet {
+        self.object_demote
+            .iter()
+            .map(|name| {
+                sherd_core::objects::FeatureKey::parse(name).unwrap_or_else(|| {
+                    let known: Vec<&str> =
+                        sherd_core::objects::FeatureKey::ALL.iter().map(|k| k.key()).collect();
+                    clap::Error::raw(
+                        clap::error::ErrorKind::InvalidValue,
+                        format!(
+                            "--object-demote: `{name}` is not a feature; the nine are {}\n",
+                            known.join(", ")
+                        ),
+                    )
+                    .exit()
+                })
+            })
+            .collect()
     }
 }
 

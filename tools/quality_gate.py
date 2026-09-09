@@ -307,6 +307,11 @@ def score(name, gt_dir, work, cen_cache, tiers=False):
     row = dict(joins_used=len(rep.get("joins_used", [])),
                groups=len(tr["groups"]),
                largest=max((len(g) for g in tr["groups"]), default=0))
+    obj = rep.get("objects")
+    if obj is not None:
+        row.update(objects=len(obj["objects"]), merges=obj["merges"],
+                   demoted=len(obj.get("demotions", [])),
+                   consensus_rejects=sum(len(o.get("rejects", [])) for o in obj["objects"]))
     if tiers:
         counts, gt_pairs, bad = tier_score(name, gt_dir, rep, tr, cen_cache)
         row.update(tiers=True, confirmed=counts["confirmed"], probable=counts["probable"],
@@ -479,18 +484,20 @@ def fmt(x, spec="%.3f"):
 
 def markdown(meta, rows, verdicts):
     tiers = bool(rows and rows[0].get("tiers"))
+    objects = bool(rows and rows[0].get("objects") is not None)
     L = []
     L.append("# Quality gate — the Rust core on the development sets at seeds %s"
              % "-".join(str(s) for s in meta["seeds"]))
     L.append("")
-    L.append("`tools/quality_gate.py`, %s, commit `%s`, backend `%s`, `--tiers %s`, "
-             "`--no-preview --no-meshes`, "
+    L.append("`tools/quality_gate.py`, %s, commit `%s`, backend `%s`, `--tiers %s --objects %s "
+             "--object-disagreement %s`, `--no-preview --no-meshes`, "
              "warm cache from the second seed of each set. Total wall **%.1f s** (%.1f min) for "
              "%d runs. Scores are `tools/evaluate.py` (5 deg / 0.5 t, translation at the fragment "
              "centroid); the terracotta has no staged ground truth and carries R §13's decision "
              "row instead."
              % (meta["generated"], meta["commit"], meta["backend"],
-                "on" if tiers else "off", meta["wall_total_s"],
+                "on" if tiers else "off", meta.get("objects", "off"),
+                meta.get("object_disagreement", "off"), meta["wall_total_s"],
                 meta["wall_total_s"] / 60.0, len(rows)))
     if tiers:
         L.append("")
@@ -507,6 +514,9 @@ def markdown(meta, rows, verdicts):
     if tiers:
         head += " confirmed | conf correct | conf false | conf recall | probable |"
         rule += "---:|---:|---:|---:|---:|"
+    if objects:
+        head += " merges | demoted | outside |"
+        rule += "---:|---:|---:|"
     L.append(head)
     L.append(rule)
     for r in rows:
@@ -522,7 +532,18 @@ def markdown(meta, rows, verdicts):
             false = r["conf_wrong_pose"] + r["conf_non_adjacent"] + r["conf_cross_object"]
             line += " %d | %d | %d | %s | %d |" % (
                 r["confirmed"], r["conf_correct"], false, fmt(r["conf_recall"]), r["probable"])
+        if objects:
+            line += " %d | %d | %d |" % (
+                r["merges"], r["demoted"], r["consensus_rejects"])
         L.append(line)
+    if objects:
+        L.append("")
+        L.append("`merges` is audit §D.2 (c) -- two groups joined through a confirmed join, under "
+                 "the penetration test across both and consistency with every cross-group join "
+                 "the gate admits. `demoted` is a confirmed join the object pass moved to "
+                 "probable; `outside` is a member its own object's consensus does not fit, "
+                 "**reported and never acted on** -- task M1 §4 measured no feature reaching "
+                 "audit §D.2's own AUC of 0.800 on any collection with real object ids.")
     L.append("")
     L.append("R §13 over the five seeds of each set. **Gate** is what R §13 states as a "
              "prohibition -- its last row (cross-object joins 0, group purity 1.000) on the seven "
@@ -554,6 +575,15 @@ def main(argv=None):
                     help="roadmap item 3's confidence tier (default on): `on` also scores the "
                          "confirmed tier and gates it at zero false joins; `off` runs the binary "
                          "the way it ran before the tier existed")
+    ap.add_argument("--objects", choices=("on", "off"), default="on",
+                    help="roadmap item 4's object separation (default on): the per-group "
+                         "consensus, the group merge through a confirmed join, and -- only with "
+                         "--object-disagreement on -- audit §D.2 (b)'s mutual-disagreement "
+                         "demotion; `off` runs the binary the way task T2 ran it")
+    ap.add_argument("--object-disagreement", choices=("on", "off"), default="off",
+                    help="audit §D.2 (b), off by default on task O1's own measurement: it removes "
+                         "no false join -- the confirmed tier has none -- and costs nine of "
+                         "mixed_ABG seed 0's eleven")
     ap.add_argument("--keep-work", action="store_true", help="do not delete each set's run tree")
     ap.add_argument("--render-only", action="store_true",
                     help="re-render <out>/quality.{md,json} from the rows of a finished run, "
@@ -583,7 +613,9 @@ def main(argv=None):
         for seed in a.seeds:
             cmd = [os.path.join(ROOT, a.bin), "run", indir, "--out", work,
                    "--backend", a.backend, "--no-preview", "--no-meshes", "--seed", str(seed),
-                   "--tiers", a.tiers]
+                   "--tiers", a.tiers,
+                   "--objects", a.objects,
+                   "--object-disagreement", a.object_disagreement]
             wall, rc, log = sh(cmd)
             if rc != 0:
                 print(log)
@@ -607,6 +639,7 @@ def main(argv=None):
     wall_total = time.perf_counter() - t_all
     meta = dict(generated=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
                 commit=commit, backend=a.backend, seeds=a.seeds, binary=a.bin, tiers=a.tiers,
+                objects=a.objects, object_disagreement=a.object_disagreement,
                 wall_total_s=wall_total, runs=len(rows))
     return finish(out, meta, rows, [s[0] for s in sets])
 

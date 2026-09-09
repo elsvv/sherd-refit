@@ -1230,8 +1230,12 @@ Numbers the port must reproduce on the benchmark sets, with the defaults above (
 `2026-09-06-scale-pairs.md` §3 and `2026-09-05-test-set-result.md`):
 
 **The per-set rows are the *spread* the reference itself produces, not a single number.** R §10's
-streams are seeded from `Params.seed`, and no CLI exposes it, so the table used to print whatever
-one draw gave. Running the reference with `Params(seed = 0…4)` and with the working-mesh budget at
+streams are seeded from `Params.seed`, and neither CLI exposed it, so the table used to print
+whatever one draw gave. The **port** has exposed it since task H3 — `run --seed N` and
+`bench --seed N`, recorded in `engine` (D §9, audit §C.3) — so the spread below can now be asked
+for on the port's side as well as constructed by hand on the reference's; the reference's `cli.py`
+still has no such flag, and the thirty-six runs of this table were made by setting `Params(seed=k)`
+in a script. Running the reference with `Params(seed = 0…4)` and with the working-mesh budget at
 ±5 % (190 000 and 210 000 faces, seed 0) moves three of the seven rows — including the one written
 as a prohibition (task Y, `notes/2026-09-07-y-phase1d-findings.md` §3) — and a five-seed sweep of
 the three rows task Y left alone moves two more (task Z,

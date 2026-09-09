@@ -355,18 +355,31 @@ pub struct Engine {
     pub commit: String,
     /// The executor that ran, with the adapter's name when it was a device.
     pub backend: String,
+    /// R §10's seed, which `--seed` sets (task H3).
+    ///
+    /// Absent from a file the reference wrote and from one this port wrote before task H3, which
+    /// is why it reads back as 0 — the value every such run had.
+    #[serde(default)]
+    pub seed: u64,
 }
 
 impl Engine {
-    /// The block for a run on `backend`, which is already resolved and already carries its
-    /// adapter (see [`Backend::label`](crate::executor::Backend::label)).
-    pub fn of(backend: &str) -> Self {
+    /// The block for a run on `backend` at `seed`, both already resolved — the backend carries its
+    /// adapter (see [`Backend::label`](crate::executor::Backend::label)) and the seed is
+    /// `Params::seed` as the run resolved `--seed`.
+    ///
+    /// The seed is in `params` as well, and is repeated here on purpose: `engine` is the block
+    /// that answers "which build produced this file, and how", and the seed is the second half of
+    /// that question. A reader holding a pose should not have to walk 46 parameters to find out
+    /// which of R §13's draws it is looking at.
+    pub fn of(backend: &str, seed: u64) -> Self {
         Self {
             core_version: CORE_VERSION.to_owned(),
             algo_ref: ALGO_REF.to_owned(),
             cache_version: CACHE_VERSION,
             commit: GIT_COMMIT.to_owned(),
             backend: backend.to_owned(),
+            seed,
         }
     }
 }
@@ -487,7 +500,7 @@ pub fn transforms(
             .iter()
             .map(|g| g.iter().map(|&n| names[n as usize].clone()).collect())
             .collect(),
-        engine: backend.map(Engine::of),
+        engine: backend.map(|b| Engine::of(b, params.seed)),
     }
 }
 
@@ -565,7 +578,7 @@ pub fn report_json(
             .map(|(i, why)| CandidateJson::rejected(&outcome.candidates[*i], names, why))
             .collect(),
         candidates: outcome.candidates.iter().map(|c| CandidateJson::of(c, names)).collect(),
-        engine: Some(Engine::of(backend)),
+        engine: Some(Engine::of(backend, params.seed)),
         memory: memory.cloned(),
     }
 }
@@ -1000,6 +1013,7 @@ mod tests {
         // with its adapter, and every version this build carries.
         let engine = back.engine.expect("transforms.json carries D §4.3's engine block");
         assert_eq!(engine.backend, "gpu:Apple M2 Pro");
+        assert_eq!(engine.seed, 0, "R §10's seed, as `--seed` resolved it (task H3)");
         assert_eq!(engine.algo_ref, crate::ALGO_REF);
         assert_eq!(engine.core_version, crate::CORE_VERSION);
         assert_eq!(engine.cache_version, crate::CACHE_VERSION);
@@ -1097,6 +1111,7 @@ mod tests {
         assert_eq!(value["engine"]["core_version"], crate::CORE_VERSION);
         assert_eq!(value["engine"]["cache_version"], crate::CACHE_VERSION);
         assert_eq!(value["engine"]["commit"], crate::GIT_COMMIT);
+        assert_eq!(value["engine"]["seed"], 0);
 
         // And it parses back into the typed form the harness reads.
         let back: ReportJson = serde_json::from_str(&text).expect("report round-trips");

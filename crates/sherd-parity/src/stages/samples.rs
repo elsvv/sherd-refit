@@ -48,6 +48,7 @@ use sherd_core::types::{FaceLabel, WorkingMesh};
 use sherd_core::vec3::Vec3f;
 
 use super::Collection;
+use super::DUMP_SEED;
 use crate::npy;
 use crate::report::{Check, Mode, StageReport, Unit};
 
@@ -271,7 +272,13 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
                     report.skip(name, "no source file (pass --input DIR)");
                     continue;
                 };
-                let (fr, _) = Fragment::load_or_build(source, collection.target_faces, name, None)?;
+                let (fr, _) = Fragment::load_or_build(
+                    source,
+                    collection.target_faces,
+                    name,
+                    None,
+                    DUMP_SEED,
+                )?;
                 let ours = &fr.samples;
 
                 report.push(Check::count(

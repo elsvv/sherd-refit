@@ -244,6 +244,12 @@ struct RunArgs {
     /// Fracture samples per t^2 of fracture area.
     #[arg(long, default_value_t = Params::default().frac_per_t2)]
     frac_density: f64,
+    /// Seed of every draw R §10 lists: the three per-fragment samplers, the coarse probe and the
+    /// partner search. R §9's cap and R §11.5's previews keep the literal 0 the reference gives
+    /// them. A collection matched at another seed places differently on the sets R §13 measures
+    /// a spread on, which is the point of the flag.
+    #[arg(long, default_value_t = Params::default().seed)]
+    seed: u64,
     /// Do not write R §11.5's previews.
     #[arg(long)]
     no_preview: bool,
@@ -302,6 +308,7 @@ impl RunArgs {
             reg_points: self.reg_points,
             surface_points: self.surface_points,
             frac_per_t2: self.frac_density,
+            seed: self.seed,
             ..Params::default()
         }
     }
@@ -439,6 +446,10 @@ struct BenchArgs {
     /// Gigabytes the kernels may hold on the device at once (D §1); 0 removes the bound.
     #[arg(long, value_name = "GB")]
     gpu_memory: Option<f64>,
+    /// Seed of every draw R §10 lists, as on `run` — a timing at another seed is a timing of
+    /// another set of sampled arrays, and D §10.3's gates are stated at 0.
+    #[arg(long, default_value_t = Params::default().seed)]
+    seed: u64,
 }
 
 fn main() -> Result<()> {
@@ -548,8 +559,15 @@ fn segment(args: &SegmentArgs) -> Result<()> {
     let out = if args.no_cache { None } else { Some(args.out.as_path()) };
 
     let started = std::time::Instant::now();
-    let results =
-        pipeline::preprocess(&entries, args.target_faces as usize, out, budget(args.memory_budget));
+    // `segment` has no `--seed`: R §10's seed is a *matching* run's, and a cache written at one
+    // seed simply has R §3.5's three arrays recomputed by the run that wants another (R §3.7).
+    let results = pipeline::preprocess(
+        &entries,
+        args.target_faces as usize,
+        out,
+        budget(args.memory_budget),
+        Params::default().seed,
+    );
     let wall = started.elapsed().as_secs_f64();
 
     println!(
@@ -741,6 +759,7 @@ fn bench(args: &BenchArgs) -> Result<()> {
     tracing::info!(backend = %resolved.backend, "{}", resolved.reason);
     let options = pipeline::RunOptions {
         target_faces: args.target_faces as usize,
+        params: Params { seed: args.seed, ..Params::default() },
         preview: false,
         write_meshes: args.meshes,
         cache: !args.no_cache,
@@ -1035,6 +1054,39 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// `--seed N` reaches `Params.seed` on both subcommands that have it, and defaults to R §10's
+    /// own 0 on both (task H3).
+    ///
+    /// The flag is what R §13's spread is measured with, and the reference has no CLI for it — so
+    /// the port's is the only way to ask the question on either side. `segment` deliberately has
+    /// no such flag: a cache written at one seed has R §3.5's three arrays recomputed by the run
+    /// that wants another (R §3.7), which the fragment cache's own tests assert.
+    #[test]
+    fn the_seed_flag_reaches_the_parameters_on_run_and_bench() {
+        let run = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
+            super::Command::Run(a) => a.params().seed,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(run(&["sherd-refit-rs", "run", "in", "--out", "out"]), 0, "R §10's default");
+        assert_eq!(run(&["sherd-refit-rs", "run", "in", "--out", "out", "--seed", "4"]), 4);
+
+        let bench = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
+            super::Command::Bench(a) => a.seed,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(bench(&["sherd-refit-rs", "bench", "in", "--out", "out"]), 0);
+        assert_eq!(bench(&["sherd-refit-rs", "bench", "in", "--out", "out", "--seed", "3"]), 3);
+        assert_eq!(Params::default().seed, 0, "and the default is the reference's own");
+
+        // `segment` has none, and saying so is the point: the assertion fails if one is added
+        // without a decision about what a cache written at another seed means.
+        assert!(
+            Cli::try_parse_from(["sherd-refit-rs", "segment", "in", "--out", "out", "--seed", "1"])
+                .is_err(),
+            "`segment` takes no --seed"
+        );
     }
 
     /// `bench` resolves `--workers` and `--threads` exactly as `run` does (V5-D3).

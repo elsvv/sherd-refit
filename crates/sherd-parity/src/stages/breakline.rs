@@ -86,6 +86,7 @@ use sherd_core::spatial::kdtree::PointTree;
 use sherd_core::types::FaceLabel;
 
 use super::Collection;
+use super::DUMP_SEED;
 use crate::npy;
 use crate::report::{Check, Mode, StageReport, Unit};
 
@@ -214,7 +215,13 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
                     report.skip(name, "no source file (pass --input DIR)");
                     continue;
                 };
-                let (fr, _) = Fragment::load_or_build(source, collection.target_faces, name, None)?;
+                let (fr, _) = Fragment::load_or_build(
+                    source,
+                    collection.target_faces,
+                    name,
+                    None,
+                    DUMP_SEED,
+                )?;
                 let ours = &fr.brk;
 
                 if ours.is_empty() || theirs.p.is_empty() {

@@ -196,7 +196,7 @@ fn the_native_stage_meets_the_design_tolerances() {
         let stats = json(&d.join("mesh.stats.json"));
         let path = repo_root().join("fixtures/slab/input").join(format!("{name}.ply"));
 
-        let fr = Fragment::from_mesh_file(&path, TARGET_FACES).expect("the slab loads");
+        let fr = Fragment::from_mesh_file(&path, TARGET_FACES, 0).expect("the slab loads");
         assert_eq!(fr.name, name);
 
         let counts = json(&d.join("load.n_orig.json"));
@@ -249,8 +249,8 @@ fn the_native_stage_meets_the_design_tolerances() {
 #[test]
 fn the_native_stage_is_bit_reproducible() {
     let path = repo_root().join("fixtures/slab/input/pieceA.ply");
-    let a = Fragment::from_mesh_file(&path, TARGET_FACES).expect("the slab loads");
-    let b = Fragment::from_mesh_file(&path, TARGET_FACES).expect("the slab loads");
+    let a = Fragment::from_mesh_file(&path, TARGET_FACES, 0).expect("the slab loads");
+    let b = Fragment::from_mesh_file(&path, TARGET_FACES, 0).expect("the slab loads");
     assert_eq!(a.mesh.f, b.mesh.f);
     assert_eq!(a.mesh.v, b.mesh.v);
     assert_eq!(a.mesh.face_normals, b.mesh.face_normals);

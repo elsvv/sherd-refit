@@ -548,7 +548,7 @@ mod tests {
     /// skipped whichever way round it is written.
     #[test]
     fn a_pair_of_very_different_walls_is_skipped() {
-        let mut a = Fragment::from_mesh_file(slab("pieceA.ply"), 200_000).unwrap();
+        let mut a = Fragment::from_mesh_file(slab("pieceA.ply"), 200_000, 0).unwrap();
         let mut b = a.clone();
         let p = Params::default();
 
@@ -567,8 +567,8 @@ mod tests {
     /// arrays rebuilt while the other keeps its own.
     #[test]
     fn a_pair_is_built_at_the_thinner_wall() {
-        let a = Fragment::from_mesh_file(slab("pieceA.ply"), 200_000).unwrap();
-        let b = Fragment::from_mesh_file(slab("pieceB.ply"), 200_000).unwrap();
+        let a = Fragment::from_mesh_file(slab("pieceA.ply"), 200_000, 0).unwrap();
+        let b = Fragment::from_mesh_file(slab("pieceB.ply"), 200_000, 0).unwrap();
         let p = Params::default();
         let pair = Pair::build(&a, &b, &p);
 

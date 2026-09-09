@@ -337,6 +337,7 @@ pub fn check(
         200_000,
         None,
         sherd_core::memory::Budget::default_for_machine(),
+        params.seed,
     )
     .into_iter()
     .collect::<std::result::Result<Vec<_>, _>>()?;

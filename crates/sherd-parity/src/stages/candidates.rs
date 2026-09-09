@@ -67,6 +67,7 @@ use sherd_core::fragment::Fragment;
 use sherd_core::matching::pair::{self, Candidate};
 use sherd_core::matching::verify::{self, Scores};
 
+use super::DUMP_SEED;
 use super::{ALL_PAIRS, Collection, Spread, pose_gap};
 use crate::npy;
 use crate::report::{Check, Mode, StageReport};
@@ -388,8 +389,13 @@ fn native_fragments(
             continue;
         };
         let started = std::time::Instant::now();
-        let (fr, _) =
-            Fragment::load_or_build(source, collection.target_faces, &fragment.name, None)?;
+        let (fr, _) = Fragment::load_or_build(
+            source,
+            collection.target_faces,
+            &fragment.name,
+            None,
+            DUMP_SEED,
+        )?;
         tracing::info!(
             fragment = %fragment.name,
             seconds = started.elapsed().as_secs_f64(),

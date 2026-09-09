@@ -182,7 +182,7 @@ fn main() -> Result<()> {
     let mut fragments = Vec::new();
     for path in &files {
         let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("f").to_owned();
-        let (fragment, _) = Fragment::load_or_build(path, 200_000, &name, None)?;
+        let (fragment, _) = Fragment::load_or_build(path, 200_000, &name, None, 0)?;
         fragments.push(fragment);
     }
 

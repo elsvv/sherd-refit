@@ -38,6 +38,7 @@ use sherd_core::matching::pair::Pair;
 use sherd_core::matching::scales::Scales;
 
 use super::Collection;
+use super::DUMP_SEED;
 use super::pairs::{PairFixture, reference_frames};
 use crate::report::{Check, Mode, StageReport};
 
@@ -185,8 +186,13 @@ fn native_fragments(
             report.skip(&fragment.name, "no source file (pass --input DIR)");
             continue;
         };
-        let (fr, _) =
-            Fragment::load_or_build(source, collection.target_faces, &fragment.name, None)?;
+        let (fr, _) = Fragment::load_or_build(
+            source,
+            collection.target_faces,
+            &fragment.name,
+            None,
+            DUMP_SEED,
+        )?;
         out.insert(fragment.name.clone(), fr);
     }
     Ok(out)

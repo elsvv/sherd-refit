@@ -656,7 +656,7 @@ mod tests {
                 valid: vec![true, true],
             },
             samples: Samples {
-                params: SampleParams::at(3.531_017_303_466_797),
+                params: SampleParams::at(3.531_017_303_466_797, 0),
                 s: vec![vec3(0.25, 0.25, 0.0), vec3(0.3, 0.1, 0.2), vec3(0.1, 0.4, 0.1)],
                 sp: vec![0, 1, 3],
                 pf: vec![vec3(0.3, 0.1, 0.2)],
@@ -901,7 +901,7 @@ mod tests {
 
         // A fragment with no fracture and no margin is a legitimate fragment, not an error.
         let mut fr = sample(&source);
-        fr.samples = Samples { params: SampleParams::at(fr.thick), ..Samples::default() };
+        fr.samples = Samples { params: SampleParams::at(fr.thick, 0), ..Samples::default() };
         let back = from_bytes(&to_bytes(&fr).unwrap(), &source).unwrap();
         assert_eq!(back.samples, fr.samples);
         std::fs::remove_dir_all(&dir).ok();

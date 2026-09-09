@@ -288,7 +288,8 @@ carried no block at all):
   "algo_ref": "2026-09-06/9d4b9d3",
   "cache_version": 5,
   "commit": "55238b111ccb194915d466b8e32df9f158aac092",
-  "backend": "gpu:Apple M2 Pro"
+  "backend": "gpu:Apple M2 Pro",
+  "seed": 0
 }
 ```
 
@@ -301,10 +302,17 @@ carried no block at all):
 * `backend` is the **resolved** executor, never `auto`: a file that recorded `auto` would say
   nothing about the arithmetic that produced it. With a device it carries the adapter's own name,
   which is what makes a GPU-side deviation attributable to a machine rather than to "the GPU".
+* `seed` is R §10's, as `--seed` resolved it (task H3). It is in `params` too, and it is repeated
+  here on purpose: `engine` is the block that answers "which build produced this file, and how",
+  and after R §13 the seed is the second half of that question — a reader holding a pose should not
+  have to walk 46 parameters to find out which draw it is looking at. It reads back as 0 from a
+  file written before the field existed, which is the value every such run had.
 * Both files carry it because both are read downstream. The poses a tool applies live in
   `transforms.json`, and "which build produced them, on which backend" belongs beside them.
-* It is the one key the port adds to R §11's schema, and `sherd-parity`'s `outputs` stage skips it
-  by name on both sides, so the byte-level comparison against the reference is unaffected.
+* It is one of the two keys the port adds to R §11's schema — the other is `report.json`'s
+  `memory`, task H3's per-stage peak resident set beside `timings` (audit §B.3) — and
+  `sherd-parity`'s `outputs` stage is unaffected by either: `engine` it skips by name, and the
+  value it rebuilds to compare against the reference's own file carries no `memory` block at all.
 
 ## 5. Pipeline and threading model
 
@@ -1090,6 +1098,7 @@ with the same name, default and meaning (R§1.4), plus:
 | `--gpu-adapter NAME|INDEX` | override adapter |
 | `--gpu-memory GB` (default 1) | what the kernels may hold on the device at once (§1, §6.8); `0` removes the bound. A batch **larger than the whole budget** is answered by the CPU and counted as a refusal; one that merely finds the budget occupied waits for room, so the split is a function of the batch and the machine and not of the schedule (§6.6) |
 | `--memory-budget GB` | preprocessing budget (§5) |
+| `--seed N` (default 0) on `run` and `bench` | R §10's seed: the three per-fragment samplers of R §3.5, R §5.2's coarse probe and R §4.3's screening cap. **Built in task H3** (audit §C.3, §C.7): R §13's per-set rows are a *spread* the reference produces under `Params(seed = 0…4)` and neither CLI could ask for it, which made the port's byte-determinism look like stability. R §9's cap and R §11.5's previews keep the literal 0 the reference hard-codes for them (V4-D9). `segment` deliberately has no such flag — a cache written at one seed has R §3.5's three arrays recomputed by the run that wants another, which is R §3.7's own rule |
 | ~~`--dump-fixtures DIR`~~ | ~~write the Rust-side fixture (§10.1)~~ — **struck** (task H2, audit §B.5 and §C.7): the flag only ever failed, its module was a twelve-line stub, and a Rust-side writer is wanted only while the Python is the reference. `python tools/dump_fixtures.py INPUT OUT` is the sink that exists |
 | `--inject-from DIR --inject-stages a,b,…` | parity mode: take the listed stage inputs from a Python fixture |
 | `--constraints FILE` | roadmap item 3 (§11) |

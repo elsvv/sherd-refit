@@ -31,6 +31,7 @@ use sherd_core::mesh::geometry::{face_geometry, median_edge};
 use sherd_core::mesh::taubin::taubin;
 
 use super::Collection;
+use super::DUMP_SEED;
 use crate::npy;
 use crate::report::{Check, Mode, StageReport, Unit};
 
@@ -135,7 +136,8 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
                     report.skip(name, "no source file (pass --input DIR)");
                     continue;
                 };
-                let (fr, _) = Fragment::load_or_build(source, collection.target_faces, name, None)?;
+                let cap = collection.target_faces;
+                let (fr, _) = Fragment::load_or_build(source, cap, name, None, DUMP_SEED)?;
                 let area: f64 = fr.mesh.face_areas.iter().map(|&a| f64::from(a)).sum();
                 #[allow(
                     clippy::cast_precision_loss,

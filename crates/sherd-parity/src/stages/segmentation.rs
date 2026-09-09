@@ -42,6 +42,7 @@ use sherd_core::spatial::bvh::RayScene;
 use sherd_core::types::FaceLabel;
 
 use super::Collection;
+use super::DUMP_SEED;
 use crate::npy;
 use crate::report::{Check, Mode, StageReport, Unit};
 
@@ -216,7 +217,13 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
                     report.skip(name, "no source file (pass --input DIR)");
                     continue;
                 };
-                let (fr, _) = Fragment::load_or_build(source, collection.target_faces, name, None)?;
+                let (fr, _) = Fragment::load_or_build(
+                    source,
+                    collection.target_faces,
+                    name,
+                    None,
+                    DUMP_SEED,
+                )?;
                 let v64: Vec<[f64; 3]> = fr.mesh.v.iter().map(|p| p.to_f64()).collect();
                 let Some(scene) = RayScene::new(&v64, &fr.mesh.f) else {
                     report.skip(name, "the port's working mesh has no triangle");

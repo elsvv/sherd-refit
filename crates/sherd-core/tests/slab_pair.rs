@@ -98,8 +98,8 @@ fn slab_fragments() -> &'static (Fragment, Fragment) {
     static FRAGMENTS: OnceLock<(Fragment, Fragment)> = OnceLock::new();
     FRAGMENTS.get_or_init(|| {
         (
-            Fragment::from_mesh_file(slab_input().join("pieceA.ply"), 200_000).expect("pieceA"),
-            Fragment::from_mesh_file(slab_input().join("pieceB.ply"), 200_000).expect("pieceB"),
+            Fragment::from_mesh_file(slab_input().join("pieceA.ply"), 200_000, 0).expect("pieceA"),
+            Fragment::from_mesh_file(slab_input().join("pieceB.ply"), 200_000, 0).expect("pieceB"),
         )
     })
 }

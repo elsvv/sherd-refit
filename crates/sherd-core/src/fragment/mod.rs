@@ -105,13 +105,13 @@ impl Fragment {
     /// * `n_orig_vertices` / `n_orig_faces` are counted after cleaning but before the
     ///   largest-component pass, so a fragment that arrives as two shells still reports what the
     ///   file held.
-    pub fn from_mesh_file(path: impl AsRef<Path>, target_faces: usize) -> Result<Self> {
+    pub fn from_mesh_file(path: impl AsRef<Path>, target_faces: usize, seed: u64) -> Result<Self> {
         let path = path.as_ref();
         let name = path.file_stem().map_or_else(
             || path.to_string_lossy().into_owned(),
             |s| s.to_string_lossy().into_owned(),
         );
-        Self::from_mesh_file_named(path, target_faces, &name)
+        Self::from_mesh_file_named(path, target_faces, &name, seed)
     }
 
     /// [`Fragment::from_mesh_file`] with the fragment's name given explicitly, which is how the
@@ -120,6 +120,7 @@ impl Fragment {
         path: impl AsRef<Path>,
         target_faces: usize,
         name: &str,
+        seed: u64,
     ) -> Result<Self> {
         let path = path.as_ref();
         let source = source_ref(path)?;
@@ -204,8 +205,15 @@ impl Fragment {
         let geom = face_geometry(&v64, &working.f);
         let seg = segment_working_mesh(&working, &v64, &geom, thick, res, name);
         let brk = breaklines_of(&v64, &working.f, &geom, &seg.labels, thick, name);
-        let samples =
-            samples_of(&v64, &working.f, &geom, &seg.labels, &brk, SampleParams::at(thick), name);
+        let samples = samples_of(
+            &v64,
+            &working.f,
+            &geom,
+            &seg.labels,
+            &brk,
+            SampleParams::at(thick, seed),
+            name,
+        );
 
         Ok(Self {
             id: 0,
@@ -244,6 +252,7 @@ impl Fragment {
         target_faces: usize,
         name: &str,
         cache: Option<&Path>,
+        seed: u64,
     ) -> Result<(Self, bool)> {
         let path = path.as_ref();
         let cap = u32::try_from(target_faces).unwrap_or(u32::MAX);
@@ -252,10 +261,13 @@ impl Fragment {
         {
             tracing::debug!(fragment = name, cache = %cache.display(), "cache hit");
             // R §3.7: a cache that is valid but was built with other match-array parameters has
-            // those arrays recomputed, not the whole fragment. In phase 1 the knobs are
-            // constants, so this can only fire on a cache written by another build.
+            // those arrays recomputed, not the whole fragment. The knobs are constants apart from
+            // `seed`, so this fires on a cache written by another build or by another `--seed`
+            // (task H3) — and the second is the reason it has to read the run's seed rather than
+            // a default.
             let stale_brk = fragment.brk.params != BrkParams::at(fragment.thick);
-            let stale_md = stale_brk || fragment.samples.params != SampleParams::at(fragment.thick);
+            let stale_md =
+                stale_brk || fragment.samples.params != SampleParams::at(fragment.thick, seed);
             if stale_brk {
                 tracing::info!(
                     fragment = name,
@@ -268,7 +280,7 @@ impl Fragment {
                     fragment = name,
                     "the cached match arrays were built with other parameters; recomputing them"
                 );
-                fragment.rebuild_samples();
+                fragment.rebuild_samples(seed);
             }
             if (stale_brk || stale_md)
                 && let Err(e) = cache::write(&fragment, cache)
@@ -277,7 +289,7 @@ impl Fragment {
             }
             return Ok((fragment, true));
         }
-        let fragment = Self::from_mesh_file_named(path, target_faces, name)?;
+        let fragment = Self::from_mesh_file_named(path, target_faces, name, seed)?;
         if let Some(cache) = cache
             && let Err(e) = cache::write(&fragment, cache)
         {
@@ -302,7 +314,7 @@ impl Fragment {
     /// The one caller is [`Fragment::load_or_build`], for a cache whose `md_params` are not this
     /// run's. The breaklines are read from the fragment as they stand, so a run that has to
     /// rebuild both rebuilds them first — the samples measure `d_brk` against them.
-    pub fn rebuild_samples(&mut self) {
+    pub fn rebuild_samples(&mut self, seed: u64) {
         let v64: Vec<[f64; 3]> = self.mesh.v.iter().map(|p| p.to_f64()).collect();
         let geom = face_geometry(&v64, &self.mesh.f);
         self.samples = samples::build(
@@ -311,7 +323,7 @@ impl Fragment {
             &geom,
             &self.labels,
             &self.brk.points_f64(),
-            SampleParams::at(self.thick),
+            SampleParams::at(self.thick, seed),
         );
     }
 

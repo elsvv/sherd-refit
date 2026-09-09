@@ -110,11 +110,16 @@ pub struct SampleParams {
 }
 
 impl SampleParams {
-    /// The shipped knobs at a wall thickness, with the default seed.
-    pub fn at(t: f64) -> Self {
+    /// The shipped knobs at a wall thickness, seeded by R §10's `p.seed`.
+    ///
+    /// The seed is a parameter and not a default because it is one: R §10 seeds `rng_md` from
+    /// `Params.seed`, and `--seed` (task H3) is the flag that sets it. It is part of the cache's
+    /// `md_params`, so a cache written at another seed has these arrays — and only these —
+    /// recomputed, which is R §3.7's own rule.
+    pub fn at(t: f64, seed: u64) -> Self {
         Self {
             t,
-            seed: 0,
+            seed,
             surface_points: SURFACE_POINTS,
             frac_per_t2: FRAC_PER_T2,
             min_frac_points: MIN_FRAC_POINTS,
@@ -125,10 +130,10 @@ impl SampleParams {
 }
 
 impl Default for SampleParams {
-    /// The shipped knobs at `t = 0`, which describes no fragment — [`SampleParams::at`] is the
-    /// constructor with a meaning.
+    /// The shipped knobs at `t = 0` and R §10's default seed, which describes no fragment —
+    /// [`SampleParams::at`] is the constructor with a meaning.
     fn default() -> Self {
-        Self::at(0.0)
+        Self::at(0.0, 0)
     }
 }
 
@@ -705,7 +710,7 @@ mod tests {
     /// R §3.5.2's clip, at both clamps and in between.
     #[test]
     fn the_fracture_count_is_a_density_between_two_clamps() {
-        let p = SampleParams::at(2.0);
+        let p = SampleParams::at(2.0, 0);
         // 150 · area / t² with t = 2: area 100 gives 3750 -> the lower clamp.
         assert_eq!(fracture_count(100.0, p), 5000);
         // area 400 gives 15000 -> the upper clamp.
@@ -714,13 +719,13 @@ mod tests {
         assert_eq!(fracture_count(200.0, p), 7500);
         assert_eq!(fracture_count(200.001, p), 7500, "int(), not round()");
         assert_eq!(fracture_count(0.0, p), 5000, "no fracture: the clamp, and no samples anyway");
-        assert_eq!(fracture_count(0.0, SampleParams::at(0.0)), 5000, "0/0 is not a panic");
+        assert_eq!(fracture_count(0.0, SampleParams::at(0.0, 0)), 5000, "0/0 is not a panic");
     }
 
     /// The margin is a band on the shell, strict on both sides.
     #[test]
     fn the_margin_is_the_shell_inside_the_band() {
-        let params = SampleParams::at(10.0);
+        let params = SampleParams::at(10.0, 0);
         let labels = vec![FaceLabel::Shell, FaceLabel::Fracture];
         let sp = vec![0, 0, 0, 0, 1];
         let d = vec![
@@ -852,7 +857,7 @@ mod tests {
         let labels = vec![FaceLabel::Shell, FaceLabel::Fracture];
         // A breakline point in the middle of the shared edge.
         let brk = vec![[0.5, 0.5, 0.0]];
-        let params = SampleParams { surface_points: 5000, ..SampleParams::at(1.0) };
+        let params = SampleParams { surface_points: 5000, ..SampleParams::at(1.0, 0) };
         let md = build(&v, &f, &geom, &labels, &brk, params);
 
         assert_eq!(md.n_surface(), 5000);
@@ -882,7 +887,7 @@ mod tests {
         let (v, f) = square();
         let geom = face_geometry(&v, &f);
         let labels = vec![FaceLabel::Shell; 2];
-        let params = SampleParams { surface_points: 100, ..SampleParams::at(1.0) };
+        let params = SampleParams { surface_points: 100, ..SampleParams::at(1.0, 0) };
         let md = build(&v, &f, &geom, &labels, &[], params);
         assert_eq!(md.n_surface(), 100);
         assert_eq!(md.n_fracture(), 0);
@@ -896,7 +901,8 @@ mod tests {
     fn the_runtime_arrays_are_derived_from_the_cached_ones() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/slab/input/pieceA.ply");
-        let fr = crate::fragment::Fragment::from_mesh_file(&path, 200_000).expect("the slab loads");
+        let fr =
+            crate::fragment::Fragment::from_mesh_file(&path, 200_000, 0).expect("the slab loads");
         let md = MatchData::own(&fr);
 
         assert!((md.t - fr.thick).abs() < 1e-12);
@@ -940,6 +946,6 @@ mod tests {
         assert!(!s.has_fracture());
         assert!(s.surface_f64().is_empty());
         assert!(s.fracture_f64().is_empty());
-        assert_eq!(s.params, SampleParams::at(0.0));
+        assert_eq!(s.params, SampleParams::at(0.0, 0));
     }
 }

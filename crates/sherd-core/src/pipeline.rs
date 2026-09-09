@@ -82,8 +82,9 @@ pub fn preprocess(
     target_faces: usize,
     out_dir: Option<&Path>,
     budget: Budget,
+    seed: u64,
 ) -> Vec<Result<Preprocessed>> {
-    preprocess_watched(entries, target_faces, out_dir, budget, &Watch::default())
+    preprocess_watched(entries, target_faces, out_dir, budget, seed, &Watch::default())
 }
 
 /// [`preprocess`] under D §5's cancellation flag and progress callback.
@@ -97,6 +98,7 @@ pub fn preprocess_watched(
     target_faces: usize,
     out_dir: Option<&Path>,
     budget: Budget,
+    seed: u64,
     watch: &Watch,
 ) -> Vec<Result<Preprocessed>> {
     let semaphore = MemorySemaphore::new(budget);
@@ -116,6 +118,7 @@ pub fn preprocess_watched(
                 target_faces,
                 &entry.name,
                 cache_path.as_deref(),
+                seed,
             )?;
             drop(permit);
             watch.advance(
@@ -393,6 +396,10 @@ pub fn run_with(
         options.target_faces,
         cache_dir.as_deref(),
         options.memory,
+        // R §10 seeds `rng_md` from `Params.seed`; `--seed` (task H3) is what sets it, and this is
+        // the one place preprocessing learns it. A cache written at another seed has R §3.5's
+        // three arrays recomputed and nothing else, which is R §3.7's rule.
+        params.seed,
         &options.watch,
     )?;
     stages.finish("preprocess", started.elapsed().as_secs_f64());
@@ -677,9 +684,10 @@ fn preprocess_collection(
     target_faces: usize,
     out_dir: Option<&Path>,
     budget: Budget,
+    seed: u64,
     watch: &Watch,
 ) -> Result<Vec<Fragment>> {
-    let results = preprocess_watched(entries, target_faces, out_dir, budget, watch);
+    let results = preprocess_watched(entries, target_faces, out_dir, budget, seed, watch);
     let mut fragments = Vec::with_capacity(results.len());
     for (i, result) in results.into_iter().enumerate() {
         let mut fragment = result?.fragment;
@@ -1176,12 +1184,12 @@ mod tests {
         let broken = dir.join("broken.ply");
         std::fs::write(&broken, b"ply\nformat ascii 1.0\nend_header\n").unwrap();
         let entries = vec![Entry { path: broken, name: "broken".to_owned() }];
-        let results = preprocess(&entries, 200_000, None, Budget::unbounded());
+        let results = preprocess(&entries, 200_000, None, Budget::unbounded(), 0);
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err(), "a mesh with no triangles is R §3.1's error case");
         // The same file under a budget that admits nothing: the semaphore lets it through anyway
         // (nothing else is running) and it fails with the reader's error, not by waiting.
-        let bounded = preprocess(&entries, 200_000, None, Budget::bytes(1));
+        let bounded = preprocess(&entries, 200_000, None, Budget::bytes(1), 0);
         assert!(bounded[0].is_err(), "the semaphore never turns a read error into a hang");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1202,7 +1210,7 @@ mod tests {
             Entry { path: input.join("pieceB.ply"), name: "pieceB".to_owned() },
         ];
         let fragments: Vec<crate::fragment::Fragment> =
-            preprocess(&entries, 200_000, None, Budget::unbounded())
+            preprocess(&entries, 200_000, None, Budget::unbounded(), 0)
                 .into_iter()
                 .map(|r| r.expect("the slab preprocesses").fragment)
                 .collect();

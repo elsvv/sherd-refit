@@ -302,6 +302,14 @@ impl FragmentFixture {
     }
 }
 
+/// The seed R §10's streams were at when the dumps were written.
+///
+/// `tools/dump_fixtures.py` runs the reference at its own defaults, and `Params.seed` defaults to
+/// 0 on both sides; `--seed` (task H3) is a flag of `run` and `bench`, not of the harness. The
+/// *injected* column does not use this — it reads each dump's own `md.params.json`
+/// (`samples::dump_params`) — so this is what the **native** column preprocesses at.
+pub const DUMP_SEED: u64 = 0;
+
 /// A fixture dump, resolved against the collection it was made from.
 #[derive(Clone, Debug)]
 pub struct Collection {

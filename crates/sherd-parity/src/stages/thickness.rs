@@ -31,6 +31,7 @@ use sherd_core::fragment::thickness::{BINS, RayHits, filtered_distances, percent
 use sherd_core::mesh::geometry::face_geometry;
 
 use super::Collection;
+use super::DUMP_SEED;
 use crate::npy;
 use crate::report::{Check, Mode, StageReport, Unit};
 
@@ -119,8 +120,13 @@ pub fn run(collection: &Collection, mode: Mode) -> Result<StageReport> {
                     report.skip(&fragment.name, "no source file (pass --input DIR)");
                     continue;
                 };
-                let (fr, _) =
-                    Fragment::load_or_build(source, collection.target_faces, &fragment.name, None)?;
+                let (fr, _) = Fragment::load_or_build(
+                    source,
+                    collection.target_faces,
+                    &fragment.name,
+                    None,
+                    DUMP_SEED,
+                )?;
                 push_native(&mut report, &fragment.name, "t", fr.thick, ref_t, bin);
                 push_native(
                     &mut report,

@@ -55,6 +55,7 @@ use sherd_core::matching::pair::{self, Candidate};
 use sherd_core::types::{FragId, apply_transform};
 
 use super::Collection;
+use super::DUMP_SEED;
 use super::pairs::RefGeometry;
 use crate::npy;
 use crate::report::{Check, Mode, StageReport};
@@ -719,8 +720,13 @@ pub fn native_fragments(
             return Ok(None);
         };
         let started = std::time::Instant::now();
-        let (mut fr, _) =
-            Fragment::load_or_build(source, collection.target_faces, &fragment.name, None)?;
+        let (mut fr, _) = Fragment::load_or_build(
+            source,
+            collection.target_faces,
+            &fragment.name,
+            None,
+            DUMP_SEED,
+        )?;
         fr.id = u32::try_from(i).expect("fewer than 2^32 fragments");
         tracing::info!(
             fragment = %fragment.name,

@@ -43,7 +43,7 @@ fn main() -> Result<()> {
     for path in &files {
         let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("fragment").to_owned();
         let started = std::time::Instant::now();
-        let (fragment, _) = Fragment::load_or_build(path, 200_000, &name, None)?;
+        let (fragment, _) = Fragment::load_or_build(path, 200_000, &name, None, 0)?;
         println!("prep {name}: {:.2} s", started.elapsed().as_secs_f64());
         fragments.push((name, fragment));
     }

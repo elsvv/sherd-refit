@@ -38,6 +38,7 @@ fn a_warm_run_is_the_same_run_as_a_cold_one() {
         TARGET_FACES,
         "pieceA",
         Some(&cache::cache_path(&out, "pieceA")),
+        0,
     )
     .expect("the slab preprocesses");
     assert!(!from_cache, "the first run has nothing to read");
@@ -47,6 +48,7 @@ fn a_warm_run_is_the_same_run_as_a_cold_one() {
         TARGET_FACES,
         "pieceA",
         Some(&cache::cache_path(&out, "pieceA")),
+        0,
     )
     .expect("the cache is readable");
     assert!(from_cache, "the second run must hit the cache it just wrote");
@@ -78,7 +80,7 @@ fn a_warm_run_is_the_same_run_as_a_cold_one() {
     // And the sampled arrays, which are stored for the same reason (R §3.5.1–3.5.2, §3.5.6).
     assert!(cold.samples.has_fracture() && cold.samples.n_margin() > 0);
     assert_eq!(warm.samples, cold.samples, "S, sp, Pf, fp, margin_idx and their parameters");
-    assert_eq!(warm.samples.params, SampleParams::at(cold.thick));
+    assert_eq!(warm.samples.params, SampleParams::at(cold.thick, 0));
     assert_eq!(warm.area.to_bits(), cold.area.to_bits(), "area");
     assert_eq!(warm.frac_area.to_bits(), cold.frac_area.to_bits(), "frac_area");
 
@@ -95,9 +97,9 @@ fn a_cache_built_with_other_sampling_parameters_has_the_arrays_recomputed() {
     let path = cache::cache_path(&out, "pieceA");
 
     let (mut fragment, _) =
-        Fragment::load_or_build(&source, TARGET_FACES, "pieceA", Some(&path)).expect("cold");
+        Fragment::load_or_build(&source, TARGET_FACES, "pieceA", Some(&path), 0).expect("cold");
     let wanted = fragment.samples.clone();
-    assert_eq!(wanted.params, SampleParams::at(fragment.thick));
+    assert_eq!(wanted.params, SampleParams::at(fragment.thick, 0));
 
     // A cache whose samples were drawn at another count, with the arrays to match.
     fragment.samples.params = SampleParams { surface_points: 500, ..wanted.params };
@@ -107,7 +109,7 @@ fn a_cache_built_with_other_sampling_parameters_has_the_arrays_recomputed() {
     cache::write(&fragment, &path).expect("the doctored cache is written");
 
     let (back, from_cache) =
-        Fragment::load_or_build(&source, TARGET_FACES, "pieceA", Some(&path)).expect("warm");
+        Fragment::load_or_build(&source, TARGET_FACES, "pieceA", Some(&path), 0).expect("warm");
     assert!(from_cache, "the mesh, the labels and the breaklines still came from the cache");
     assert_eq!(back.samples, wanted, "the arrays were redrawn at this run's parameters");
     assert_eq!(cache::read(&path).expect("the cache reads").samples, wanted);
@@ -127,7 +129,7 @@ fn a_cache_built_with_other_breakline_parameters_has_them_recomputed() {
     let path = cache::cache_path(&out, "pieceA");
 
     let (mut fragment, _) =
-        Fragment::load_or_build(&source, TARGET_FACES, "pieceA", Some(&path)).expect("cold");
+        Fragment::load_or_build(&source, TARGET_FACES, "pieceA", Some(&path), 0).expect("cold");
     let wanted = fragment.brk.clone();
     assert_eq!(wanted.params, BrkParams::at(fragment.thick));
 
@@ -138,7 +140,7 @@ fn a_cache_built_with_other_breakline_parameters_has_them_recomputed() {
     cache::write(&fragment, &path).expect("the doctored cache is written");
 
     let (back, from_cache) =
-        Fragment::load_or_build(&source, TARGET_FACES, "pieceA", Some(&path)).expect("warm");
+        Fragment::load_or_build(&source, TARGET_FACES, "pieceA", Some(&path), 0).expect("warm");
     assert!(from_cache, "the mesh and the labels still came from the cache");
     assert_eq!(back.brk, wanted, "the breaklines were rebuilt at this run's parameters");
     // And the corrected arrays were written back, so the next run does no work at all.
@@ -153,7 +155,7 @@ fn the_cache_of_a_real_fragment_is_reproducible_and_self_describing() {
     let source = slab_piece("pieceB");
     let path = cache::cache_path(&out, "pieceB");
 
-    let (fragment, _) = Fragment::load_or_build(&source, TARGET_FACES, "pieceB", Some(&path))
+    let (fragment, _) = Fragment::load_or_build(&source, TARGET_FACES, "pieceB", Some(&path), 0)
         .expect("the slab preprocesses");
     let first = std::fs::read(&path).expect("the cache was written");
 
@@ -188,7 +190,7 @@ fn the_cache_of_a_real_fragment_is_reproducible_and_self_describing() {
 fn releasing_the_scenes_frees_them_and_they_come_back() {
     let fragment = {
         let mut fragment =
-            Fragment::from_mesh_file(slab_piece("pieceA"), TARGET_FACES).expect("pieceA");
+            Fragment::from_mesh_file(slab_piece("pieceA"), TARGET_FACES, 0).expect("pieceA");
         let query = [1.0_f32, 2.0, 3.0];
         let before = (
             fragment.surface_scene().expect("a whole-mesh tree").closest_face(query),
@@ -211,4 +213,46 @@ fn releasing_the_scenes_frees_them_and_they_come_back() {
         fragment
     };
     assert!(fragment.n_faces() > 0);
+}
+
+/// R §10's seed reaches R §3.5's three samplers, and the cache knows which seed drew its arrays.
+///
+/// `--seed` (task H3) exists because R §13's per-set rows are a *spread* the reference produces
+/// under `Params(seed = 0..4)` and no CLI on either side could ask for it. What the flag has to
+/// do is exactly this: move the sampled arrays and nothing else — the working mesh, the labels
+/// and the breaklines are functions of the file — and make a cache drawn at another seed rebuild
+/// those arrays alone, which is R §3.7's rule.
+#[test]
+fn the_seed_moves_the_sampled_arrays_and_nothing_else() {
+    let source = slab_piece("pieceA");
+    let zero = Fragment::from_mesh_file(&source, TARGET_FACES, 0).expect("seed 0");
+    let one = Fragment::from_mesh_file(&source, TARGET_FACES, 1).expect("seed 1");
+
+    assert_eq!(one.mesh.v, zero.mesh.v, "R §3.3's working mesh draws nothing");
+    assert_eq!(one.mesh.f, zero.mesh.f);
+    assert_eq!(one.labels, zero.labels, "R §3.4's segmentation draws nothing");
+    assert_eq!(one.brk.p, zero.brk.p, "R §3.5.3-3.5.5's breaklines draw nothing");
+    assert_eq!(one.thick.to_bits(), zero.thick.to_bits(), "R §3.2's estimator draws nothing (T1)");
+
+    assert_eq!(zero.samples.params.seed, 0);
+    assert_eq!(one.samples.params.seed, 1);
+    assert_ne!(one.samples.s, zero.samples.s, "R §3.5.1's surface samples");
+    assert_ne!(one.samples.pf, zero.samples.pf, "R §3.5.2's fracture samples");
+    assert_eq!(one.samples.s.len(), zero.samples.s.len(), "the same counts, other points");
+
+    // And a cache written at one seed has those arrays — and only those — redrawn for the other.
+    let out = scratch("seed");
+    let path = cache::cache_path(&out, "pieceA");
+    std::fs::remove_file(&path).ok();
+    let (cold, from_cache) =
+        Fragment::load_or_build(&source, TARGET_FACES, "pieceA", Some(&path), 0).expect("cold");
+    assert!(!from_cache);
+    assert_eq!(cold.samples.params.seed, 0);
+    let (warm, from_cache) =
+        Fragment::load_or_build(&source, TARGET_FACES, "pieceA", Some(&path), 1).expect("warm");
+    assert!(from_cache, "the mesh, the labels and the breaklines still came from the cache");
+    assert_eq!(warm.mesh.v, cold.mesh.v);
+    assert_eq!(warm.brk.p, cold.brk.p);
+    assert_eq!(warm.samples.params.seed, 1, "the arrays were redrawn at this run's seed");
+    assert_eq!(warm.samples.s, one.samples.s, "and they are the seed's own arrays");
 }

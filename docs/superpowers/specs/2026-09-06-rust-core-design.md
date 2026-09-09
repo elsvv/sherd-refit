@@ -52,7 +52,7 @@ sherd-refit/                      (this repo; Python package stays at the root d
       src/fragment/  thickness.rs segment.rs breakline.rs samples.rs cache.rs features.rs
       src/matching/  scales.rs hypotheses.rs coarse.rs nms.rs icp.rs verify.rs pair.rs screen.rs
       src/assembly/  greedy.rs consistency.rs groups.rs constraints.rs
-      src/refine.rs  src/report.rs src/render.rs src/pipeline.rs src/executor.rs src/rng.rs src/fixture.rs
+      src/refine.rs  src/report.rs src/render.rs src/pipeline.rs src/executor.rs src/rng.rs
     sherd-gpu/                    wgpu executor: device.rs buffers.rs slots.rs selftest.rs executor.rs kernels/*.wgsl
                                   (scheduler.rs is phase 2d; the kernels are 2b and 2c)
     sherd-cli/                    binary `sherd-refit`: run, segment, parity, bench, info
@@ -1074,7 +1074,7 @@ with the same name, default and meaning (R§1.4), plus:
 | `--gpu-adapter NAME|INDEX` | override adapter |
 | `--gpu-memory GB` (default 1) | what the kernels may hold on the device at once (§1, §6.8); `0` removes the bound. A batch **larger than the whole budget** is answered by the CPU and counted as a refusal; one that merely finds the budget occupied waits for room, so the split is a function of the batch and the machine and not of the schedule (§6.6) |
 | `--memory-budget GB` | preprocessing budget (§5) |
-| `--dump-fixtures DIR` | write the Rust-side fixture (§10.1) |
+| ~~`--dump-fixtures DIR`~~ | ~~write the Rust-side fixture (§10.1)~~ — **struck** (task H2, audit §B.5 and §C.7): the flag only ever failed, its module was a twelve-line stub, and a Rust-side writer is wanted only while the Python is the reference. `python tools/dump_fixtures.py INPUT OUT` is the sink that exists |
 | `--inject-from DIR --inject-stages a,b,…` | parity mode: take the listed stage inputs from a Python fixture |
 | `--constraints FILE` | roadmap item 3 (§11) |
 | `--review-images` | roadmap item 3: render `review/<a>__<b>.png` for probable joins |
@@ -1156,8 +1156,10 @@ be measuring numpy's sort. With it the port's greedy loop and duplicate test run
 reference's own ranking and the kept list is compared exactly. The change is to the *sink* only —
 `_match_pair` hoists the expression it already evaluated into a variable — so the reference's
 results are unchanged, and re-dumping the slab at the same `sherd_refit/` reproduced all 178
-previous files byte for byte. The Rust CLI writes the same layout with
-`--dump-fixtures`.
+previous files byte for byte. A Rust-side writer of the same layout was planned as
+`--dump-fixtures` and is **not built**: the flag and its stub module were removed in task H2
+(audit §B.5), because the writer is wanted only while the Python is the reference and the parity
+harness reads the dumps the Python sink already writes.
 
 ### 10.2 Stage comparison and tolerances (`tools/compare_fixtures.py REF NEW`)
 

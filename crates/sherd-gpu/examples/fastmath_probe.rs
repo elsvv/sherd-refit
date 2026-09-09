@@ -127,7 +127,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input = buffers::upload(&gpu, "data", &data);
     let out = buffers::output(&gpu, "out", 14 * 4);
     let bind = kernel.bind(&gpu, &[input.as_entire_binding(), out.as_entire_binding()]);
-    kernel.dispatch(&gpu, &bind, Dispatch::for_workgroups(1))?;
+    // One dispatch, submitted and waited for. `Kernel::dispatch` used to wrap these four lines
+    // and this probe was its only caller (audit §B.5), so it lives here now; the two matching
+    // kernels record into an encoder they share with their readback copy instead.
+    let mut encoder = kernel.encoder(&gpu);
+    kernel.record(&mut encoder, &bind, Dispatch::for_workgroups(1));
+    gpu.wait_for(gpu.submit(encoder.finish()))?;
     let got: Vec<f32> = buffers::read_back(&gpu, "fastmath probe", &out, 14)?;
 
     println!("  exact, in f64          {exact:.10}");

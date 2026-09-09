@@ -319,9 +319,10 @@ pub struct Collection {
     pub fragments: Vec<FragmentFixture>,
     /// The numerics every ICP of the pair stages runs under (D §7).
     ///
-    /// [`Numerics::REFERENCE`] is what D §10.2's rows are stated for; the other three combinations
-    /// are experiment E5's instrument and reach here through `sherd-refit-rs parity
-    /// --icp-precision/--icp-assembly`.
+    /// Always [`Numerics::REFERENCE`], which is what D §10.2's rows are stated for. It is a field
+    /// rather than a constant because the *stages* take it as a parameter and because it is the
+    /// seam experiment E5 used; E5's `--icp-precision/--icp-assembly` flags were removed in task
+    /// H2 (audit §B.5) once D §7 had answered the question they measured.
     pub icp: Numerics,
 }
 
@@ -384,12 +385,6 @@ impl Collection {
             Stage::Refine => refine::run(self, mode),
             Stage::Outputs => outputs::run(self, mode),
         }
-    }
-
-    /// The same collection with other ICP numerics (experiment E5).
-    #[must_use]
-    pub fn with_icp(self, icp: Numerics) -> Self {
-        Self { icp, ..self }
     }
 
     /// Runs several stages in one mode, in pipeline order.

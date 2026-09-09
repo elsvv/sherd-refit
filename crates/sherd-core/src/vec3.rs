@@ -4,7 +4,8 @@
 //! D §3 asks for an own newtype rather than a library vector so that a slice of them can be
 //! uploaded to the GPU as-is: `#[repr(C)]`, exactly twelve bytes, no padding, `bytemuck::Pod`.
 //! Coordinates are `f32` because that is what both executors compute in (D §7); the poses and
-//! the ICP solves stay `f64` and live in [`crate::types::Pose`].
+//! the ICP solves stay `f64` and live in [`matching::icp::Pose`](crate::matching::icp::Pose),
+//! which is a plain `Matrix4<f64>` — R §0's convention, the one `transforms.json` writes.
 
 // bytemuck's derives expand to `unsafe impl Pod` / `unsafe impl Zeroable` in this module. That is
 // the only unsafe code in the crate, and it is sound because the struct is `#[repr(C)]`, holds

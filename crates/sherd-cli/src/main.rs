@@ -19,7 +19,6 @@ mod gpu;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use sherd_core::fragment::cache;
-use sherd_core::matching::icp::{Assembly, Numerics, Precision};
 use sherd_core::memory::Budget;
 use sherd_core::{
     ALGO_REF, Backend, CACHE_VERSION, CORE_VERSION, GIT_COMMIT, Params, collection, pipeline,
@@ -274,9 +273,6 @@ struct RunArgs {
     /// bound, and the default is half of the machine's physical memory.
     #[arg(long, value_name = "GB")]
     memory_budget: Option<f64>,
-    /// Write the Rust-side fixture dump of D §10.1 (not built yet).
-    #[arg(long, value_name = "DIR")]
-    dump_fixtures: Option<PathBuf>,
 }
 
 impl RunArgs {
@@ -394,48 +390,6 @@ struct ParityArgs {
     /// Re-hash every file of the dump and compare against the manifest.
     #[arg(long)]
     verify_checksums: bool,
-    /// Scalar the ICP point loops of `stage1` and `stage2` run in (D §7, experiment E5).
-    /// `f64` is the reference's and the one D §10.2's rows are stated for.
-    #[arg(long, value_enum, default_value_t = IcpPrecision::F64)]
-    icp_precision: IcpPrecision,
-    /// Frame the point-to-plane normal equations are assembled in (D §7, experiment E5).
-    /// `world` is R §7 verbatim; `centred` is the re-parameterisation the GPU path will use.
-    #[arg(long, value_enum, default_value_t = IcpAssembly::World)]
-    icp_assembly: IcpAssembly,
-}
-
-/// `--icp-precision`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-enum IcpPrecision {
-    /// The reference's: every point loop in `f64`.
-    F64,
-    /// The GPU executor's: the point loops in `f32`, the pose and the solve still `f64`.
-    F32,
-}
-
-/// `--icp-assembly`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-enum IcpAssembly {
-    /// R §7 verbatim: the normal equations in the meshes' own coordinates.
-    World,
-    /// D §7: about the target centroid, with the update re-expressed about the origin.
-    Centred,
-}
-
-impl ParityArgs {
-    /// D §7's two knobs as `sherd-core` states them.
-    fn numerics(&self) -> Numerics {
-        Numerics {
-            precision: match self.icp_precision {
-                IcpPrecision::F64 => Precision::F64,
-                IcpPrecision::F32 => Precision::F32,
-            },
-            assembly: match self.icp_assembly {
-                IcpAssembly::World => Assembly::World,
-                IcpAssembly::Centred => Assembly::Centred,
-            },
-        }
-    }
 }
 
 /// Arguments of `bench`: a run with the previews and the meshes off, timed against D §10.3.
@@ -703,13 +657,6 @@ fn watch_signals() -> sherd_core::progress::Watch {
 /// R §2–§11 for a whole collection: the reference's `sherd-refit run`, flag for flag.
 #[allow(clippy::cast_precision_loss, reason = "counts and seconds printed in a table")]
 fn run(args: &RunArgs) -> Result<()> {
-    if let Some(dir) = &args.dump_fixtures {
-        bail!(
-            "--dump-fixtures {} is D §10.1's Rust-side writer and is not built yet; the Python \
-             side is `python tools/dump_fixtures.py INPUT OUT`",
-            dir.display()
-        );
-    }
     // The pool is sized *before* the backend is resolved: D §6.8's self-test times the same batch
     // on the CPU, over rayon, and a rayon call initialises the global pool at its default size —
     // after which `set_threads` can only fail. The ratio the self-test reports is then measured
@@ -895,8 +842,7 @@ fn clear_caches(input: &std::path::Path, out: &std::path::Path) -> Result<()> {
 fn parity(args: &ParityArgs) -> Result<()> {
     let dir = FixtureDir::new(&args.fixtures);
     let collection = Collection::open(dir, args.input.as_deref())
-        .with_context(|| format!("reading the fixture in {}", args.fixtures.display()))?
-        .with_icp(args.numerics());
+        .with_context(|| format!("reading the fixture in {}", args.fixtures.display()))?;
     let manifest = &collection.manifest;
 
     println!("fixture:    {}", args.fixtures.display());
@@ -919,10 +865,9 @@ fn parity(args: &ParityArgs) -> Result<()> {
         None => println!("  input:    none given (native mode will skip)"),
     }
     println!(
-        "  icp:      {:?} point loops, {:?} assembly{}",
-        collection.icp.precision,
-        collection.icp.assembly,
-        if collection.icp == Numerics::REFERENCE { "" } else { "  (not the reference's)" }
+        "  icp:      {:?} point loops, {:?} assembly (the reference's, which is what D §10.2's \
+         rows are stated for)",
+        collection.icp.precision, collection.icp.assembly,
     );
 
     if args.verify_checksums {
@@ -1139,7 +1084,7 @@ mod tests {
                 assert_eq!(args.target_faces, 200_000, "the Python's --target-faces default");
                 assert!(args.workers.is_none() && args.threads.is_none(), "both default to None");
                 assert!(!args.no_preview && !args.no_refine && !args.no_meshes);
-                assert!(!args.no_cache && !args.force && args.dump_fixtures.is_none());
+                assert!(!args.no_cache && !args.force);
                 assert_eq!(args.backend, Backend::Auto);
                 assert_eq!(
                     args.params(),

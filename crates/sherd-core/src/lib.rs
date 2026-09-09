@@ -81,7 +81,6 @@ pub mod assembly;
 pub mod collection;
 pub mod error;
 pub mod executor;
-pub mod fixture;
 pub mod fragment;
 pub mod io;
 pub mod matching;
@@ -103,7 +102,7 @@ pub use error::{Error, Result};
 pub use executor::Backend;
 pub use mesh::Mesh;
 pub use params::Params;
-pub use types::{Cloud, FaceLabel, FragId, Pose, SourceRef, WorkingMesh};
+pub use types::{Cloud, FaceLabel, FragId, SourceRef, WorkingMesh};
 pub use vec3::Vec3f;
 
 /// Version of this crate, reported as `core_version` in the cache metadata and in the `engine`

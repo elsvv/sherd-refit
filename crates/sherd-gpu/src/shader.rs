@@ -20,7 +20,6 @@ use wgpu::{
     PipelineLayoutDescriptor, ShaderStages,
 };
 
-use crate::GpuError;
 use crate::buffers::Dispatch;
 use crate::device::Gpu;
 
@@ -135,19 +134,6 @@ impl Kernel {
     #[must_use]
     pub fn encoder(&self, gpu: &Gpu) -> wgpu::CommandEncoder {
         gpu.device().create_command_encoder(&CommandEncoderDescriptor { label: Some(self.label) })
-    }
-
-    /// Submits one dispatch and waits for it.
-    ///
-    /// `submit` + `poll(Wait)` and nothing else — the pipeline is already compiled and the buffers
-    /// are already resident, which is what makes a wall-clock measurement around this call the
-    /// kernel's own (E7 §7.1, G1 §5.1). The self-test times this; the two matching kernels record
-    /// instead ([`Kernel::record`]).
-    pub fn dispatch(&self, gpu: &Gpu, bind: &BindGroup, grid: Dispatch) -> Result<(), GpuError> {
-        let mut encoder = self.encoder(gpu);
-        self.record(&mut encoder, bind, grid);
-        let submission = gpu.submit(encoder.finish());
-        gpu.wait_for(submission)
     }
 }
 

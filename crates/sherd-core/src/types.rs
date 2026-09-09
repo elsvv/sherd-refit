@@ -213,59 +213,10 @@ pub fn rotate_fused(t: &nalgebra::Matrix4<f64>, p: [f64; 3]) -> [f64; 3] {
     [row(0), row(1), row(2)]
 }
 
-/// A rigid transform: candidate poses, placements, refinements.
-///
-/// The convention is the reference's (R §0): a candidate `T` maps fragment **B** into **A**'s
-/// frame, `p_A = R·p_B + τ`. Poses stay `f64` everywhere, including on the GPU path, where only
-/// the point loops run in `f32` (D §7).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Pose(pub nalgebra::Isometry3<f64>);
-
-impl Pose {
-    /// The identity pose.
-    #[inline]
-    pub fn identity() -> Self {
-        Self(nalgebra::Isometry3::identity())
-    }
-
-    /// The 4×4 matrix the reference writes to `transforms.json` (R §11.1), row-major as
-    /// `nalgebra` stores homogeneous matrices.
-    #[inline]
-    pub fn to_homogeneous(self) -> nalgebra::Matrix4<f64> {
-        self.0.to_homogeneous()
-    }
-
-    /// Maps a point through the pose.
-    #[inline]
-    pub fn transform_point(self, p: [f64; 3]) -> [f64; 3] {
-        let q = self.0 * nalgebra::Point3::new(p[0], p[1], p[2]);
-        [q.x, q.y, q.z]
-    }
-
-    /// `self` followed by `other`.
-    #[inline]
-    pub fn then(self, other: Self) -> Self {
-        Self(other.0 * self.0)
-    }
-
-    /// The inverse pose.
-    #[inline]
-    pub fn inverse(self) -> Self {
-        Self(self.0.inverse())
-    }
-}
-
-impl Default for Pose {
-    fn default() -> Self {
-        Self::identity()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Cloud, FaceLabel, Pose, WorkingMesh};
+    use super::{Cloud, FaceLabel, WorkingMesh};
     use crate::vec3::vec3;
-    use approx::assert_relative_eq;
 
     #[test]
     fn face_labels_are_one_byte_and_shell_is_zero() {
@@ -292,35 +243,5 @@ mod tests {
         assert_eq!(c.len(), 0);
         let c = Cloud { p: vec![vec3(0.0, 0.0, 0.0)], n: vec![vec3(0.0, 0.0, 1.0)] };
         assert_eq!(c.len(), 1);
-    }
-
-    #[test]
-    fn poses_compose_and_invert() {
-        let quarter_turn_z = nalgebra::Isometry3::from_parts(
-            nalgebra::Translation3::new(1.0, 2.0, 3.0),
-            nalgebra::UnitQuaternion::from_axis_angle(
-                &nalgebra::Vector3::z_axis(),
-                std::f64::consts::FRAC_PI_2,
-            ),
-        );
-        let t = Pose(quarter_turn_z);
-        let p = t.transform_point([1.0, 0.0, 0.0]);
-        assert_relative_eq!(p[0], 1.0, epsilon = 1e-12);
-        assert_relative_eq!(p[1], 3.0, epsilon = 1e-12);
-        assert_relative_eq!(p[2], 3.0, epsilon = 1e-12);
-
-        let back = t.inverse().transform_point(p);
-        assert_relative_eq!(back[0], 1.0, epsilon = 1e-12);
-        assert_relative_eq!(back[1], 0.0, epsilon = 1e-12);
-        assert_relative_eq!(back[2], 0.0, epsilon = 1e-12);
-
-        let round = t.then(t.inverse());
-        let q = round.transform_point([4.0, 5.0, 6.0]);
-        assert_relative_eq!(q[0], 4.0, epsilon = 1e-12);
-        assert_relative_eq!(q[1], 5.0, epsilon = 1e-12);
-        assert_relative_eq!(q[2], 6.0, epsilon = 1e-12);
-
-        let m = Pose::identity().to_homogeneous();
-        assert_eq!(m, nalgebra::Matrix4::identity());
     }
 }

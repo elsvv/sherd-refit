@@ -279,6 +279,15 @@ struct RunArgs {
     /// bound, and the default is half of the machine's physical memory.
     #[arg(long, value_name = "GB")]
     memory_budget: Option<f64>,
+    /// Write roadmap step 7's tier measurement of every accepted candidate to FILE
+    /// (audit §D.1, `sherd_core::measure`).
+    ///
+    /// One extra pass after R §8's assembly — the margin to the pair's second placement, the
+    /// twelve one-ULP neighbours of the pose, two independent redraws of R §3.5's samples, the
+    /// slide along the seam, and the support count — and one extra file. Without the flag the run
+    /// is unchanged, file for file and byte for byte.
+    #[arg(long, value_name = "FILE")]
+    measure: Option<PathBuf>,
 }
 
 impl RunArgs {
@@ -343,6 +352,22 @@ struct SegmentArgs {
     /// half of the machine's physical memory.
     #[arg(long, value_name = "GB")]
     memory_budget: Option<f64>,
+    /// Write audit §D.2's per-fragment object features to FILE
+    /// (`sherd_core::fragment::features`).
+    ///
+    /// Preprocessing only — the wall, the outer-shell sphere, the fracture roughness, the axis of
+    /// rotation and its residual, the rim flag and its diameter — and this is the one pass the
+    /// audit's plan lets run on a collection above 27 fragments, because it is linear in the
+    /// fragment count and matches nothing.
+    #[arg(long, value_name = "FILE")]
+    features: Option<PathBuf>,
+    /// Also read each source file again for its vertex colours (Lab mean and spread).
+    ///
+    /// Off by default because the working mesh has no colours — decimation drops them — so the
+    /// only way to the fabric is a second full read of every scan, which is the most expensive
+    /// thing `--features` can do and is worth nothing on a file with bare `v x y z` lines.
+    #[arg(long, requires = "features")]
+    features_colour: bool,
 }
 
 /// D §9's `--memory-budget GB`: the flag when it is given, half of physical memory when it is not.
@@ -634,9 +659,37 @@ fn segment(args: &SegmentArgs) -> Result<()> {
     // R's `segment_only` ends here: the caches, then the segmentation preview (V4-D7).
     let fragments: Vec<sherd_core::fragment::Fragment> =
         results.into_iter().map(|r| r.expect("no fragment failed").fragment).collect();
+    if let Some(path) = &args.features {
+        write_features(&fragments, path, args.features_colour)?;
+    }
     for file in pipeline::write_segmentation_preview(&args.out, &fragments)? {
         println!("{}", file.display());
     }
+    Ok(())
+}
+
+/// Audit §D.2's per-fragment feature table, as `segment --features FILE` writes it.
+///
+/// The colours are optional and separate because they are the only part that reads a file again:
+/// R §3.3's decimation drops the vertex colours, so a Lab mean has to come from the source scan.
+/// `mixed_all` and `synthetic_170` are 164 scans each, which is why this is a flag rather than
+/// the default.
+fn write_features(
+    fragments: &[sherd_core::fragment::Fragment],
+    path: &std::path::Path,
+    colour: bool,
+) -> Result<()> {
+    use sherd_core::fragment::features;
+
+    let rows = features::table(fragments, colour);
+    let coloured = rows.iter().filter(|f| f.lab_mean.is_some()).count();
+    features::write_table(&rows, path).with_context(|| format!("writing {}", path.display()))?;
+    println!(
+        "{} feature rows in {} ({} with vertex colours)",
+        rows.len(),
+        path.display(),
+        coloured
+    );
     Ok(())
 }
 
@@ -698,6 +751,7 @@ fn run(args: &RunArgs) -> Result<()> {
         adapter: resolved.adapter.clone(),
         memory: budget(args.memory_budget),
         watch: watch_signals(),
+        measure: args.measure.clone(),
     };
     if args.force && !args.no_cache {
         clear_caches(&args.input, &args.out)?;

@@ -407,6 +407,16 @@ impl SurfaceLadder {
         }
     }
 
+    /// The moving cloud of the two fracture rungs — B's `pc_frac` in B's own frame.
+    ///
+    /// The two probes of `measure` read a pose difference *at the fragment* rather than at the
+    /// file origin ([`pose_gap::cloud_t`](crate::matching::icp::pose_gap::cloud_t)), and this is
+    /// the cloud whose centroid they read it at: the fracture samples are what the last rung
+    /// registers and what a slide along the seam moves.
+    pub fn fracture_source(&self) -> &[[f64; 3]] {
+        &self.frac_source
+    }
+
     /// R §5.6's four rungs over those clouds.
     pub fn rungs(&self) -> [Rung<'_>; 4] {
         ladder::stage2_rungs(

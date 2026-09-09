@@ -28,10 +28,15 @@ fn scratch(tag: &str) -> PathBuf {
 
 /// Runs `run INPUT --out OUT` and returns its standard output.
 fn run(input: &Path, out: &Path) -> String {
-    let result = Command::new(env!("CARGO_BIN_EXE_sherd-refit-rs"))
-        .args(["run", &input.to_string_lossy(), "--out", &out.to_string_lossy()])
-        .output()
-        .expect("the binary runs");
+    run_with(input, out, &[])
+}
+
+/// The same with extra flags, for the switches whose gate is that they change nothing.
+fn run_with(input: &Path, out: &Path, extra: &[&str]) -> String {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_sherd-refit-rs"));
+    command.args(["run", &input.to_string_lossy(), "--out", &out.to_string_lossy()]);
+    command.args(extra);
+    let result = command.output().expect("the binary runs");
     assert!(result.status.success(), "run failed: {}", String::from_utf8_lossy(&result.stderr));
     String::from_utf8_lossy(&result.stdout).into_owned()
 }
@@ -146,6 +151,78 @@ fn two_runs_agree(input: &Path) {
 #[test]
 fn two_runs_on_the_slab_write_byte_identical_outputs() {
     two_runs_agree(&repo_root().join("fixtures/slab/input"));
+}
+
+/// Task M1's off switch: `--measure` adds one file and moves nothing.
+///
+/// The audit's rule for every new behaviour is that switching it off reproduces today's outputs
+/// byte for byte, and the measurement pass is the easiest case to get wrong — it runs inside the
+/// pipeline, on the fragments and the candidates the run has just produced. So the gate is stated
+/// the other way round as well: a run **with** `--measure` must write the same bytes as a run
+/// without it, because the pass reads and does not write.
+#[test]
+fn a_measured_run_writes_the_same_outputs_and_one_more_file() {
+    let input = repo_root().join("fixtures/slab/input");
+    let plain_dir = scratch("plain");
+    let measured_dir = scratch("measured");
+    let dump = measured_dir.join("..").join(format!("measure-{}.json", std::process::id()));
+
+    run(&input, &plain_dir);
+    run_with(&input, &measured_dir, &["--measure", &dump.to_string_lossy()]);
+
+    let plain = outputs(&plain_dir);
+    let measured = outputs(&measured_dir);
+    assert_eq!(
+        plain.keys().collect::<Vec<&String>>(),
+        measured.keys().collect::<Vec<&String>>(),
+        "--measure writes its file where it was asked to and adds nothing to the output directory"
+    );
+    for (name, bytes) in &plain {
+        let other = &measured[name];
+        if name == "report.json" {
+            assert_eq!(report_without_timings(bytes), report_without_timings(other), "{name}");
+        } else if name == "report.md" {
+            assert_eq!(markdown_without_timings(bytes), markdown_without_timings(other), "{name}");
+        } else {
+            assert!(bytes == other, "{name}: --measure must not move a byte of the run");
+        }
+    }
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&dump).expect("the measurement file")).unwrap();
+    let rows = json["rows"].as_array().expect("a rows array");
+    let accepted = json["accepted"].as_u64().expect("an accepted count");
+    assert_eq!(rows.len() as u64, accepted, "one row per accepted candidate");
+    assert!(accepted > 0, "the slab pair has an accepted candidate to measure");
+    for row in rows {
+        // Every probe answered, and the three redraws are the run's own plus two.
+        assert!(row["determined_deg"].as_f64().expect("a determinedness").is_finite());
+        assert!(row["slide_t"].as_f64().expect("a slide").is_finite());
+        assert_eq!(row["resamples"].as_array().expect("two redraws").len(), 2);
+        assert!(row["placements"].as_u64().expect("a placement count") >= 1);
+    }
+
+    std::fs::remove_file(&dump).ok();
+    std::fs::remove_dir_all(&plain_dir).ok();
+    std::fs::remove_dir_all(&measured_dir).ok();
+}
+
+/// `measure`'s "different placement" is the parity harness's, value for value.
+///
+/// `sherd_core::measure` cannot import the constant — `sherd-parity` sits above it — and the two
+/// have to be the same number for audit §D.1's sentence ("placements more than one wall apart,
+/// `candidates.rs`'s `SAME_PLACEMENT_T`") to mean what it says. `sherd-cli` is the crate that sees
+/// both, so the tie is asserted here.
+#[test]
+#[allow(
+    clippy::float_cmp,
+    reason = "the two constants are one literal written twice; the equality is the assertion"
+)]
+fn the_margin_and_the_parity_row_call_the_same_thing_a_different_placement() {
+    assert_eq!(
+        sherd_core::measure::SAME_PLACEMENT_T,
+        sherd_parity::stages::candidates::SAME_PLACEMENT_T
+    );
 }
 
 /// R §13's own gate, on the set it is stated for: exactly the joins 021–094 and 094–104, with 007

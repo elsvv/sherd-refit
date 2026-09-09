@@ -218,6 +218,12 @@ pub struct RunOptions {
     /// D §5's cancellation flag and progress callback; neither by default
     /// ([`progress`](crate::progress)).
     pub watch: Watch,
+    /// Roadmap step 7's measurement file (audit §D.1, [`crate::measure`]), or `None`.
+    ///
+    /// `Some(path)` adds one pass **after** R §8's assembly and one file; it reads what the run
+    /// has already computed and writes nothing else, so a run with it unset is byte for byte the
+    /// run that came before the flag existed.
+    pub measure: Option<PathBuf>,
 }
 
 impl Default for RunOptions {
@@ -235,6 +241,7 @@ impl Default for RunOptions {
             adapter: None,
             memory: Budget::default_for_machine(),
             watch: Watch::default(),
+            measure: None,
         }
     }
 }
@@ -563,6 +570,34 @@ pub fn run_with(
     let used: Vec<(FragId, FragId)> =
         assembly.used.iter().map(|&i| (candidates[i].a, candidates[i].b)).collect();
 
+    // 3b. roadmap step 7's measurement (audit §D.1), off unless `--measure` asked for it.
+    //
+    // Here and not later: it needs R §6.1's fracture BVHs, which the next block releases, and
+    // R §8's `used`, which the line above has just resolved. It reads the run and writes one
+    // file; nothing below it changes because of it.
+    let mut measured = None;
+    if let Some(path) = &options.measure {
+        let started = Instant::now();
+        let report = crate::measure::measure(
+            engine,
+            &fragments,
+            &candidates,
+            &assembly.used,
+            params,
+            thickness,
+        );
+        let json = serde_json::to_string_pretty(&report)
+            .map_err(|e| Error::write(path, std::io::Error::other(e)))?;
+        std::fs::write(path, json).map_err(|e| Error::write(path, e))?;
+        tracing::info!(
+            rows = report.rows.len(),
+            seconds = started.elapsed().as_secs_f64(),
+            out = %path.display(),
+            "measurement written"
+        );
+        measured = Some(path.clone());
+    }
+
     // Both BVHs have had their last reader (audit §B.3): R §6.1's fracture tree ended with the
     // last pair, R §6.4's whole-mesh tree with the last `try_place`. R §8.2's recentring reads
     // only the surface samples, so what follows — R §9's refinement and R §11's writers, the two
@@ -609,6 +644,7 @@ pub fn run_with(
     // 5. outputs (R §11)
     let started = Instant::now();
     let mut written = Vec::new();
+    written.extend(measured);
     let stats: Vec<FragmentStats> = fragments.iter().map(FragmentStats::of).collect();
     let rejected: Vec<(usize, String)> =
         assembly.rejected.iter().map(|r| (r.candidate, r.reason.message(&names))).collect();

@@ -207,6 +207,82 @@ fn a_measured_run_writes_the_same_outputs_and_one_more_file() {
     std::fs::remove_dir_all(&measured_dir).ok();
 }
 
+/// Roadmap item 3's off switch, and the rule it turns on.
+///
+/// Two things at once, because they are one statement. `--tiers off` writes exactly the file set
+/// and the key set the run wrote before the tier existed — no band on a candidate, no `tiers`
+/// block in either JSON file, no new section in `report.md` — which is the off switch audit §E
+/// requires of every new behaviour. `--tiers on`, the default, writes a band everywhere and
+/// **R §8 assembles from the confirmed band alone**: every join the assembly used has to carry it.
+#[test]
+fn the_tier_is_an_off_switch_and_the_assembly_is_built_from_the_confirmed_band() {
+    let input = repo_root().join("fixtures/slab/input");
+    let off_dir = scratch("tiers-off");
+    let on_dir = scratch("tiers-on");
+    run_with(&input, &off_dir, &["--tiers", "off"]);
+    run(&input, &on_dir);
+
+    let read = |dir: &Path, name: &str| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(dir.join(name)).expect(name)).expect("valid JSON")
+    };
+    let off_report = read(&off_dir, "report.json");
+    let off_transforms = read(&off_dir, "transforms.json");
+    assert!(off_report.get("tiers").is_none(), "no tier block with the pass off");
+    assert!(off_report["params"].get("tiers").is_none(), "and no tier set in the parameters");
+    assert!(off_transforms.get("tiers").is_none(), "nor in transforms.json");
+    for candidate in off_report["candidates"].as_array().expect("candidates") {
+        assert!(candidate.get("tier").is_none(), "no band on a candidate with the pass off");
+    }
+    let off_markdown = std::fs::read_to_string(off_dir.join("report.md")).expect("report.md");
+    for section in ["## Confirmed joins", "## Probable joins", "## Candidates by fragment"] {
+        assert!(!off_markdown.contains(section), "{section} is not written with the pass off");
+    }
+
+    let on_report = read(&on_dir, "report.json");
+    let on_transforms = read(&on_dir, "transforms.json");
+    assert_eq!(on_report["params"]["tiers"]["min_tight"], 0.35, "M1 §3's chosen set");
+    assert_eq!(on_report["params"]["tiers"]["max_gap_t"], 0.015);
+    assert!(on_report["tiers"]["confirmed"].as_u64().expect("a confirmed count") >= 1);
+    assert!(!on_transforms["tiers"].as_array().expect("a band per pair").is_empty());
+    let used = on_report["joins_used"].as_array().expect("joins_used");
+    assert!(!used.is_empty(), "the slab pair is confirmed and placed");
+    for join in used {
+        assert_eq!(join["tier"], "confirmed", "R §8 builds from the confirmed band alone");
+    }
+    for candidate in on_report["candidates"].as_array().expect("candidates") {
+        let tier = candidate["tier"].as_str().expect("a band on every candidate");
+        assert!(matches!(tier, "confirmed" | "probable" | "rejected"), "{tier}");
+        // A refused candidate is never probed, and a probed one carries every quantity the band
+        // was decided on.
+        if tier == "rejected" {
+            assert!(candidate.get("evidence").is_none());
+        } else {
+            let e = &candidate["evidence"];
+            assert!(e["slide_t"].as_f64().expect("a slide").is_finite());
+            assert!(e["support"].as_u64().is_some());
+            assert!(e["resample_accept"].as_u64().expect("the draws") >= 1);
+            assert_eq!(
+                e.get("failed").is_none(),
+                tier == "confirmed",
+                "a confirmed join failed no test and a probable one names the test it failed"
+            );
+        }
+    }
+    let on_markdown = std::fs::read_to_string(on_dir.join("report.md")).expect("report.md");
+    for section in [
+        "## Confirmed joins",
+        "## Probable joins",
+        "## Rejected",
+        "## Candidates by \
+                     fragment",
+    ] {
+        assert!(on_markdown.contains(section), "{section} is missing");
+    }
+
+    std::fs::remove_dir_all(&off_dir).ok();
+    std::fs::remove_dir_all(&on_dir).ok();
+}
+
 /// `measure`'s "different placement" is the parity harness's, value for value.
 ///
 /// `sherd_core::measure` cannot import the constant — `sherd-parity` sits above it — and the two

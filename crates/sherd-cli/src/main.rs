@@ -20,6 +20,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use sherd_core::fragment::cache;
 use sherd_core::memory::Budget;
+use sherd_core::tiers::Thresholds;
 use sherd_core::{
     ALGO_REF, Backend, CACHE_VERSION, CORE_VERSION, GIT_COMMIT, Params, collection, pipeline,
 };
@@ -40,6 +41,12 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one of these is parsed once, at startup, and then read; `run` carries R §1.4's \
+              twenty-one parameter flags and roadmap item 3's eleven, and clap's derive cannot \
+              box a variant's `Args` type"
+)]
 enum Command {
     /// Assemble a collection of fragments (R §2–§11).
     Run(RunArgs),
@@ -279,6 +286,55 @@ struct RunArgs {
     /// bound, and the default is half of the machine's physical memory.
     #[arg(long, value_name = "GB")]
     memory_budget: Option<f64>,
+    /// Roadmap item 3's confidence tier (audit §D.1): `on` — the default — or `off`.
+    ///
+    /// With the tier on, every accepted candidate is probed once more — the margin to the pair's
+    /// second placement, the twelve one-ULP neighbours of the pose, two independent redraws of
+    /// R §3.5's samples, a ±0.5 t push along the seam, and how many independent joins of the
+    /// collection agree with the placement — and lands in one of three bands. **R §8 assembles
+    /// from the confirmed band and from nothing else**; the probable band is listed in
+    /// `report.md` and never placed. The pass costs about half a run again.
+    ///
+    /// `--tiers off` is the off switch every new behaviour has: no probe, no band, R §8's own
+    /// `accepted` gate, and every output byte for byte the bytes it was before the tier existed.
+    #[arg(long, default_value_t = Switch::On, value_name = "on|off")]
+    tiers: Switch,
+    /// Tight contact a confirmed join needs (M1 §3; R §6.5 ships 0.25).
+    #[arg(long, default_value_t = Thresholds::default().min_tight)]
+    tier_min_tight: f64,
+    /// `t`; median fracture gap a confirmed join may not exceed (M1 §3; R §6.5's own limit is
+    /// 0.02-0.03 t).
+    #[arg(long, default_value_t = Thresholds::default().max_gap_t)]
+    tier_max_gap: f64,
+    /// `t`; shortest seam a confirmed join must share (M1 §3; R §6.5 ships 3).
+    #[arg(long, default_value_t = Thresholds::default().min_seam)]
+    tier_min_seam: f64,
+    /// Shell-normal agreement across the seam a confirmed join needs (M1 §3; R §6.5 ships 0.8).
+    #[arg(long, default_value_t = Thresholds::default().min_cont_n)]
+    tier_min_cont_n: f64,
+    /// Penetrating surface fraction a confirmed join may not exceed (M1 §3; R §6.5 ships 0.005).
+    #[arg(long, default_value_t = Thresholds::default().max_pen)]
+    tier_max_pen: f64,
+    /// `t`; how far the pose may stay from where it started after a +/-0.5 t push along the seam.
+    #[arg(long, default_value_t = Thresholds::default().max_slide_t)]
+    tier_max_slide: f64,
+    /// Factor a confirmed join must beat the pair's second placement by, when the margin is the
+    /// arm that confirms it.
+    #[arg(long, default_value_t = Thresholds::default().min_margin)]
+    tier_margin: f64,
+    /// Independent agreeing joins a confirmed join needs, when the support count is the arm that
+    /// confirms it; 0 makes that arm always true, which disables the disjunction.
+    #[arg(long, default_value_t = Thresholds::default().min_support)]
+    tier_support: u32,
+    /// Degrees; worst rotation over the pose's twelve one-ULP neighbours a confirmed join may
+    /// show. Off by default: M1 measured the whole range at 1.6e-14 to 4.1e-7 degrees, so there is
+    /// no threshold in it and the number is reported instead.
+    #[arg(long, value_name = "DEG")]
+    tier_max_determined_deg: Option<f64>,
+    /// How many of the three sample draws must accept a confirmed join. Off by default: requiring
+    /// all three costs six of M1's 136 confirmed joins and removes no false one.
+    #[arg(long, value_name = "N")]
+    tier_resample_accept: Option<u32>,
     /// Write roadmap step 7's tier measurement of every accepted candidate to FILE
     /// (audit §D.1, `sherd_core::measure`).
     ///
@@ -318,8 +374,41 @@ impl RunArgs {
             surface_points: self.surface_points,
             frac_per_t2: self.frac_density,
             seed: self.seed,
+            tiers: match self.tiers {
+                Switch::Off => None,
+                Switch::On => Some(Thresholds {
+                    min_tight: self.tier_min_tight,
+                    max_gap_t: self.tier_max_gap,
+                    min_seam: self.tier_min_seam,
+                    min_cont_n: self.tier_min_cont_n,
+                    max_pen: self.tier_max_pen,
+                    max_slide_t: self.tier_max_slide,
+                    min_margin: self.tier_margin,
+                    min_support: self.tier_support,
+                    max_determined_deg: self.tier_max_determined_deg,
+                    min_resample_accept: self.tier_resample_accept,
+                }),
+            },
             ..Params::default()
         }
+    }
+}
+
+/// A flag that is on or off by name, so that `--tiers off` reads the way the brief writes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum Switch {
+    /// The behaviour is computed.
+    On,
+    /// The behaviour is skipped, and the run is the run it was without it.
+    Off,
+}
+
+impl std::fmt::Display for Switch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::On => "on",
+            Self::Off => "off",
+        })
     }
 }
 
@@ -1031,7 +1120,10 @@ fn requested_stages(requested: &[String]) -> Result<Vec<Stage>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Backend, Cli, Params, pipeline, pool_threads, requested_stages, schedule_workers};
+    use super::{
+        Backend, Cli, Params, Thresholds, pipeline, pool_threads, requested_stages,
+        schedule_workers,
+    };
     use clap::{CommandFactory, Parser};
     use sherd_parity::stages::Stage;
 
@@ -1199,12 +1291,52 @@ mod tests {
                 assert_eq!(args.backend, Backend::Auto);
                 assert_eq!(
                     args.params(),
-                    Params::default(),
+                    Params { tiers: Some(Thresholds::default()), ..Params::default() },
                     "no flag given must leave every threshold of R §1.1 at its default"
                 );
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// `--tiers off` is the off switch, and it is exactly `Params::default()`.
+    ///
+    /// The library's default is the tier pass **off** and `run`'s default is the tier pass **on**,
+    /// and the difference is deliberate: `Params::default()` is R §1.1's 46 knobs and nothing
+    /// else, which is what the parity harness compares against a reference fixture and what
+    /// `bench` measures the matcher with, while a museum run wants the band. `--tiers off` puts
+    /// `run` back on the library's default, and that is the switch the byte-identity check uses.
+    #[test]
+    fn tiers_off_is_the_library_default_and_tiers_on_is_the_measured_set() {
+        let params = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().command {
+            super::Command::Run(a) => a.params(),
+            other => panic!("{other:?}"),
+        };
+        let base = ["sherd-refit-rs", "run", "in", "--out", "out"];
+        let off: Vec<&str> = base.iter().copied().chain(["--tiers", "off"]).collect();
+        assert_eq!(params(&off), Params::default());
+        assert_eq!(Params::default().tiers, None, "and the library's own default is off");
+
+        let on = params(&base).tiers.expect("`run` computes a tier unless told not to");
+        assert_eq!(on, Thresholds::default(), "M1 §3's chosen set, flag for flag");
+
+        let tuned: Vec<&str> = base
+            .iter()
+            .copied()
+            .chain([
+                "--tier-max-gap",
+                "0.0064",
+                "--tier-support",
+                "0",
+                "--tier-resample-accept",
+                "3",
+            ])
+            .collect();
+        let tuned = params(&tuned).tiers.expect("still on");
+        assert!((tuned.max_gap_t - 0.0064).abs() < 1e-12);
+        assert_eq!(tuned.min_support, 0, "which disables the support arm of the disjunction");
+        assert_eq!(tuned.min_resample_accept, Some(3));
+        assert!((tuned.min_tight - 0.35).abs() < 1e-12, "and the rest keep M1's values");
     }
 
     /// R §1.4's three renamed flags, and one that is not renamed, through the mapping.

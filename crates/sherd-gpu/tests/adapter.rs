@@ -687,18 +687,40 @@ fn the_icp_rung_crossover_is_a_candidate_count() {
             let cpu = CPU.icp_rung(&batch);
             let cpu_time = started.elapsed().as_secs_f64() * 1e3;
             let started = std::time::Instant::now();
-            let before = executor.stats().icp.snapshot().on_device;
+            let before = executor.stats().icp.snapshot();
             let out = executor.icp_rung(&batch);
             let gpu_time = started.elapsed().as_secs_f64() * 1e3;
-            let on_device = executor.stats().icp.snapshot().on_device > before;
+            let after = executor.stats().icp.snapshot();
+            let on_device = after.on_device > before.on_device;
+            // A readback the decoder refused is task H1's mitigation firing, not a routing
+            // decision: the batch reached the device and came back to the CPU because the driver
+            // aborted the command buffer. That happens whenever a second GPU user is on this
+            // adapter, and `cargo test` is one — the adapter tests run on ten threads over one
+            // device. It is counted, so the assertion can tell the two apart instead of being
+            // flaky (`notes/2026-09-09-h1-wd1.md` §2, task F).
+            let refused = after.corrupt - before.corrupt;
             assert_eq!(cpu.len(), out.len());
             println!(
                 "  {candidates:>10}  {points:>6}  {cpu_time:>6.1}   {gpu_time:>6.1}   {:>5.2}x  {}",
                 cpu_time / gpu_time,
-                if on_device { "device" } else { "cpu (below the threshold)" }
+                if on_device {
+                    "device".to_owned()
+                } else if refused > 0 {
+                    format!("cpu ({refused} readback(s) refused)")
+                } else {
+                    "cpu (below the threshold)".to_owned()
+                }
             );
             let wanted = sherd_gpu::icp::on_device(candidates, points);
-            assert_eq!(on_device, wanted, "{candidates} × {points} went the wrong way");
+            assert!(
+                on_device == wanted || (wanted && refused > 0),
+                "{candidates} × {points} went the wrong way: on_device {on_device}, \
+                 wanted {wanted}, {refused} refused readback(s), \
+                 {} calls / {} delegated / {} host errors",
+                after.calls - before.calls,
+                after.delegated - before.delegated,
+                after.host_errors - before.host_errors
+            );
             // The ratios are printed and not asserted. `cargo test` runs these tests in parallel
             // on the same ten cores and the same one GPU, so a timing assertion here would be
             // measuring the test harness; the numbers the threshold was set from are in

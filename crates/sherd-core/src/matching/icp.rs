@@ -955,6 +955,11 @@ mod tests {
     }
 
     /// The worst distance between two poses over a set of points, and the angle between them.
+    ///
+    /// The angle is [`pose_gap::trace_deg`]'s, which is what these tests want and what the audit's
+    /// §B.9 consolidation left this helper needing (defect V7-D5): the *distance* half is a worst
+    /// case over a cloud, which `pose_gap` deliberately does not offer, but the angle line was the
+    /// same expression written out for the fifth time.
     fn pose_gap(a: &Matrix4<f64>, b: &Matrix4<f64>, points: &[[f64; 3]]) -> (f64, f64) {
         let mut ra = Matrix3::zeros();
         let mut rb = Matrix3::zeros();
@@ -964,8 +969,7 @@ mod tests {
                 rb[(i, j)] = b[(i, j)];
             }
         }
-        let trace = (ra.transpose() * rb).trace();
-        let angle = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos().to_degrees();
+        let angle = pose_gap::trace_deg(a, b);
         let mut worst = 0.0_f64;
         for p in points {
             let q = Vector3::new(p[0], p[1], p[2]);

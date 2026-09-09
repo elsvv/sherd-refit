@@ -21,6 +21,7 @@ use std::sync::OnceLock;
 use sherd_core::Params;
 use sherd_core::executor::Engine;
 use sherd_core::fragment::Fragment;
+use sherd_core::matching::icp::pose_gap;
 use sherd_core::matching::pair::Pair;
 
 fn slab_input() -> PathBuf {
@@ -65,6 +66,10 @@ fn relative_truth() -> ([[f64; 3]; 3], [f64; 3]) {
 
 /// `tests/test_synthetic.py::pose_error`: the rotation of `R_estᵀ R_true` in degrees, and the
 /// largest displacement the two poses give any of `points`.
+///
+/// The angle comes off [`pose_gap::angle_from_trace`] rather than being written out again
+/// (defect V7-D5); the trace is formed here because the truth is a `[[f64; 3]; 3]` and not a
+/// `Pose`, and the displacement is a worst case over a cloud, which `pose_gap` does not offer.
 fn pose_error(
     r: &nalgebra::Matrix3<f64>,
     tau: &nalgebra::Vector3<f64>,
@@ -77,7 +82,7 @@ fn pose_error(
             trace += r[(j, i)] * truth.0[j][i];
         }
     }
-    let angle = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos().to_degrees();
+    let angle = pose_gap::angle_from_trace(trace);
     let mut worst = 0.0_f64;
     for p in points {
         let mut d = 0.0;

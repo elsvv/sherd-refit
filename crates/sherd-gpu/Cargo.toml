@@ -22,5 +22,11 @@ pollster.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+# `examples/repeat_probe` is task H1's reproduction, and what it has to show is the `warn!` a
+# refused readback logs — the census of experiment E1. An example cannot print one without a
+# subscriber.
+tracing-subscriber.workspace = true
+
 [lints]
 workspace = true

@@ -41,6 +41,7 @@ use crate::matching::pair::Candidate;
 use crate::matching::verify::Scores;
 use crate::memory::{self, Budget, MemorySemaphore, reservation};
 use crate::mesh::Mesh;
+use crate::objects::{FeatureKey, ObjectReport};
 use crate::params::Params;
 use crate::review::ReviewIndex;
 use crate::tiers::{Evidence, Tier, TierCounts, TierJoin, TierReport};
@@ -458,6 +459,10 @@ pub struct ReportJson {
     /// a `constraints.json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub constraints: Option<ConstraintReport>,
+    /// Audit §D.2's objects — every group with its consensus, its rim diameter and the members
+    /// that consensus rejects — absent from a run with `--objects off`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objects: Option<ObjectReport>,
 }
 
 /// A 4×4 as the nested lists both JSON files carry.
@@ -573,6 +578,9 @@ pub struct Outcome<'a> {
     /// Which pairs got a review image, or `None` without `--review-images` — in which case the
     /// per-fragment index has no `image` column.
     pub review: Option<&'a ReviewIndex>,
+    /// Roadmap item 4's objects, their consensus and the joins it demoted, or `None` on a run with
+    /// `--objects off` — in which case `## Objects` and the `objects` key are absent.
+    pub objects: Option<&'a ObjectReport>,
 }
 
 /// R §11.2's `report.json` and R §11.3's `report.md`, both into `out_dir`.
@@ -646,6 +654,7 @@ pub fn report_json(
         memory: memory.cloned(),
         tiers: outcome.tiers.map(|t| t.pair_counts(outcome.candidates)),
         constraints: outcome.constraints.cloned(),
+        objects: outcome.objects.cloned(),
     }
 }
 
@@ -713,6 +722,7 @@ pub fn report_markdown(
         lines.push(format!("- not assembled (no confident join): {}", join_names(&singles, names)));
     }
     lines.extend(constraint_section(outcome));
+    lines.extend(object_section(outcome));
     lines.push(String::new());
     lines.push("## Joins used".to_owned());
     lines.push(String::new());
@@ -849,6 +859,138 @@ fn constraint_section(outcome: &Outcome<'_>) -> Vec<String> {
             if e.satisfied { "yes" } else { "**no**" },
             e.outcome,
         ));
+    }
+    lines
+}
+
+/// Audit §D.2's `## Objects`: every group read as a vessel, with the consensus its members agree
+/// on and the ones that consensus does not fit.
+///
+/// Nothing at all on a run with `--objects off`, which is what keeps such a run's `report.md` byte
+/// for byte the one before roadmap item 4 existed. The section stands under `## Constraints` and
+/// above the joins, because "which pots are these" is the question a conservator asks of the
+/// groups they have just read.
+///
+/// **A deviation printed here has not refused anything.** M1 §4 measured every one of these
+/// features on every collection with real object ids and the best AUC is 0.740, under audit §D.2's
+/// own 0.800 rule, so the shortlist that may demote is empty and every row below reports. The
+/// `demotes` column says which of them would act if a later measurement put them on that list.
+fn object_section(outcome: &Outcome<'_>) -> Vec<String> {
+    let Some(report) = outcome.objects else { return Vec::new() };
+    let mut lines: Vec<String> = vec![String::new(), "## Objects".to_owned(), String::new()];
+    let rejects: usize = report.objects.iter().map(|o| o.rejects.len()).sum();
+    lines.push(format!(
+        "{} object{} — one per assembled group — with the median and MAD its members agree on. \
+         {} member{} sit{} outside its object's consensus, and {} join{} demoted. A feature may \
+         **veto** only where its measured separation exceeds audit §D.2's own AUC of 0.800; task \
+         M1 §4 measured the best of them at 0.740 on the sets with real object ids, so on the \
+         shipped settings these numbers report and none of them refuses a join.",
+        report.objects.len(),
+        if report.objects.len() == 1 { "" } else { "s" },
+        rejects,
+        if rejects == 1 { "" } else { "s" },
+        if rejects == 1 { "s" } else { "" },
+        report.demotions.len(),
+        if report.demotions.len() == 1 { " was" } else { "s were" },
+    ));
+    if report.merges > 0 {
+        lines.push(String::new());
+        lines.push(format!(
+            "{} pair{} of groups merged through a confirmed join (audit §D.2 (c)), under the \
+             penetration test across both groups and consistency with every cross-group join the \
+             gate admits.",
+            report.merges,
+            if report.merges == 1 { "" } else { "s" },
+        ));
+    }
+    lines.push(String::new());
+    lines.push(
+        "| object | fragments | joins | consensus (median +/- MAD) | rim | outside it |".to_owned(),
+    );
+    lines.push("|---|---|---:|---|---|---|".to_owned());
+    for o in &report.objects {
+        let consensus = o
+            .consensus
+            .iter()
+            .filter(|c| FeatureKey::REPORTED.contains(&c.feature))
+            .map(|c| format!("{} {:.3} +/- {:.3} (n={})", c.feature.key(), c.median, c.mad, c.n))
+            .collect::<Vec<String>>()
+            .join("; ");
+        let outside = o
+            .rejects
+            .iter()
+            .map(|r| {
+                let d = &r.deviations[0];
+                format!(
+                    "{} ({} {:.3}, {:.1} MAD{})",
+                    r.fragment,
+                    d.feature.key(),
+                    d.value,
+                    d.mads,
+                    if d.demoting { ", demotes" } else { "" }
+                )
+            })
+            .collect::<Vec<String>>()
+            .join("; ");
+        lines.push(format!(
+            "| {} | {} | {} | {} | {} | {} |",
+            o.group,
+            if o.fragments.is_empty() { "-".to_owned() } else { o.fragments.join(", ") },
+            o.joins,
+            if consensus.is_empty() { "-".to_owned() } else { consensus },
+            o.rim_diameter.map_or_else(|| "-".to_owned(), |d| format!("{d:.1}")),
+            if outside.is_empty() { "-".to_owned() } else { outside },
+        ));
+    }
+    lines.extend(demotion_tables(report));
+    lines
+}
+
+/// The two lists that follow `## Objects` when a run has anything to put in them: the joins the
+/// pass demoted, and what the operator's own two lists say about the objects it built.
+fn demotion_tables(report: &ObjectReport) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    if !report.demotions.is_empty() {
+        lines.push(String::new());
+        lines.push("### Joins the object pass demoted".to_owned());
+        lines.push(String::new());
+        lines.push(
+            "Confirmed joins moved to **probable**, never rejected: the conservator decides, with \
+             the numbers beside the review image."
+                .to_owned(),
+        );
+        lines.push(String::new());
+        lines.push("| A | B | arm | why |".to_owned());
+        lines.push("|---|---|---|---|".to_owned());
+        for d in &report.demotions {
+            lines.push(format!("| {} | {} | {} | {} |", d.a, d.b, d.arm.label(), d.reason));
+        }
+    }
+    for (heading, pairs, sentence) in [
+        (
+            "`same_object` pairs the assembly did not put together",
+            &report.same_object_split,
+            "The operator says these belong to one vessel and the geometry has not joined them; \
+             nothing was forced, and a constraint never edits a score.",
+        ),
+        (
+            "`different_object` pairs that ended up in one object",
+            &report.different_object_together,
+            "Both the join veto and the merge test refuse this, so the list is expected to be \
+             empty and exists to prove it.",
+        ),
+    ] {
+        if pairs.is_empty() {
+            continue;
+        }
+        lines.push(String::new());
+        lines.push(format!("### {heading}"));
+        lines.push(String::new());
+        lines.push(sentence.to_owned());
+        lines.push(String::new());
+        for [a, b] in pairs {
+            lines.push(format!("- {a} — {b}"));
+        }
     }
     lines
 }
@@ -1450,6 +1592,7 @@ mod tests {
             tiers: None,
             constraints: None,
             review: None,
+            objects: None,
         };
         let timings = super::Timings::from_iter([
             ("preprocess".to_owned(), 16.3),
@@ -1495,6 +1638,7 @@ mod tests {
             tiers: None,
             constraints: None,
             review: None,
+            objects: None,
         };
         let stats = Vec::new();
         let timings = super::Timings::from_iter([("matching".to_owned(), 1.25)]);
@@ -1553,6 +1697,7 @@ mod tests {
             tiers: None,
             constraints: None,
             review: None,
+            objects: None,
         };
         let timings = super::Timings::from_iter([("matching".to_owned(), 12.34)]);
         let md = report_markdown(&stats, 3.75, &outcome, &timings, &Params::default());
@@ -1685,6 +1830,7 @@ mod tests {
                 tiers,
                 constraints: None,
                 review: None,
+                objects: None,
             };
             report_markdown(&stats, 3.75, &outcome, &timings, &Params::default())
         };

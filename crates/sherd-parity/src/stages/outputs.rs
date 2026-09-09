@@ -451,6 +451,7 @@ fn markdown_row(
         tiers: None, // the reference wrote no band, and this is compared against its own file
         constraints: None,
         review: None,
+        objects: None,
     };
     let ours = report::report_markdown(
         &theirs.fragments,

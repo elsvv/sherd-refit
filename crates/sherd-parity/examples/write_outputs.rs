@@ -169,6 +169,7 @@ fn main() -> Result<()> {
         tiers: None,
         constraints: None,
         review: None,
+        objects: None,
     };
     let timings = Timings::from_iter([("output".to_owned(), 0.0)]);
     // No memory block: the harness rebuilds the reference's own file, and audit §B.3's

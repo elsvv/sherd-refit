@@ -23,8 +23,10 @@ use crate::params::Params;
 use crate::types::FragId;
 
 use super::consistency::{agrees, disagreement, penetration};
-use super::constraints::Resolved;
+use super::constraints::{Resolved, Veto};
 use super::groups::{Grouping, Piece};
+use crate::objects::ObjectParams;
+use crate::tiers::Tier;
 
 /// Why an accepted join did not become part of the assembly (R §8).
 ///
@@ -60,6 +62,23 @@ pub enum Rejection {
     },
     /// Both fragments are placed, in **different** groups. R §8 does not merge groups.
     MergesGroups,
+    /// The same, on a run that *can* merge them (roadmap item 4): this join is not confirmed, and
+    /// audit §D.2 (c) gives the merge to a confirmed join alone.
+    ///
+    /// A separate variant, and a separate sentence, because the two are different facts about the
+    /// run: `MergesGroups` says the tool cannot do it, this says the evidence does not justify it.
+    MergeNotConfirmed,
+    /// A merge (audit §D.2 (c)) that some other join between the two groups contradicts.
+    MergeInconsistent {
+        /// That join's first fragment.
+        a: FragId,
+        /// Its second.
+        b: FragId,
+        /// How far the merged poses and that join disagree, in degrees.
+        angle: f64,
+        /// And in wall thicknesses of the two groups together.
+        distance: f64,
+    },
     /// `constraints.json` refuses the pair (audit §D.1): `must_not_join`, or `different_object`.
     ///
     /// Not R §8's own refusal, and it says so: the operator's word is the reason, and the report
@@ -88,6 +107,14 @@ impl Rejection {
                 format!("inconsistent with the assembled poses ({angle:.1} deg, {distance:.2} t)")
             }
             Self::MergesGroups => "would merge two groups (not supported)".to_owned(),
+            Self::MergeNotConfirmed => {
+                "would merge two groups (only a confirmed join may)".to_owned()
+            }
+            Self::MergeInconsistent { a, b, angle, distance } => format!(
+                "merging the two groups disagrees with join {}-{} ({angle:.1} deg, {distance:.2} t)",
+                name(a),
+                name(b)
+            ),
             Self::Constrained(veto) => {
                 format!("refused by constraints.json (`{}`)", veto.key())
             }
@@ -111,6 +138,12 @@ impl Rejection {
                 "inconsistent with the assembled poses".to_owned()
             }
             Self::MergesGroups => "would merge two groups (not supported)".to_owned(),
+            Self::MergeNotConfirmed => {
+                "would merge two groups (only a confirmed join may)".to_owned()
+            }
+            Self::MergeInconsistent { a, b, .. } => {
+                format!("merging the two groups disagrees with join {}-{}", name(a), name(b))
+            }
             Self::Constrained(veto) => {
                 format!("refused by constraints.json (`{}`)", veto.key())
             }
@@ -154,6 +187,11 @@ pub struct Assembly {
     /// the singletons in collection order. R §11.1's `transforms.json` is written in it, because
     /// the reference's `poses` is an insertion-ordered dict (V4-D5).
     pub order: Vec<FragId>,
+    /// How many times two groups were merged through a confirmed join (audit §D.2 (c)).
+    ///
+    /// Always `0` without [`ObjectParams::merge`], which is what makes it safe to report
+    /// unconditionally: a run of R §8 as the reference wrote it merges nothing.
+    pub merges: usize,
 }
 
 /// R §8's `best_per_pair`, then its sort: one candidate per pair, strongest pair first.
@@ -217,7 +255,7 @@ fn best_per_pair(
 /// The inverse is `np.linalg.inv`'s — the factorisation of the whole 4×4, not the transpose of its
 /// rotation block, which is 6.2e-11 t away from it at the worst on a pose that has climbed two ICP
 /// ladders (PMC-19, `matching::verify::pose_inverse`).
-fn rel(c: &Candidate, x: FragId) -> Matrix4<f64> {
+pub(crate) fn rel(c: &Candidate, x: FragId) -> Matrix4<f64> {
     if x == c.a { c.transform } else { pose_inverse(&c.transform) }
 }
 
@@ -234,6 +272,10 @@ struct Inputs<'a> {
     candidates: &'a [Candidate],
     accepted: &'a [usize],
     p: &'a Params,
+    /// Roadmap item 4's rules, or `None` on a run without them — which is R §8 exactly as the
+    /// reference wrote it.
+    objects: Option<&'a ObjectParams>,
+    constraints: Option<&'a Resolved>,
 }
 
 impl Inputs<'_> {
@@ -255,7 +297,7 @@ impl Inputs<'_> {
         placed: FragId,
         new: FragId,
     ) -> Result<Matrix4<f64>, Rejection> {
-        let Self { exec, pieces, candidates, accepted, p } = *self;
+        let Self { exec, pieces, candidates, accepted, p, .. } = *self;
         let c = &candidates[accepted[here]];
         let anchor = grouping.pose(placed).expect("the anchor of a placement is placed");
         let t_new = anchor * rel(c, placed);
@@ -299,6 +341,107 @@ impl Inputs<'_> {
             }
         }
         Ok(t_new)
+    }
+
+    /// Audit §D.2 (c): the two groups this join spans, and the world shift that brings one onto
+    /// the other — or the reason they may not be merged.
+    ///
+    /// R §8 as the reference wrote it refuses such a join outright
+    /// ([`Rejection::MergesGroups`]). Roadmap item 4 replaces that refusal with the same two tests
+    /// R §8 already applies to a *placement*, applied to a whole group, plus the operator's word:
+    ///
+    /// 1. **`different_object`** naming any cross-group pair refuses the merge, before any test of
+    ///    R §8's own, so the report says whose decision it was. `must_not_join` deliberately does
+    ///    **not**: it says two sherds do not join, and two sherds of one pot that do not touch are
+    ///    in one group all the same.
+    /// 2. **Penetration across both groups**, every member of one against every member of the
+    ///    other, at the poses the merge would give them — R §6.4's own fraction at R §6.4's own
+    ///    depth. The joined pair itself is skipped: R §6.4 has already tested it, which is how the
+    ///    candidate came to be accepted.
+    /// 3. **Consistency with every cross-group join the gate admits**, at R §8's own tolerances
+    ///    (10°, 0.5 `t` of the merged wall). Audit §D.2 words this as "every cross-group *accepted*
+    ///    join"; what it reads here is the list R §8 is walking, because R §8's own consistency
+    ///    test reads that list and a merge refused by a join the gate threw out would be refused
+    ///    by evidence the assembly is not allowed to use.
+    ///
+    /// **Which group moves.** The larger one stays and the smaller is shifted onto it; on a tie
+    /// the earlier-seeded group stays. Deterministic, and it keeps the frame of the group that has
+    /// the most fragments in it — which is the frame `transforms.json` already carries for most of
+    /// the collection.
+    fn try_merge(
+        &self,
+        grouping: &Grouping,
+        here: usize,
+    ) -> Result<(usize, usize, Matrix4<f64>), Rejection> {
+        let Self { exec, pieces, candidates, accepted, p, constraints, .. } = *self;
+        let candidate = accepted[here];
+        let c = &candidates[candidate];
+        if c.tier != Tier::Confirmed {
+            return Err(Rejection::MergeNotConfirmed);
+        }
+        let ga = grouping.group_of(c.a).expect("a placed fragment is in a group");
+        let gb = grouping.group_of(c.b).expect("a placed fragment is in a group");
+        let (na, nb) = (grouping.members(ga).len(), grouping.members(gb).len());
+        let (into, from) = if nb > na || (nb == na && gb < ga) { (gb, ga) } else { (ga, gb) };
+
+        // The shift that makes the join hold: whichever endpoint is in the group that stays keeps
+        // its world pose, and the other group is moved so that `c` is satisfied at it.
+        let (pose_a, pose_b) = (
+            grouping.pose(c.a).expect("a placed fragment has a pose"),
+            grouping.pose(c.b).expect("a placed fragment has a pose"),
+        );
+        let shift = if ga == into {
+            pose_a * c.transform * pose_inverse(&pose_b)
+        } else {
+            pose_b * pose_inverse(&(pose_a * c.transform))
+        };
+
+        let joined = [c.a, c.b];
+        for &x in grouping.members(into) {
+            for &y in grouping.members(from) {
+                if let Some(veto @ Veto::DifferentObject) = constraints.and_then(|r| r.veto(x, y)) {
+                    return Err(Rejection::Constrained(veto));
+                }
+                if joined.contains(&x) && joined.contains(&y) {
+                    continue;
+                }
+                let moved = shift * grouping.pose(y).expect("a group member is placed");
+                let t_rel = pose_inverse(&grouping.pose(x).expect("placed")) * moved;
+                let pen = penetration(exec, &pieces[x as usize], &pieces[y as usize], &t_rel, p);
+                if pen > p.max_pen {
+                    return Err(Rejection::Penetrates { other: x, pen });
+                }
+            }
+        }
+
+        let walls: Vec<f64> = grouping
+            .members(into)
+            .iter()
+            .chain(grouping.members(from))
+            .map(|&n| pieces[n as usize].thick)
+            .collect();
+        let tg = crate::mesh::geometry::median(&walls);
+        for (there, &j) in accepted.iter().enumerate() {
+            if there == here {
+                continue;
+            }
+            let c2 = &candidates[j];
+            let (g2a, g2b) = (grouping.group_of(c2.a), grouping.group_of(c2.b));
+            // One endpoint in each of the two groups, either way round.
+            let x = match (g2a, g2b) {
+                (Some(x), Some(y)) if x == into && y == from => c2.a,
+                (Some(x), Some(y)) if x == from && y == into => c2.b,
+                _ => continue,
+            };
+            let y = if x == c2.a { c2.b } else { c2.a };
+            let t_alt = grouping.pose(x).expect("placed") * rel(c2, x);
+            let moved = shift * grouping.pose(y).expect("placed");
+            let (angle, distance) = disagreement(&(pose_inverse(&t_alt) * moved), tg);
+            if !agrees(angle, distance) {
+                return Err(Rejection::MergeInconsistent { a: c2.a, b: c2.b, angle, distance });
+            }
+        }
+        Ok((into, from, shift))
     }
 }
 
@@ -352,7 +495,7 @@ pub fn assemble_with(
     p: &Params,
     gate: Gate,
 ) -> Assembly {
-    assemble_under(exec, pieces, candidates, p, gate, None)
+    assemble_under(exec, pieces, candidates, p, gate, None, None)
 }
 
 /// [`assemble_with`] under an operator's `constraints.json` as well (audit §D.1, roadmap item 3).
@@ -374,13 +517,15 @@ pub fn assemble_under(
     p: &Params,
     gate: Gate,
     constraints: Option<&Resolved>,
+    objects: Option<&ObjectParams>,
 ) -> Assembly {
     let started = std::time::Instant::now();
     let accepted = best_per_pair(candidates, gate, constraints);
-    let inputs = Inputs { exec, pieces, candidates, accepted: &accepted, p };
+    let inputs = Inputs { exec, pieces, candidates, accepted: &accepted, p, objects, constraints };
     let mut grouping = Grouping::new(pieces.len());
     let mut used: Vec<usize> = Vec::new();
     let mut rejected: Vec<Rejected> = Vec::new();
+    let mut merges = 0_usize;
     let mut remaining: Vec<usize> = (0..accepted.len()).collect();
 
     while !remaining.is_empty() {
@@ -412,8 +557,28 @@ pub fn assemble_under(
                             reason: Rejection::InconsistentWithAssembled { angle, distance },
                         });
                     }
-                } else {
+                } else if gate != Gate::Confirmed || inputs.objects.is_none_or(|o| !o.merge) {
+                    // R §8's own refusal, unchanged: a run without roadmap item 4, and a run
+                    // whose candidates have no band at all (`--tiers off`), cannot merge, and
+                    // saying "only a confirmed join may" of a run that has no confirmed joins to
+                    // speak of would be a worse sentence than the one the reference wrote.
                     rejected.push(Rejected { candidate, reason: Rejection::MergesGroups });
+                } else {
+                    // Audit §D.2 (c): a confirmed join between two groups merges them, under the
+                    // penetration test across both and consistency with every cross-group join
+                    // the gate admits.
+                    match inputs.try_merge(&grouping, here) {
+                        Err(reason) => rejected.push(Rejected { candidate, reason }),
+                        Ok((into, from, shift)) => {
+                            grouping.merge(into, from, &shift);
+                            used.push(candidate);
+                            merges += 1;
+                            // A merge changes what every join below it means, exactly as a
+                            // placement does, so the greedy rule's restart applies to it too.
+                            progressed = true;
+                            break;
+                        }
+                    }
                 }
                 continue;
             }
@@ -453,6 +618,8 @@ pub fn assemble_under(
     }
 
     grouping.add_singletons();
+    // A no-op unless a merge emptied one; a run without roadmap item 4 never has one to drop.
+    grouping.drop_empty_groups();
     grouping.sort_by_size();
     let groups = grouping.groups().to_vec();
     tracing::info!(
@@ -461,9 +628,176 @@ pub fn assemble_under(
         used = used.len(),
         rejected = rejected.len(),
         accepted = accepted.len(),
+        merges,
         seconds = started.elapsed().as_secs_f64(),
         "assembly"
     );
     let order = grouping.order().to_vec();
-    Assembly { poses: grouping.into_poses(), groups, used, rejected, accepted, order }
+    Assembly { poses: grouping.into_poses(), groups, used, rejected, accepted, order, merges }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::float_cmp, reason = "these poses are whole numbers the merge copies")]
+
+    use nalgebra::Matrix4;
+
+    use super::{Grouping, Inputs, Piece, Rejection, rel};
+    use crate::assembly::constraints::{Constraints, Resolved, Veto, resolve};
+    use crate::executor::CPU;
+    use crate::matching::pair::Candidate;
+    use crate::matching::verify::Scores;
+    use crate::objects::ObjectParams;
+    use crate::params::Params;
+    use crate::tiers::Tier;
+    use crate::types::FragId;
+
+    /// Audit §D.2 (c)'s merge is tested here and not in `tests/assembly_graphs.rs` because R §8's
+    /// own loop **cannot reach it**: a group grows until no remaining join touches it, so its
+    /// members are a connected component of the joins R §8 kept and no join ever spans two groups.
+    /// `r_8s_groups_are_components_so_no_join_ever_spans_two_of_them` measures that over four
+    /// thousand random graphs, and task O1 measured `Rejection::MergesGroups` firing zero times
+    /// over the eight development sets at seeds 0–4. The decision the branch would make is still
+    /// worth stating exactly, so it is stated against a [`Grouping`] built by hand.
+    fn translation(tau: [f64; 3]) -> Matrix4<f64> {
+        let mut m = Matrix4::identity();
+        for (i, t) in tau.into_iter().enumerate() {
+            m[(i, 3)] = t;
+        }
+        m
+    }
+
+    fn join(a: FragId, b: FragId, tau: [f64; 3], tier: Tier) -> Candidate {
+        Candidate {
+            a,
+            b,
+            transform: translation(tau),
+            scores: Scores { seam: 1.0, tight: 1.0, ..Scores::default() },
+            accepted: true,
+            tier,
+        }
+    }
+
+    fn bare(n: usize) -> Vec<Piece<'static>> {
+        (0..n)
+            .map(|_| Piece { thick: 1.0, res: 0.01, watertight: true, mesh: None, s_pen: &[] })
+            .collect()
+    }
+
+    /// Two groups — 0-1 and 2-3, each ten units along `x` — and a spanning join 1-2.
+    fn two_groups(candidates: &[Candidate]) -> Grouping {
+        let mut grouping = Grouping::new(4);
+        grouping.seed(candidates[0].a, candidates[0].b, candidates[0].transform);
+        grouping.seed(candidates[1].a, candidates[1].b, candidates[1].transform);
+        grouping
+    }
+
+    fn inputs<'a>(
+        pieces: &'a [Piece<'a>],
+        candidates: &'a [Candidate],
+        accepted: &'a [usize],
+        params: &'a Params,
+        rules: Option<&'a ObjectParams>,
+        constraints: Option<&'a Resolved>,
+    ) -> Inputs<'a> {
+        Inputs { exec: &CPU, pieces, candidates, accepted, p: params, objects: rules, constraints }
+    }
+
+    /// A confirmed join between two groups gives the shift that brings one onto the other, the
+    /// larger group keeps its frame, and the join holds at the merged poses.
+    #[test]
+    fn a_confirmed_join_merges_the_smaller_group_onto_the_larger() {
+        let pieces = bare(4);
+        let params = Params::default();
+        let rules = ObjectParams::default();
+        let candidates = vec![
+            join(0, 1, [10.0, 0.0, 0.0], Tier::Confirmed),
+            join(2, 3, [10.0, 0.0, 0.0], Tier::Confirmed),
+            join(1, 2, [10.0, 0.0, 0.0], Tier::Confirmed),
+        ];
+        let accepted = [0, 1, 2];
+        let mut grouping = two_groups(&candidates);
+        let inputs = inputs(&pieces, &candidates, &accepted, &params, Some(&rules), None);
+
+        let (into, from, shift) = inputs.try_merge(&grouping, 2).expect("the merge is allowed");
+        // Equal sizes, so the earlier-seeded group stays.
+        assert_eq!((into, from), (0, 1));
+        grouping.merge(into, from, &shift);
+        assert_eq!(grouping.members(0), [0, 1, 2, 3]);
+        assert!(grouping.members(1).is_empty());
+        assert_eq!(grouping.pose(0).expect("placed"), Matrix4::identity(), "the frame that stays");
+        assert_eq!(grouping.pose(2).expect("placed")[(0, 3)], 20.0, "1-2 is another ten along x");
+        assert_eq!(grouping.pose(3).expect("placed")[(0, 3)], 30.0);
+        // The join it merged through holds exactly: B's world pose is A's through `c.transform`.
+        let c = &candidates[2];
+        let implied = grouping.pose(c.a).expect("placed") * rel(c, c.a);
+        assert_eq!(implied, grouping.pose(c.b).expect("placed"));
+    }
+
+    /// The three refusals, each with its own reason: the join is not confirmed, another
+    /// cross-group join contradicts the merged poses, and `different_object` names a pair the
+    /// merge would put in one object.
+    #[test]
+    fn a_merge_is_refused_by_the_band_by_a_contradiction_and_by_the_operator() {
+        let pieces = bare(4);
+        let params = Params::default();
+        let rules = ObjectParams::default();
+        let names: Vec<String> = (0..4).map(|i| format!("frag_{i}")).collect();
+
+        // 1. The spanning join is only probable.
+        let mut candidates = vec![
+            join(0, 1, [10.0, 0.0, 0.0], Tier::Confirmed),
+            join(2, 3, [10.0, 0.0, 0.0], Tier::Confirmed),
+            join(1, 2, [10.0, 0.0, 0.0], Tier::Probable),
+        ];
+        let accepted = [0, 1, 2];
+        let grouping = two_groups(&candidates);
+        let refused = inputs(&pieces, &candidates, &accepted, &params, Some(&rules), None)
+            .try_merge(&grouping, 2)
+            .expect_err("a probable join may not merge");
+        assert_eq!(refused, Rejection::MergeNotConfirmed);
+        assert_eq!(
+            refused.message(&names),
+            "would merge two groups (only a confirmed join may)",
+            "and R §8's own sentence is left to the run that cannot merge at all"
+        );
+
+        // 2. A second cross-group join that puts fragment 3 five hundred walls away.
+        candidates[2].tier = Tier::Confirmed;
+        candidates.push(join(0, 3, [10.0, 500.0, 0.0], Tier::Confirmed));
+        let accepted = [0, 1, 2, 3];
+        let refused = inputs(&pieces, &candidates, &accepted, &params, Some(&rules), None)
+            .try_merge(&grouping, 2)
+            .expect_err("the merge contradicts the other cross-group join");
+        let Rejection::MergeInconsistent { a, b, distance, .. } = refused else {
+            panic!("expected a contradiction, got {refused:?}");
+        };
+        assert_eq!((a, b), (0, 3), "the sentence names the join that refused it");
+        assert!(distance > 100.0, "{distance}");
+
+        // 3. `different_object`, before any test of R §8's own.
+        candidates.pop();
+        let accepted = [0, 1, 2];
+        let file: Constraints =
+            serde_json::from_str(r#"{"version": 1, "different_object": [["frag_0", "frag_3"]]}"#)
+                .expect("a constraints file");
+        let plan = resolve(&file, &names).expect("the names resolve");
+        let refused = inputs(&pieces, &candidates, &accepted, &params, Some(&rules), Some(&plan))
+            .try_merge(&grouping, 2)
+            .expect_err("the operator refused it");
+        assert_eq!(refused, Rejection::Constrained(Veto::DifferentObject));
+
+        // `must_not_join` deliberately does **not** refuse a merge: it says two sherds do not
+        // join, and two sherds of one pot that do not touch belong to one object all the same.
+        let file: Constraints =
+            serde_json::from_str(r#"{"version": 1, "must_not_join": [["frag_0", "frag_3"]]}"#)
+                .expect("a constraints file");
+        let plan = resolve(&file, &names).expect("the names resolve");
+        assert!(
+            inputs(&pieces, &candidates, &accepted, &params, Some(&rules), Some(&plan))
+                .try_merge(&grouping, 2)
+                .is_ok(),
+            "`must_not_join` is about a seam, not about a vessel"
+        );
+    }
 }

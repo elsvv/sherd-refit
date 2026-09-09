@@ -87,6 +87,7 @@ pub mod matching;
 pub mod measure;
 pub mod memory;
 pub mod mesh;
+pub mod objects;
 pub mod params;
 pub mod pipeline;
 pub mod progress;

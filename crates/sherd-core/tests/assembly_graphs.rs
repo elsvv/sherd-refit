@@ -197,6 +197,85 @@ fn two_objects_stay_apart_and_the_odd_fragment_is_a_singleton() {
     assert_eq!(out.poses[5], Matrix4::identity(), "an unplaced fragment stays at the identity");
 }
 
+/// **R §8 never puts a join between two of its own groups**, so `Rejection::MergesGroups` — and
+/// with it audit §D.2 (c)'s merge, which replaces that rejection — is unreachable.
+///
+/// Task O1 measured the branch firing **zero times** over the eight development sets at seeds 0–4
+/// and went looking for the reason. It is R §8's own greedy rule: a group grows until no remaining
+/// join touches it, and a second group is seeded only in a pass where *nothing* could be placed —
+/// a pass that scans every remaining join. So at the moment a second group is seeded, every join
+/// that survives has both fragments unplaced, and the next join to touch either of them extends a
+/// group rather than spanning two. A join whose placement R §8 refuses is removed and cannot span
+/// anything either. The groups are the connected components of the joins R §8 did not refuse.
+///
+/// This is the measurement rather than the argument: four thousand random graphs of six fragments,
+/// with poses that make roughly a third of the placements disagree, and **not one** of them ever
+/// reaches the branch. The property asserted is the stronger one — no accepted join of the list
+/// ends with its two fragments in different groups.
+#[test]
+fn r_8s_groups_are_components_so_no_join_ever_spans_two_of_them() {
+    const N: u32 = 8;
+    let pieces = bare(N as usize);
+    let params = Params::default();
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut merges_seen = 0_usize;
+    let mut cross_group_joins = 0_usize;
+    let mut graphs_with_two_groups = 0_usize;
+    let mut refusals = 0_usize;
+    for _ in 0..4_000 {
+        let mut candidates = Vec::new();
+        for a in 0..N {
+            for b in (a + 1)..N {
+                if next() % 4 != 0 {
+                    continue; // a quarter of the pairs have an accepted candidate
+                }
+                #[allow(clippy::cast_precision_loss, reason = "a small pseudo-random score")]
+                let score = ((next() % 1000) as f64) / 100.0;
+                // Poses far enough apart that a loop-closing edge or a second path routinely
+                // disagrees, which is what exercises R §8's two refusals.
+                #[allow(clippy::cast_precision_loss, reason = "a small pseudo-random offset")]
+                let tau = [((next() % 40) as f64) - 20.0, 0.0, 0.0];
+                candidates.push(join(a, b, tau, score));
+            }
+        }
+        let out = assemble(&CPU, &pieces, &candidates, &params);
+        merges_seen += out.merges;
+        refusals += out.rejected.len();
+        if out.groups.iter().filter(|g| g.len() > 1).count() > 1 {
+            graphs_with_two_groups += 1;
+        }
+        assert!(
+            !out.rejected.iter().any(|r| r.reason == Rejection::MergesGroups),
+            "R §8 reached a branch this test says is unreachable"
+        );
+        let mut group_of = vec![usize::MAX; N as usize];
+        for (g, members) in out.groups.iter().enumerate() {
+            for &n in members {
+                group_of[n as usize] = g;
+            }
+        }
+        for c in &candidates {
+            if group_of[c.a as usize] != group_of[c.b as usize] {
+                cross_group_joins += 1;
+            }
+        }
+    }
+    assert_eq!(merges_seen, 0, "and no merge, because nothing ever proposes one");
+    assert!(graphs_with_two_groups > 100, "the sample did produce multi-group assemblies");
+    assert!(refusals > 100, "and it did exercise R §8's own refusals");
+    assert_eq!(
+        cross_group_joins, 0,
+        "not one accepted join of four thousand graphs ends with its two fragments in different \
+         groups: R §8's groups are the connected components of the joins it kept"
+    );
+}
+
 /// Groups of equal size come back in the order they were seeded, and that order is the candidate
 /// list's — R §8's sort is stable and so is `best_per_pair`'s.
 #[test]
@@ -340,8 +419,15 @@ fn a_must_join_pair_seeds_the_assembly_and_a_vetoed_pair_is_refused() {
     )
     .expect("the format parses");
     let plan = resolve(&file, &names).expect("the names are the collection's");
-    let out =
-        assemble_under(&CPU, &pieces, &candidates, &Params::default(), Gate::Accepted, Some(&plan));
+    let out = assemble_under(
+        &CPU,
+        &pieces,
+        &candidates,
+        &Params::default(),
+        Gate::Accepted,
+        Some(&plan),
+        None,
+    );
 
     // `2-3` was seeded although it is the weakest join, so `1-2` grew onto it and `0-1` never had
     // a chance to be the seed.
@@ -366,8 +452,15 @@ fn must_not_join_refuses_a_candidate_that_reaches_the_assembly() {
     let file: Constraints =
         serde_json::from_str(r#"{"must_not_join": [["frag_1", "frag_0"]]}"#).expect("it parses");
     let plan = resolve(&file, &names).expect("the names are the collection's");
-    let out =
-        assemble_under(&CPU, &pieces, &candidates, &Params::default(), Gate::Accepted, Some(&plan));
+    let out = assemble_under(
+        &CPU,
+        &pieces,
+        &candidates,
+        &Params::default(),
+        Gate::Accepted,
+        Some(&plan),
+        None,
+    );
     assert_eq!(used_pairs(&candidates, &out.used), [(1, 2)]);
     assert_eq!(out.rejected.len(), 1);
     assert_eq!(out.rejected[0].reason, Rejection::Constrained(Veto::MustNotJoin));
@@ -385,7 +478,7 @@ fn no_constraints_is_the_assembly_r_8_always_made() {
     ];
     let p = Params::default();
     let plain = assemble(&CPU, &pieces, &candidates, &p);
-    let under = assemble_under(&CPU, &pieces, &candidates, &p, Gate::Accepted, None);
+    let under = assemble_under(&CPU, &pieces, &candidates, &p, Gate::Accepted, None, None);
     assert_eq!(plain.used, under.used);
     assert_eq!(plain.groups, under.groups);
     assert_eq!(plain.order, under.order);

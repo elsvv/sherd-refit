@@ -40,6 +40,7 @@ use crate::fragment::Fragment;
 use crate::matching::pair::{Candidate, Pair};
 use crate::matching::scales::Scales;
 use crate::matching::verify::{SEAM_VOXEL, Surfaces, seam_cells, seam_points};
+use crate::objects::ObjectReport;
 use crate::params::Params;
 use crate::render::{PAIR_VIEWS, PairEvidence, View, render_pair};
 use crate::tiers::{Evidence, Tier, TierReport, representatives};
@@ -67,6 +68,10 @@ pub type ReviewIndex = BTreeMap<(FragId, FragId), String>;
 /// Returns the files written, in pair order, and the index `report.md` links. Runs after matching
 /// and before the fracture BVHs are released, because the contact colouring is R §6.1's own
 /// distance against A's fracture tree.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one pass's whole input: what to draw, from what, into where, at which band"
+)]
 pub fn write_review_images(
     engine: Engine<'_>,
     out_dir: &Path,
@@ -74,6 +79,7 @@ pub fn write_review_images(
     names: &[String],
     candidates: &[Candidate],
     tiers: Option<&TierReport>,
+    objects: Option<&ObjectReport>,
     params: &Params,
 ) -> Result<(Vec<PathBuf>, ReviewIndex)> {
     let wanted: Vec<usize> = representatives(candidates)
@@ -106,6 +112,7 @@ pub fn write_review_images(
                 tiers.is_some(),
                 &names[c.a as usize],
                 &names[c.b as usize],
+                demotion_of(objects, &names[c.a as usize], &names[c.b as usize]),
             );
             render_pair(a, b, &c.transform, &evidence).write_png(dir.join(&file))?;
             Ok((i, dir.join(&file), format!("{REVIEW_DIR}/{file}")))
@@ -130,6 +137,21 @@ pub fn write_review_images(
     Ok((written, index))
 }
 
+/// The sentence roadmap item 4's object pass demoted this pair with, if it demoted it.
+///
+/// Audit §D.2 asks for the object numbers to be *"in the report and the review image"*, and this
+/// is the review image's half of that: the picture a conservator would argue the demotion with
+/// carries the demotion's own words. A pair the pass left alone gets no extra line, so a run with
+/// nothing demoted draws exactly the images task T2 drew.
+fn demotion_of(objects: Option<&ObjectReport>, a: &str, b: &str) -> Option<String> {
+    let report = objects?;
+    report
+        .demotions
+        .iter()
+        .find(|d| (d.a == a && d.b == b) || (d.a == b && d.b == a))
+        .map(|d| format!("OBJECT PASS ({}): {}", d.arm.label(), d.reason))
+}
+
 /// The seam, the contact classes, the three views and the caption of one candidate.
 #[allow(clippy::too_many_arguments, reason = "one image's whole input, and it is a leaf function")]
 fn pair_evidence(
@@ -142,6 +164,7 @@ fn pair_evidence(
     banded: bool,
     a_name: &str,
     b_name: &str,
+    demoted: Option<String>,
 ) -> PairEvidence {
     let pair = Pair::build(a, b, params);
     let sc = pair.scales;
@@ -166,7 +189,7 @@ fn pair_evidence(
         seam,
         contact,
         contact_class,
-        caption: caption(candidate, evidence, &sc, params, banded, a_name, b_name),
+        caption: caption(candidate, evidence, &sc, params, banded, a_name, b_name, demoted),
         points: REVIEW_POINTS,
         seed: params.seed,
     }
@@ -309,6 +332,7 @@ fn rotate(t: &Matrix4<f64>, n: [f64; 3]) -> [f64; 3] {
 ///
 /// Three lines, drawn in the port's own upper-case bitmap font (PMC-20), so the text is written in
 /// the alphabet that font has rather than in one it would draw as boxes.
+#[allow(clippy::too_many_arguments, reason = "one caption's whole input, and it is a leaf")]
 fn caption(
     candidate: &Candidate,
     evidence: Option<&Evidence>,
@@ -317,6 +341,7 @@ fn caption(
     banded: bool,
     a_name: &str,
     b_name: &str,
+    demoted: Option<String>,
 ) -> Vec<String> {
     let s = &candidate.scores;
     let band = if banded {
@@ -331,7 +356,7 @@ fn caption(
     let support = evidence.map_or_else(|| "-".to_owned(), |e| e.support.to_string());
     let slide =
         evidence.and_then(|e| e.slide_t).map_or_else(|| "-".to_owned(), |x| format!("{x:.2E}"));
-    vec![
+    let mut lines = vec![
         format!(
             "A={a_name} GREY | B={b_name} ORANGE | {band} | MARGIN {margin} | SUPPORT {support} | \
              SEED {}",
@@ -356,5 +381,9 @@ fn caption(
             SEAM_VOXEL,
             sc.t / SEAM_VOXEL,
         ),
-    ]
+    ];
+    if let Some(sentence) = demoted {
+        lines.push(sentence.to_uppercase());
+    }
+    lines
 }

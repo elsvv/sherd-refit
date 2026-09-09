@@ -153,6 +153,42 @@ impl Grouping {
         self.order.push(new);
     }
 
+    /// Audit §D.2 (c): every member of `from` is moved by `shift` and joins `into`.
+    ///
+    /// R §8 as the reference wrote it has no such operation — two placed fragments in two groups
+    /// are `Rejection::MergesGroups` and that is the end of it. The merge is roadmap item 4's
+    /// replacement for that refusal and it is a *bookkeeping* step only: the decision, the
+    /// penetration test across both groups and the consistency check against every cross-group
+    /// join live in [`greedy::assemble_under`](super::greedy::assemble_under), which calls this
+    /// once they have all passed.
+    ///
+    /// The moved group is left **empty** rather than removed, so that every index already handed
+    /// out — `group_of`, and the `g` a caller is holding — still means what it meant.
+    /// [`Grouping::drop_empty_groups`] is what takes them out, once, at the end.
+    ///
+    /// `order` is untouched: it is the order the poses were *filled in*, which R §11.1 writes
+    /// `transforms.json` in, and a merge fills none in.
+    pub fn merge(&mut self, into: usize, from: usize, shift: &Matrix4<f64>) {
+        let moving = std::mem::take(&mut self.groups[from]);
+        for &n in &moving {
+            let pose = self.poses[n as usize].expect("a group member is placed");
+            self.poses[n as usize] = Some(shift * pose);
+            self.group_of[n as usize] = Some(into);
+        }
+        self.groups[into].extend(moving);
+    }
+
+    /// Drops the groups a [`Grouping::merge`] emptied.
+    ///
+    /// A no-op on an assembly that never merged — a group is only ever emptied by a merge — which
+    /// is what lets it run unconditionally and keeps a run without roadmap item 4 the run it was.
+    /// It runs after [`Grouping::add_singletons`] and before [`Grouping::sort_by_size`], and
+    /// `group_of` is not renumbered afterwards for the same reason the reference does not
+    /// renumber it: nothing reads it once the assembly is finished.
+    pub fn drop_empty_groups(&mut self) {
+        self.groups.retain(|g| !g.is_empty());
+    }
+
     /// R §8's `group_thickness`: the median wall over a set of fragments.
     ///
     /// The wall a pose disagreement is measured in is the *group's*, not the collection's — the
@@ -265,6 +301,42 @@ mod tests {
             5.0,
             "the new member is counted before it is placed"
         );
+    }
+
+    /// Audit §D.2 (c)'s bookkeeping: the moved group's poses go through the shift, its members
+    /// change group, and the emptied slot leaves no group behind.
+    #[test]
+    fn a_merge_moves_one_groups_poses_and_leaves_no_empty_group() {
+        let mut g = Grouping::new(5);
+        g.seed(0, 1, Matrix4::identity());
+        g.seed(2, 3, Matrix4::identity());
+        assert_eq!(g.groups(), [vec![0, 1], vec![2, 3]]);
+        let mut shift = Matrix4::<f64>::identity();
+        shift[(0, 3)] = 7.0;
+        g.merge(0, 1, &shift);
+        assert_eq!(g.groups(), [vec![0, 1, 2, 3], Vec::new()]);
+        assert_eq!(g.group_of(2), Some(0));
+        assert_eq!(g.group_of(3), Some(0));
+        assert_eq!(g.pose(2).expect("placed")[(0, 3)], 7.0, "the moved group went through it");
+        assert_eq!(g.pose(0).expect("placed")[(0, 3)], 0.0, "the group it joined did not move");
+        assert_eq!(g.order(), [0, 1, 2, 3], "a merge fills no pose in, so the order is untouched");
+
+        g.add_singletons();
+        g.drop_empty_groups();
+        g.sort_by_size();
+        assert_eq!(g.groups(), [vec![0, 1, 2, 3], vec![4]]);
+    }
+
+    /// And on an assembly that never merged, dropping the empty groups is a no-op — which is what
+    /// lets the call sit in the pass unconditionally.
+    #[test]
+    fn dropping_empty_groups_changes_nothing_when_nothing_merged() {
+        let mut g = Grouping::new(4);
+        g.seed(1, 2, Matrix4::identity());
+        g.add_singletons();
+        let before = g.groups().to_vec();
+        g.drop_empty_groups();
+        assert_eq!(g.groups(), before.as_slice());
     }
 
     #[test]

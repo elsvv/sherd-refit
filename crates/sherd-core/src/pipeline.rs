@@ -50,6 +50,7 @@ use crate::matching::pair::{self, Candidate, Gate};
 use crate::matching::screen::{Screened, screen_pair, top_partners};
 use crate::memory::{self, Budget, MemorySemaphore, reservation};
 use crate::mesh::geometry;
+use crate::objects;
 use crate::params::Params;
 use crate::progress::Watch;
 use crate::refine::{self, FractureCloud, RefinePiece, fracture_cloud, refine_joins};
@@ -59,6 +60,7 @@ use crate::report::{
     write_transforms,
 };
 use crate::spatial::kdtree::PointTree;
+use crate::tiers::Tier;
 use crate::types::FragId;
 
 /// What preprocessing one fragment produced.
@@ -654,9 +656,39 @@ pub fn run_with(
             s_pen: s,
         })
         .collect();
-    let mut assembly =
-        assemble_under(engine.exec, &pieces, &candidates, params, gate, plan.as_ref());
+    let mut assembly = assemble_under(
+        engine.exec,
+        &pieces,
+        &candidates,
+        params,
+        gate,
+        plan.as_ref(),
+        params.objects.as_ref(),
+    );
     stages.finish("assembly", started.elapsed().as_secs_f64());
+
+    // 3'. roadmap item 4's object pass (audit §D.2), off unless `Params::objects` is set.
+    //
+    // Here and not before R §8, because a consensus needs the groups R §8 builds and a
+    // disagreement needs the poses it placed. It runs **one** round: the demotions it finds are
+    // applied to the bands and R §8 is run again on them, and no further, because a second round's
+    // demotions would be computed on the groups the first round's demotions built and the answer
+    // would then depend on how many rounds were run.
+    let mut object_pass = object_round(
+        &fragments,
+        &names,
+        &mut candidates,
+        &mut assembly,
+        &pieces,
+        ObjectRound {
+            params,
+            gate,
+            constraints: plan.as_ref(),
+            tiers: tiered.as_mut(),
+            exec: engine.exec,
+            stages: &mut stages,
+        },
+    );
 
     // 3a. second pass (R §8.1, off by default)
     let retry = second_pass_pairs(&names, &pairs, &candidates, &assembly.groups, params);
@@ -687,7 +719,30 @@ pub fn run_with(
         honoured = plan.as_ref().map(|r| {
             constraints::apply(r, &names, &mut candidates, tiered.as_mut(), gate == Gate::Confirmed)
         });
-        assembly = assemble_under(engine.exec, &pieces, &candidates, params, gate, plan.as_ref());
+        assembly = assemble_under(
+            engine.exec,
+            &pieces,
+            &candidates,
+            params,
+            gate,
+            plan.as_ref(),
+            params.objects.as_ref(),
+        );
+        object_pass = object_round(
+            &fragments,
+            &names,
+            &mut candidates,
+            &mut assembly,
+            &pieces,
+            ObjectRound {
+                params,
+                gate,
+                constraints: plan.as_ref(),
+                tiers: tiered.as_mut(),
+                exec: engine.exec,
+                stages: &mut stages,
+            },
+        );
         tracing::info!(
             pairs = retry.len(),
             seconds = stages.timings["second_pass"],
@@ -745,6 +800,7 @@ pub fn run_with(
             &names,
             &candidates,
             tiered.as_ref(),
+            object_pass.as_ref(),
             params,
         )?;
         stages.finish("review", started.elapsed().as_secs_f64());
@@ -812,6 +868,7 @@ pub fn run_with(
         tiers: tiered.as_ref(),
         constraints: honoured.as_ref(),
         review: review.as_ref(),
+        objects: object_pass.as_ref(),
     };
     let tier_joins = tiered.as_ref().map(|_| crate::tiers::joins(&candidates, &names));
     write_transforms(
@@ -1045,6 +1102,99 @@ fn tier_pass(
         rejected,
         seconds = stages.timings["tiers"],
         "tiers decided"
+    );
+    Some(report)
+}
+
+/// What one [`object_round`] reads besides the collection and the assembly.
+///
+/// A struct because the round needs the run's parameters, its gate, its constraints, its tier
+/// report, its executor and its stage log, and eleven arguments in a row is where a pass stops
+/// being readable.
+struct ObjectRound<'a> {
+    params: &'a Params,
+    gate: Gate,
+    constraints: Option<&'a Resolved>,
+    tiers: Option<&'a mut crate::tiers::TierReport>,
+    exec: &'a dyn crate::executor::Executor,
+    stages: &'a mut StageLog,
+}
+
+/// Roadmap item 4's pass over a finished assembly (audit §D.2), off unless [`Params::objects`] is
+/// set.
+///
+/// Three things happen here and in this order:
+///
+/// 1. **The demotions** ([`objects::demotions`]) — the per-group consensus and the
+///    mutual-disagreement rule. A demotion moves a candidate from [`Tier::Confirmed`] to
+///    [`Tier::Probable`] and writes its sentence into the candidate's evidence, so `report.md`'s
+///    probable row names the object rule that refused it beside the tier tests it passed.
+/// 2. **R §8 again**, but only if something was demoted: the assembly is built from confirmed
+///    joins and fewer of them are confirmed now. One round, not to a fixed point.
+/// 3. **The objects themselves** ([`objects::objects`]) — every group with its consensus and the
+///    members that consensus rejects — and what the two operator lists said about them.
+///
+/// `None`, and no cost, when the pass is off: `--objects off` leaves `assembly` exactly as R §8
+/// built it and writes no section.
+fn object_round(
+    fragments: &[Fragment],
+    names: &[String],
+    candidates: &mut [Candidate],
+    assembly: &mut crate::assembly::Assembly,
+    pieces: &[Piece<'_>],
+    mut run: ObjectRound<'_>,
+) -> Option<objects::ObjectReport> {
+    let rules = run.params.objects.as_ref()?;
+    let started = Instant::now();
+    let demoted =
+        objects::demotions(fragments, names, candidates, assembly, pieces, run.constraints, rules);
+    // Per pair and not per candidate: a pair routinely has several candidates on one placement,
+    // all of them confirmed, and R §8's `best_per_pair` would place the next one instead.
+    let by_pair: std::collections::BTreeMap<(FragId, FragId), &objects::Demotion> =
+        demoted.iter().map(|(key, d)| (*key, d)).collect();
+    for (i, c) in candidates.iter_mut().enumerate() {
+        let Some(demotion) = by_pair.get(&constraints::key(c.a, c.b)) else { continue };
+        if c.tier != Tier::Confirmed {
+            continue;
+        }
+        c.tier = Tier::Probable;
+        if let Some(report) = run.tiers.as_deref_mut() {
+            if let Some(tier) = report.tiers.get_mut(i) {
+                *tier = Tier::Probable;
+            }
+            if let Some(Some(evidence)) = report.evidence.get_mut(i) {
+                evidence.failed.push(format!("{}: {}", demotion.arm.label(), demotion.reason));
+            }
+        }
+    }
+    if !demoted.is_empty() {
+        *assembly = assemble_under(
+            run.exec,
+            pieces,
+            candidates,
+            run.params,
+            run.gate,
+            run.constraints,
+            Some(rules),
+        );
+    }
+    let (same_object_split, different_object_together) =
+        objects::operator_view(names, assembly, run.constraints);
+    let report = objects::ObjectReport {
+        objects: objects::objects(fragments, names, candidates, assembly, rules),
+        demotions: demoted.into_iter().map(|(_, d)| d).collect(),
+        same_object_split,
+        different_object_together,
+        merges: assembly.merges,
+    };
+    run.stages.finish("objects", started.elapsed().as_secs_f64());
+    tracing::info!(
+        objects = report.objects.len(),
+        demoted = report.demotions.len(),
+        merges = report.merges,
+        rejects = report.objects.iter().map(|o| o.rejects.len()).sum::<usize>(),
+        seconds = run.stages.timings["objects"],
+        "objects"
     );
     Some(report)
 }

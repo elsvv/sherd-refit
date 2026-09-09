@@ -46,7 +46,8 @@ use crate::progress::Watch;
 use crate::refine::{self, FractureCloud, RefinePiece, fracture_cloud, refine_joins};
 use crate::render::{self, PALETTE, Paint, Splat};
 use crate::report::{
-    FragmentStats, Outcome, Timings, write_placed_meshes, write_report, write_transforms,
+    FragmentStats, MemoryReport, Outcome, Timings, write_placed_meshes, write_report,
+    write_transforms,
 };
 use crate::spatial::kdtree::PointTree;
 use crate::types::FragId;
@@ -266,6 +267,8 @@ pub struct RunSummary {
     pub second_pass: usize,
     /// R §11.2's `timings`, in seconds, in the order the stages finished.
     pub timings: Timings,
+    /// Peak resident set of the process, per stage, when this platform reports one (audit §B.3).
+    pub memory: Option<MemoryReport>,
     /// The files written, in the order they were written.
     pub written: Vec<PathBuf>,
 }
@@ -292,6 +295,45 @@ impl RunSummary {
 /// has to match.
 pub fn default_workers() -> usize {
     std::thread::available_parallelism().map_or(1, std::num::NonZero::get).saturating_sub(1).max(1)
+}
+
+/// The two numbers a stage leaves behind: its wall clock, and the largest resident set seen while
+/// it ran.
+///
+/// The pipeline used to write `timings.insert(stage, seconds)` at the end of every stage; the
+/// audit's §B.3 wants the peak RSS beside it, on every run and not in a one-off experiment, and
+/// one call is the way to keep the two lists in the same order and to make it impossible to record
+/// a timing without its memory. A machine whose resident set cannot be read keeps the timings and
+/// reports no memory at all.
+#[derive(Debug, Default)]
+struct StageLog {
+    timings: Timings,
+    peaks: crate::report::Ordered<u64>,
+    monitor: Option<crate::memory::RssMonitor>,
+}
+
+impl StageLog {
+    /// Starts the clock's companion. The sampler runs until this is dropped.
+    fn start() -> Self {
+        Self { monitor: crate::memory::RssMonitor::start(), ..Self::default() }
+    }
+
+    /// Closes `stage`: its seconds, its peak resident set, and the log line an operator reads.
+    fn finish(&mut self, stage: &str, seconds: f64) {
+        self.timings.insert(stage, seconds);
+        let Some(monitor) = &self.monitor else {
+            return;
+        };
+        let peak = monitor.take_peak();
+        self.peaks.insert(stage, peak);
+        tracing::info!(stage, seconds, peak_mib = peak / (1024 * 1024), "stage done");
+    }
+
+    /// D §4.3's neighbour of `timings`, or `None` where the resident set cannot be read.
+    fn memory(&self) -> Option<MemoryReport> {
+        let monitor = self.monitor.as_ref()?;
+        Some(MemoryReport { peak_rss: monitor.peak(), stages: self.peaks.clone() })
+    }
 }
 
 /// R §2–§11 for one collection: the whole pipeline, in one process (D §5).
@@ -335,7 +377,7 @@ pub fn run_with(
     std::fs::create_dir_all(out_dir).map_err(|e| Error::write(out_dir, e))?;
     let workers = if options.workers == 0 { rayon::current_num_threads() } else { options.workers };
     let params = &options.params;
-    let mut timings = Timings::new();
+    let mut stages = StageLog::start();
     tracing::info!(
         fragments = entries.len(),
         input = %input.display(),
@@ -353,7 +395,7 @@ pub fn run_with(
         options.memory,
         &options.watch,
     )?;
-    timings.insert("preprocess", started.elapsed().as_secs_f64());
+    stages.finish("preprocess", started.elapsed().as_secs_f64());
     let names: Vec<String> = fragments.iter().map(|f| f.name.clone()).collect();
     let thickness = geometry::median(&fragments.iter().map(|f| f.thick).collect::<Vec<f64>>());
     let resolution = geometry::median(&fragments.iter().map(Fragment::res).collect::<Vec<f64>>());
@@ -368,7 +410,7 @@ pub fn run_with(
         }
     }
     tracing::info!(
-        seconds = timings["preprocess"],
+        seconds = stages.timings["preprocess"],
         thickness,
         resolution,
         edges_per_t = thickness / resolution.max(1e-9),
@@ -401,13 +443,13 @@ pub fn run_with(
         let started = Instant::now();
         let before = pairs.len();
         pairs = screen(engine.exec, &fragments, &names, &pairs, params);
-        timings.insert("screen", started.elapsed().as_secs_f64());
+        stages.finish("screen", started.elapsed().as_secs_f64());
         screened = Some((before, pairs.len()));
         tracing::info!(
             screened = before,
             kept = pairs.len(),
             top_k = params.screen_top_k,
-            seconds = timings["screen"],
+            seconds = stages.timings["screen"],
             "partner search"
         );
     } else if pairs.len() >= params.screen_min_pairs as usize {
@@ -430,10 +472,10 @@ pub fn run_with(
         None,
         &options.watch,
     )?;
-    timings.insert("matching", started.elapsed().as_secs_f64());
+    stages.finish("matching", started.elapsed().as_secs_f64());
     let mut candidates: Vec<Candidate> = per_pair.iter().flatten().copied().collect();
     tracing::info!(
-        seconds = timings["matching"],
+        seconds = stages.timings["matching"],
         candidates = candidates.len(),
         accepted = candidates.iter().filter(|c| c.accepted).count(),
         "matching done"
@@ -459,7 +501,7 @@ pub fn run_with(
         })
         .collect();
     let mut assembly = assemble(engine.exec, &pieces, &candidates, params);
-    timings.insert("assembly", started.elapsed().as_secs_f64());
+    stages.finish("assembly", started.elapsed().as_secs_f64());
 
     // 3a. second pass (R §8.1, off by default)
     let retry = second_pass_pairs(&names, &pairs, &candidates, &assembly.groups, params);
@@ -486,11 +528,11 @@ pub fn run_with(
             per_pair[at] = found;
         }
         candidates = per_pair.iter().flatten().copied().collect();
-        timings.insert("second_pass", started.elapsed().as_secs_f64());
+        stages.finish("second_pass", started.elapsed().as_secs_f64());
         assembly = assemble(engine.exec, &pieces, &candidates, params);
         tracing::info!(
             pairs = retry.len(),
-            seconds = timings["second_pass"],
+            seconds = stages.timings["second_pass"],
             stage1 = bigger.stage1,
             stage2 = bigger.stage2,
             accepted = candidates.iter().filter(|c| c.accepted).count(),
@@ -507,8 +549,8 @@ pub fn run_with(
         let started = Instant::now();
         poses =
             refine(engine, &fragments, &assembly.groups, &poses, &used, params, options.memory)?;
-        timings.insert("refine", started.elapsed().as_secs_f64());
-        tracing::info!(seconds = timings["refine"], joins = used.len(), "refinement done");
+        stages.finish("refine", started.elapsed().as_secs_f64());
+        tracing::info!(seconds = stages.timings["refine"], joins = used.len(), "refinement done");
     }
     let poses = recenter(&poses, &pieces, &assembly.groups);
 
@@ -536,7 +578,16 @@ pub fn run_with(
         Some(&options.backend_label()),
     )?;
     written.push(out_dir.join("transforms.json"));
-    write_report(out_dir, &stats, thickness, &outcome, &timings, params, &options.backend_label())?;
+    write_report(
+        out_dir,
+        &stats,
+        thickness,
+        &outcome,
+        &stages.timings,
+        params,
+        &options.backend_label(),
+        stages.memory().as_ref(),
+    )?;
     written.push(out_dir.join("report.json"));
     written.push(out_dir.join("report.md"));
     if options.write_meshes {
@@ -559,7 +610,7 @@ pub fn run_with(
     // carries every stage but this one. The fixture dumps confirm it — their `timings` hold
     // `preprocess`, `matching`, `assembly` and `refine` and nothing else — and the port keeps the
     // key out of the file for the same reason, reporting it only to the caller and the log.
-    timings.insert("output", started.elapsed().as_secs_f64());
+    stages.finish("output", started.elapsed().as_secs_f64());
     tracing::info!(out = %out_dir.display(), files = written.len(), "outputs written");
 
     Ok(RunSummary {
@@ -574,7 +625,8 @@ pub fn run_with(
         skipped_pairs: skipped,
         screened,
         second_pass: retry.len(),
-        timings,
+        memory: stages.memory(),
+        timings: stages.timings,
         written,
     })
 }

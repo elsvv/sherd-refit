@@ -167,7 +167,9 @@ fn main() -> Result<()> {
         groups: &assembly.groups,
     };
     let timings = Timings::from_iter([("output".to_owned(), 0.0)]);
-    write_report(&out, &stats, thickness, &outcome, &timings, &params, "cpu")?;
+    // No memory block: the harness rebuilds the reference's own file, and audit §B.3's
+    // sampled peaks are the port's addition (D §4.3).
+    write_report(&out, &stats, thickness, &outcome, &timings, &params, "cpu", None)?;
     write_placed_meshes(
         &out,
         &paths,

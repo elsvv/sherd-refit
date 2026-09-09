@@ -174,6 +174,26 @@ impl<'de, V: Deserialize<'de>> Deserialize<'de> for Ordered<V> {
 /// R §11.2's `timings`: seconds per stage, in the order the pipeline finished them.
 pub type Timings = Ordered<f64>;
 
+/// `timings`' neighbour in `report.json`: the peak resident set of the process, per stage.
+///
+/// Not the reference's — R §11.2 has no such key — and additive in the same sense `engine` is
+/// (D §4.3): a reader that does not know it ignores it, and `sherd-parity`'s `outputs` stage
+/// never sees it, because the value it rebuilds for the comparison carries no memory block.
+///
+/// It exists because the audit's §B.3 asks which stage holds the peak and what a structure that is
+/// never freed costs at it, and D §8's table could not answer: it is a model with one whole-run
+/// measurement beside it. The numbers are **sampled** at
+/// [`SAMPLE_INTERVAL`](crate::memory::RssMonitor) rather than integrated, so like `timings` they
+/// are the part of the file two runs of one build legitimately disagree on.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct MemoryReport {
+    /// The largest resident set seen over the whole run, in bytes.
+    pub peak_rss: u64,
+    /// The largest resident set seen during each stage, in the order the stages finished, in
+    /// bytes. A stage's window starts at what was resident when the previous stage ended.
+    pub stages: Ordered<u64>,
+}
+
 /// One fragment's row of `report.json`'s `fragments` and of R §11.3's fragment table — the
 /// reference's `Fragment.stats()`, key for key and in its order.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -378,6 +398,12 @@ pub struct ReportJson {
     /// Absent from a file the reference wrote, which is why it is optional on the way in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<Engine>,
+    /// Peak resident set per stage (audit §B.3; not in the reference).
+    ///
+    /// Absent from a file the reference wrote and from the value the parity harness rebuilds,
+    /// which is why it is optional and why it is skipped when it is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryReport>,
 }
 
 /// A 4×4 as the nested lists both JSON files carry.
@@ -480,6 +506,10 @@ pub struct Outcome<'a> {
 }
 
 /// R §11.2's `report.json` and R §11.3's `report.md`, both into `out_dir`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "R §11.2's own contents, plus how and on what they were produced"
+)]
 pub fn write_report(
     out_dir: impl AsRef<Path>,
     stats: &[FragmentStats],
@@ -488,9 +518,10 @@ pub fn write_report(
     timings: &Timings,
     params: &Params,
     backend: &str,
+    memory: Option<&MemoryReport>,
 ) -> Result<()> {
     let out_dir = out_dir.as_ref();
-    let json = report_json(stats, thickness, outcome, timings, params, backend);
+    let json = report_json(stats, thickness, outcome, timings, params, backend, memory);
     write_json(&out_dir.join("report.json"), &json)?;
     let markdown = report_markdown(stats, thickness, outcome, timings, params);
     std::fs::write(out_dir.join("report.md"), markdown)
@@ -498,6 +529,10 @@ pub fn write_report(
 }
 
 /// The value [`write_report`] serialises.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "R §11.2's own contents, plus how and on what they were produced"
+)]
 pub fn report_json(
     stats: &[FragmentStats],
     thickness: f64,
@@ -505,6 +540,7 @@ pub fn report_json(
     timings: &Timings,
     params: &Params,
     backend: &str,
+    memory: Option<&MemoryReport>,
 ) -> ReportJson {
     let names = outcome.names;
     ReportJson {
@@ -529,6 +565,7 @@ pub fn report_json(
             .collect(),
         candidates: outcome.candidates.iter().map(|c| CandidateJson::of(c, names)).collect(),
         engine: Some(Engine::of(backend)),
+        memory: memory.cloned(),
     }
 }
 
@@ -1015,7 +1052,7 @@ mod tests {
         );
 
         let stages = ["preprocess", "matching", "assembly", "refine"];
-        let json = report_json(&stats, 3.75, &outcome, &timings, &params, "cpu");
+        let json = report_json(&stats, 3.75, &outcome, &timings, &params, "cpu", None);
         assert_eq!(json.timings.keys().collect::<Vec<&str>>(), stages);
 
         // And serde writes the object in that order rather than the type merely holding it.
@@ -1041,7 +1078,7 @@ mod tests {
         };
         let stats = Vec::new();
         let timings = super::Timings::from_iter([("matching".to_owned(), 1.25)]);
-        let json = report_json(&stats, 3.75, &outcome, &timings, &Params::default(), "cpu");
+        let json = report_json(&stats, 3.75, &outcome, &timings, &Params::default(), "cpu", None);
         let text = serde_json::to_string(&json).expect("report serialises");
         let value: serde_json::Value = serde_json::from_str(&text).expect("report parses");
 

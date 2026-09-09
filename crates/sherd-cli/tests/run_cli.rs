@@ -58,14 +58,24 @@ fn outputs(out: &Path) -> BTreeMap<String, Vec<u8>> {
     files
 }
 
-/// `report.json` with R §11.2's `timings` reduced to its key set — the only field of that file two
-/// runs of the same input may differ in (D §7).
+/// `report.json` with its two sampled fields reduced to their key sets — the only fields of that
+/// file two runs of the same input may differ in (D §7).
+///
+/// `timings` is a wall clock. `memory` (audit §B.3, task H3) is a resident set read at 100 ms:
+/// both are measurements *of* the run rather than results of it, and a run that reproduced either
+/// to the byte would be reporting a constant. The stage **names** are compared, because the two
+/// runs must still have walked the same stages in the same order.
 fn report_without_timings(bytes: &[u8]) -> serde_json::Value {
     let mut value: serde_json::Value =
         serde_json::from_slice(bytes).expect("report.json is valid JSON");
     let timings = value["timings"].as_object().expect("a timings object");
     let keys: Vec<String> = timings.keys().cloned().collect();
     value["timings"] = serde_json::json!(keys);
+    if let Some(memory) = value.get("memory") {
+        let stages = memory["stages"].as_object().expect("a stages object");
+        let keys: Vec<String> = stages.keys().cloned().collect();
+        value["memory"] = serde_json::json!(keys);
+    }
     value
 }
 
@@ -102,7 +112,7 @@ fn two_runs_agree(input: &Path) {
             assert_eq!(
                 report_without_timings(first),
                 report_without_timings(second),
-                "report.json must agree outside its timings"
+                "report.json must agree outside its timings and its sampled memory"
             );
             continue;
         }

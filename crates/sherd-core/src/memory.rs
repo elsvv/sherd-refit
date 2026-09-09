@@ -417,14 +417,162 @@ pub fn physical_memory() -> Option<u64> {
     }
 }
 
+/// The process's resident set size in bytes, or `None` where the platform will not say.
+///
+/// Linux reads `/proc/self/statm`, whose second field is the resident pages; macOS asks `ps`, for
+/// the same reason [`physical_memory`] asks `sysctl` — the workspace denies `unsafe_code` and
+/// `task_info` is the only other way to the number. `ps` costs about 5 ms, which is why
+/// [`RssMonitor`] samples it on a thread of its own and at 100 ms rather than in the stages.
+#[must_use]
+pub fn resident_memory() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = std::fs::read_to_string("/proc/self/statm").ok()?;
+        let pages: u64 = text.split_ascii_whitespace().nth(1)?.parse().ok()?;
+        Some(pages * 4096)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("/bin/ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok()?;
+        let kb: u64 = String::from_utf8(out.stdout).ok()?.trim().parse().ok()?;
+        Some(kb * 1024)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// How often [`RssMonitor`] reads the resident set.
+///
+/// 100 ms is a compromise the measurement itself sets: `preprocess` on a warm cache is under a
+/// second on the development sets, so a coarser interval would miss its peak, and the sample costs
+/// one `ps` — about 5 ms of one core, 5 % of one of the ten this machine has.
+const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Peak resident set size, per stage: a sampler thread and the high-water mark since the last
+/// stage boundary.
+///
+/// D §8's table is a model with one measurement in it (E2's 1.9 GiB for a whole run). The audit's
+/// §B.3 asks a question the model cannot answer — *which stage* holds the peak, and what a
+/// structure that is never freed costs at it — and that needs the number per stage, in the run
+/// itself, on every run rather than in a one-off experiment. This is that instrument:
+/// [`RssMonitor::take_peak`] closes a window and opens the next, and the pipeline calls it where
+/// it writes a timing.
+///
+/// It is a *sampler*, so it reports the largest resident set it **saw**: a spike shorter than
+/// [`SAMPLE_INTERVAL`] can pass between two samples. That is the honest limit of reading a
+/// number the kernel only publishes on request, and it is why the block this feeds sits beside
+/// `timings` — a wall clock and a sampled peak are the two parts of `report.json` that two runs
+/// of the same build legitimately disagree on.
+#[derive(Debug)]
+pub struct RssMonitor {
+    shared: std::sync::Arc<Sampler>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// What the monitor and its thread share.
+#[derive(Debug, Default)]
+struct Sampler {
+    /// The largest sample of the current window, and of the run.
+    marks: Mutex<Marks>,
+    /// Raised to stop the thread; the condition variable wakes it out of its wait.
+    stop: Mutex<bool>,
+    wake: Condvar,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct Marks {
+    window: u64,
+    run: u64,
+}
+
+impl Sampler {
+    /// Reads the resident set and folds it into both marks.
+    fn sample(&self) -> Option<u64> {
+        let rss = resident_memory()?;
+        if let Ok(mut marks) = self.marks.lock() {
+            marks.window = marks.window.max(rss);
+            marks.run = marks.run.max(rss);
+        }
+        Some(rss)
+    }
+}
+
+impl RssMonitor {
+    /// Starts sampling, or returns `None` on a platform whose resident set cannot be read.
+    ///
+    /// The first sample is taken on this thread, so a monitor that exists has at least one.
+    #[must_use]
+    pub fn start() -> Option<Self> {
+        let shared = std::sync::Arc::new(Sampler::default());
+        shared.sample()?;
+        let worker = std::sync::Arc::clone(&shared);
+        let thread = std::thread::Builder::new()
+            .name("sherd-rss".to_owned())
+            .spawn(move || {
+                loop {
+                    let Ok(stop) = worker.stop.lock() else { return };
+                    let Ok((stop, _)) = worker.wake.wait_timeout(stop, SAMPLE_INTERVAL) else {
+                        return;
+                    };
+                    if *stop {
+                        return;
+                    }
+                    drop(stop);
+                    if worker.sample().is_none() {
+                        return;
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self { shared, thread: Some(thread) })
+    }
+
+    /// The largest resident set seen since the last call (or since [`RssMonitor::start`]), in
+    /// bytes, and the window starts again at what is resident now.
+    ///
+    /// A stage shorter than [`SAMPLE_INTERVAL`] still gets a number: this takes a sample of its
+    /// own before it reads the mark.
+    pub fn take_peak(&self) -> u64 {
+        let now = self.shared.sample().unwrap_or(0);
+        let Ok(mut marks) = self.shared.marks.lock() else { return 0 };
+        let peak = marks.window;
+        marks.window = now;
+        peak
+    }
+
+    /// The largest resident set seen over the whole run, in bytes.
+    #[must_use]
+    pub fn peak(&self) -> u64 {
+        self.shared.sample();
+        self.shared.marks.lock().map_or(0, |m| m.run)
+    }
+}
+
+impl Drop for RssMonitor {
+    fn drop(&mut self) {
+        if let Ok(mut stop) = self.shared.stop.lock() {
+            *stop = true;
+        }
+        self.shared.wake.notify_all();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{
-        BYTES_PER_FACE, Budget, MemorySemaphore, PROCESS_FLOOR, admits, concurrent_scans,
-        physical_memory, reservation, scan_faces,
+        BYTES_PER_FACE, Budget, MemorySemaphore, PROCESS_FLOOR, RssMonitor, admits,
+        concurrent_scans, physical_memory, reservation, resident_memory, scan_faces,
     };
 
     const MIB: u64 = 1024 * 1024;
@@ -584,5 +732,30 @@ mod tests {
             assert!(ram >= GIB, "a machine with less than a gigabyte is not one of ours");
             assert_eq!(budget.available(), ram / 2 - PROCESS_FLOOR);
         }
+    }
+
+    /// The instrument audit §B.3's decision is made on: a resident set that is a real number, and
+    /// a window that closes.
+    ///
+    /// The assertions are the ones a sampler can keep. The process is alive and holds a mesh
+    /// library, so its resident set is between a megabyte and the machine's memory; a window's
+    /// peak is at least what the *next* window starts from, because `take_peak` reseeds the
+    /// window with the sample it just took; and the run's peak is never below a window's.
+    #[test]
+    fn the_resident_set_can_be_read_and_a_window_closes() {
+        let Some(rss) = resident_memory() else {
+            return; // not this platform's number to give (the monitor returns `None` too)
+        };
+        assert!(rss > MIB, "{rss} B resident is not a running process");
+        assert!(rss < 1024 * GIB, "{rss} B resident is not this machine");
+
+        let monitor = RssMonitor::start().expect("this platform reads its own resident set");
+        let held: Vec<u64> = (0..2_000_000).collect(); // ~16 MB the sampler can see
+        let first = monitor.take_peak();
+        assert!(first >= rss / 2, "the first window saw the process: {first} against {rss}");
+        let second = monitor.take_peak();
+        assert!(second > 0, "a window shorter than the interval still takes its own sample");
+        assert!(monitor.peak() >= first.max(second), "the run's peak covers every window");
+        assert_eq!(held.len(), 2_000_000, "the allocation is not optimised away");
     }
 }

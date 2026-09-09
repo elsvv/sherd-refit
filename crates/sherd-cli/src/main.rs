@@ -720,7 +720,7 @@ fn run(args: &RunArgs) -> Result<()> {
     if !alone.is_empty() {
         println!("  not assembled: {}", alone.join(", "));
     }
-    print_timings(&summary.timings, wall);
+    print_timings(&summary.timings, summary.memory.as_ref(), wall);
     for line in resolved.device_lines() {
         println!("  {line}");
     }
@@ -761,7 +761,7 @@ fn bench(args: &BenchArgs) -> Result<()> {
         summary.accepted(),
         summary.assembled().count()
     );
-    print_timings(&summary.timings, wall);
+    print_timings(&summary.timings, summary.memory.as_ref(), wall);
     for line in resolved.device_lines() {
         println!("  {line}");
     }
@@ -776,11 +776,27 @@ fn bench(args: &BenchArgs) -> Result<()> {
 }
 
 /// The per-stage table both `run` and `bench` print; the same numbers `report.json` carries.
-fn print_timings(timings: &sherd_core::report::Timings, wall: f64) {
+///
+/// Since task H3 the peak resident set of each stage stands beside its seconds (audit §B.3). It is
+/// a **sampled** number — `report.json`'s `memory` block is the same one — so it is printed to the
+/// megabyte and never to more precision than a 100 ms sampler can claim. A platform whose resident
+/// set cannot be read prints the seconds alone.
+fn print_timings(
+    timings: &sherd_core::report::Timings,
+    memory: Option<&sherd_core::report::MemoryReport>,
+    wall: f64,
+) {
+    const MIB: u64 = 1024 * 1024;
     for (stage, seconds) in timings {
-        println!("  {stage:<12} {seconds:>8.2} s");
+        match memory.and_then(|m| m.stages.get(stage)) {
+            Some(peak) => println!("  {stage:<12} {seconds:>8.2} s {:>7} MiB", peak / MIB),
+            None => println!("  {stage:<12} {seconds:>8.2} s"),
+        }
     }
-    println!("  {:<12} {wall:>8.2} s", "wall");
+    match memory {
+        Some(m) => println!("  {:<12} {wall:>8.2} s {:>7} MiB peak", "wall", m.peak_rss / MIB),
+        None => println!("  {:<12} {wall:>8.2} s", "wall"),
+    }
 }
 
 /// `gpu-check`: D §10.4 layer 3's cross-check table (D §6.8's kernels, then the four batches).

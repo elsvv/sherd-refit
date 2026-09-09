@@ -17,10 +17,11 @@
 //! Step D3 filled in the rest: [`run`] is the reference's `sherd_refit.pipeline.run`, stage for
 //! stage, and the schedule below it is the reference's too — [`pair_blocks`] is `_pair_blocks` and
 //! [`block_size`] the one number `_match_workers` leaves for a single process to act on. Step E2
-//! added D §5's per-fragment `MatchData` cache ([`matching::cache`](crate::matching::cache)),
-//! which the block order was already written for; E1 measured what it can remove and the answer is
-//! the cheap half of a pair's two builds, because R §1.2's `t_pair = min(t_A, t_B)` gives every
-//! *rebuild* a key that belongs to one partner alone.
+//! added D §5's per-fragment `MatchData` cache and task H2 removed it (audit §B.8): E1 had
+//! measured what it can remove — the cheap half of a pair's two builds, because R §1.2's
+//! `t_pair = min(t_A, t_B)` gives every *rebuild* a key that belongs to one partner alone — and E2
+//! measured what it was worth, 0.9 % of CPU and nothing on the wall clock. The block order it was
+//! written for stays: it is the reference's own pair order.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -35,7 +36,6 @@ use crate::collection::{self, Entry};
 use crate::error::{Error, Result};
 use crate::executor::{Backend, Engine, Executor};
 use crate::fragment::{Fragment, cache, samples};
-use crate::matching::cache::MatchCache;
 use crate::matching::hypotheses::Frames;
 use crate::matching::pair::{self, Candidate};
 use crate::matching::screen::{Screened, screen_pair, top_partners};
@@ -690,10 +690,6 @@ fn match_all(
         "matching"
     );
     let done = AtomicUsize::new(0);
-    // D §5's shared `MatchData` cache, one per pass and sized by D §8. It serves the fragment of
-    // a pair whose own `t` is `t_pair` — the other half of every pair is a rebuild at a thickness
-    // that belongs to one partner and is a miss by construction (`matching::cache`).
-    let cache = MatchCache::sized();
     let mut out: Vec<Vec<Candidate>> = vec![Vec::new(); pairs.len()];
     let found: Vec<Vec<(usize, Vec<Candidate>)>> = with_device_slack(engine.exec, || {
         #[allow(clippy::redundant_closure_for_method_calls, reason = "the collect needs the type")]
@@ -709,13 +705,12 @@ fn match_all(
                         watch.check()?;
                         let (a, b) = pairs[k];
                         let started = Instant::now();
-                        let cs = pair::match_pair_cached(
+                        let cs = pair::match_pair_with(
                             engine,
                             &fragments[a],
                             &fragments[b],
                             params,
                             keep,
-                            &cache,
                         );
                         tracing::info!(
                             pair = %format!("{}__{}", fragments[a].name, fragments[b].name),
@@ -736,15 +731,6 @@ fn match_all(
     for (k, cs) in found.into_iter().flatten() {
         out[k] = cs;
     }
-    let stats = cache.stats();
-    tracing::info!(
-        hits = stats.hits,
-        misses = stats.misses,
-        evictions = stats.evictions,
-        hit_rate = stats.hit_rate(),
-        pass = tag.unwrap_or("first"),
-        "match data cache"
-    );
     Ok(out)
 }
 

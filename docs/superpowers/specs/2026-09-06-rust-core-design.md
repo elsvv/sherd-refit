@@ -356,8 +356,16 @@ block schedule takes `--workers`; both fall back to `pipeline::default_workers()
    and measured it (`notes/2026-09-07-e2-tuning.md` §3): 160 hits of 380 lookups on synthetic 20 and
    45 of 110 on pot H — E1's counts exactly — for **0.9 %** of CPU, the bracket having been a lower
    bound because it counted only the stacks that kept the `Pair::build` frame through a work-steal.
-   It is kept because group-level matching (§11, roadmap item 5) changes the arithmetic that makes
-   every expensive key unique, not because 0.9 % justifies it.
+   It was kept because group-level matching (§11, roadmap item 5) changes the arithmetic that makes
+   every expensive key unique, not because 0.9 % justifies it — and **task H2 removed it**
+   (audit §B.8): item 5 is not scheduled, 0.9 % of CPU and nothing on the wall clock is not what
+   300 lines are for, and the entry key carried the fragment's *address* beside its id (because
+   `Fragment::from_mesh_file` leaves `id` at zero), which is the kind of identity that bites when
+   fragments are cloned. `Pair::build` calls `MatchData::at` directly again; the block schedule
+   the cache was written for stays, because it is also the reference's own pair order. Removing it
+   moved no byte of any output on the four development sets, on either backend, which is what a
+   cache whose hits are bit-identical to its misses has to do. Item 5 rebuilds it or does not need
+   it.
    With the GPU executor the block loop becomes a software pipeline (§6.4).
 4. **Assemble** (R§8), **refine** (R§9), **recentre**, **outputs** (R§11). Full-resolution meshes
    are read, transformed and written **in parallel, bounded by step 2's budget** (E2): the files

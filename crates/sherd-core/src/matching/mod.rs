@@ -14,10 +14,10 @@
 //! and applies §6.5's rule, [`pair::match_pair`] drives the whole chain and ranks what comes out
 //! (§5.7), and [`screen`] is R §4.3's optional partner pass, off by default.
 //!
-//! Step E2 added [`cache`]: D §5's shared `MatchData` cache, which the pipeline hands to
-//! [`pair::match_pair_cached`] so that the fragments a block of pairs shares are built once.
+//! [`pair::match_pair_with`] is what the pipeline calls, because `--backend` reaches R §5.2 and
+//! R §7 through the `Engine` it carries. D §5's shared `MatchData` cache lived beside it from
+//! step E2 until task H2 measured it out (audit §B.8): 0.9 % of CPU, nothing on the wall clock.
 
-pub mod cache;
 pub mod coarse;
 pub mod hypotheses;
 pub mod icp;

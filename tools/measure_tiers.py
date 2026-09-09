@@ -145,8 +145,12 @@ def stage_runs(a, out):
         work = os.path.join(out, "work", name)
         for seed in a.seeds:
             dump = os.path.join(out, "runs", "%s_seed%d.json" % (name, seed))
+            # `--tiers off`: this is step 7's measurement of every candidate R §6.5 *accepts*,
+            # and the tier of step 8 is what it exists to choose. Leaving the tier on would make
+            # R §8 assemble from the confirmed joins, which changes `used` and the support graph
+            # this table is measured over.
             cmd = [os.path.join(ROOT, a.bin), "run", indir, "--out", work,
-                   "--backend", a.backend, "--no-preview", "--no-meshes",
+                   "--backend", a.backend, "--no-preview", "--no-meshes", "--tiers", "off",
                    "--seed", str(seed), "--measure", dump]
             wall, rc, log = sh(cmd)
             total += wall

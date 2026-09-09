@@ -154,17 +154,22 @@ fn next_nonce() -> f32 {
     nonce
 }
 
-/// How far from orthonormal a rotation the device wrote may be before it is refused: `max
-/// |RᵀR − I|` over the nine entries, and `|det R − 1|`.
+/// How far from orthonormal a rotation the device wrote may be before it is refused: **both**
+/// `max |RᵀR − I|` over the nine entries and `|det R − 1|` must be inside it.
 ///
-/// The audit's number, and far looser than the `f32` rounding of a rung that ran. On the seven
-/// development collections it fires **once**, and not on a corrupt readback at all: `synthetic_20`
-/// has one stage-1 candidate whose covariance comes out rank-deficient, and
-/// `kernels/icp.wgsl`'s `umeyama_rotation` completes a rank-1 `U` to zero columns rather than to
-/// an orthonormal basis, so it returns a matrix that is 1.0 from orthonormal with `det = 0`. That
-/// is a real defect of the kernel (task H1, `notes/2026-09-09-h1-wd1.md` §4, H1-D1) that this
-/// check found on its first production run; until it is fixed the batch is answered by the CPU
-/// executor, which is the reference implementation's answer to it.
+/// The audit's number, and far looser than the `f32` rounding of a rung that ran — the kernel's
+/// rotations come back orthonormal to about 1e-7. Note what the determinant half of the rule is
+/// and is not: it is `|det R − 1| ≤ 1e-3`, not `det R > 0`, so a *reflection* is refused as
+/// firmly as a singular block (defect V7-D2, which found this doc row saying the weaker thing).
+///
+/// On the eight development collections it fires **nowhere** since task F. It fired once before
+/// it, and not on a corrupt readback at all: `synthetic_20` has one stage-1 candidate whose
+/// covariance comes out rank-deficient, and `kernels/icp.wgsl`'s `umeyama_rotation` completed a
+/// rank-1 `U` to zero columns rather than to an orthonormal basis, so it returned a matrix that is
+/// 1.0 from orthonormal with `det = 0`. That was a real defect of the kernel (H1-D1, task H1's
+/// `notes/2026-09-09-h1-wd1.md` §4) which this check found on its first production run and task F
+/// fixed in `kernels/umeyama.wgsl`; the check stays, because a rank-deficient completion is one of
+/// several ways a block can decode as a plausible pose that is not one.
 pub const ORTHONORMAL_TOLERANCE: f64 = 1e-3;
 
 /// The WGSL source: D §6.2's grid, R §5.4's linear algebra, then the rung that uses both.
@@ -597,7 +602,7 @@ pub struct Check {
 /// |---|---|
 /// | every word finite | the [`SENTINEL`](crate::buffers::SENTINEL) fill of a staging buffer whose copy never ran, and any NaN the arithmetic could not have made |
 /// | word 16 is `nonce + 1` | a block from a **previous call** — a recycled allocation, or, which is what this machine actually produces, a state buffer whose dispatch was aborted and which therefore still holds the nonce the host uploaded rather than its successor |
-/// | rotation orthonormal to [`ORTHONORMAL_TOLERANCE`] with `det > 0` | a page of zeros, which would otherwise decode as a plausible "0 iterations, not converged" answer at the target centroid — **and** H1-D1, the rank-deficient `umeyama_rotation` of [`ORTHONORMAL_TOLERANCE`]'s own note |
+/// | `max \|RᵀR − I\|` **and** `\|det R − 1\|` inside [`ORTHONORMAL_TOLERANCE`] | a page of zeros, which would otherwise decode as a plausible "0 iterations, not converged" answer at the target centroid; a reflection, which `det > 0` alone would let through; and, before task F fixed it, H1-D1's rank-deficient `umeyama_rotation` — see [`ORTHONORMAL_TOLERANCE`]'s own note |
 /// | `0 ≤ count ≤ n_src`, integral | a word that is not the count the kernel writes |
 /// | `error² ≥ 0` | the same, on the residual |
 /// | `0 ≤ iterations ≤ max_iter`, integral | a rung that cannot have run |

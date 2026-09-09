@@ -954,7 +954,7 @@ decoders then check what they can:
 
 | decoder | checks |
 |---|---|
-| `icp::registration` | every word finite; word 16 is `nonce + 1`; the rotation orthonormal to 1e-3 with `det > 0`; `0 ≤ count ≤ n_src` and integral; `error² ≥ 0`; `0 ≤ iterations ≤ max_iter` and integral; the convergence flag 0 or 1 |
+| `icp::registration` | every word finite; word 16 is `nonce + 1`; `max |RᵀR − I|` **and** `|det R − 1|` inside 1e-3 (V7-D2: the determinant is held to 1, not merely to a sign, so a reflection is refused too); `0 ≤ count ≤ n_src` and integral; `error² ≥ 0`; `0 ≤ iterations ≤ max_iter` and integral; the convergence flag 0 or 1 |
 | `coarse::counts_of` | the last word is this call's nonce; every count is `≤ points` |
 
 One refused block condemns the **whole batch** — a readback is one copy of one buffer, so a block

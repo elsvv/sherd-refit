@@ -38,6 +38,7 @@ use crate::matching::nms;
 use crate::matching::scales::Scales;
 use crate::matching::verify::{self, Scores, Surfaces};
 use crate::params::Params;
+use crate::tiers::Tier;
 use crate::types::FragId;
 
 /// R §5.3's cap on the hypotheses the coarse NMS walks.
@@ -366,7 +367,14 @@ impl<'a> Pair<'a> {
 
     /// One candidate of this pair, with the two fragment ids R §11.1 writes it under.
     fn candidate(&self, transform: Matrix4<f64>, scores: Scores, accepted: bool) -> Candidate {
-        Candidate { a: self.a.fragment.id, b: self.b.fragment.id, transform, scores, accepted }
+        Candidate {
+            a: self.a.fragment.id,
+            b: self.b.fragment.id,
+            transform,
+            scores,
+            accepted,
+            tier: Tier::of_accept(accepted),
+        }
     }
 
     /// `a__b`, for the log lines and the fixture scope.
@@ -428,11 +436,13 @@ impl SurfaceLadder {
     }
 }
 
-/// One verified candidate: a pose, R §6's scores and R §6.5's verdict (D §4.1).
+/// One verified candidate: a pose, R §6's scores, R §6.5's verdict and roadmap item 3's
+/// confidence band (D §4.1).
 ///
 /// `a` and `b` are the two fragments' ids in the collection, and the pose maps **b** into **a**'s
-/// frame (R §0). `tier` — roadmap item 3's confidence band — is not here: in phase 1 it would be
-/// `accepted` under another name, and it arrives with the constraint solver that needs it.
+/// frame (R §0). [`Candidate::tier`] is R §6.5's verdict under another name
+/// ([`Tier::of_accept`]) until [`crate::tiers::classify`] has run over the finished match; a run
+/// with the tier pass off never calls it, and R §8's gate is then `accepted` exactly as before.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Candidate {
     /// The fragment the pose maps *into* (R §4.1's first name).
@@ -445,6 +455,9 @@ pub struct Candidate {
     pub scores: Scores,
     /// R §6.5's verdict.
     pub accepted: bool,
+    /// Roadmap item 3's confidence band (audit §D.1), [`Tier::of_accept`] until the tier pass has
+    /// spoken.
+    pub tier: Tier,
 }
 
 impl Candidate {
@@ -453,6 +466,30 @@ impl Candidate {
     pub fn score(&self) -> f64 {
         self.scores.score()
     }
+
+    /// Whether R §8 may build with this candidate, under the gate the run is using.
+    #[inline]
+    #[must_use]
+    pub fn admitted(&self, gate: Gate) -> bool {
+        match gate {
+            Gate::Accepted => self.accepted,
+            Gate::Confirmed => self.tier == Tier::Confirmed,
+        }
+    }
+}
+
+/// Which candidates R §8 is allowed to build an assembly from.
+///
+/// [`Gate::Accepted`] is R §8 as the reference wrote it and as `--tiers off` runs it;
+/// [`Gate::Confirmed`] is audit §D.1's rule — *"the assembly is built from confirmed joins only;
+/// probable joins are listed and rendered, never placed"*.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Gate {
+    /// R §6.5's own verdict.
+    #[default]
+    Accepted,
+    /// [`Tier::Confirmed`] and nothing else.
+    Confirmed,
 }
 
 /// R §4–§6 for one pair of fragments, from the two fragments themselves.

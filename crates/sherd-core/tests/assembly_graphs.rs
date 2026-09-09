@@ -23,6 +23,7 @@ use sherd_core::executor::CPU;
 use sherd_core::matching::pair::Candidate;
 use sherd_core::matching::verify::Scores;
 use sherd_core::spatial::bvh::RayScene;
+use sherd_core::tiers::Tier;
 use sherd_core::types::FragId;
 
 /// A join with the given ranking score (R §5.7's `seam · tight`) and a pure translation.
@@ -33,7 +34,7 @@ fn join(a: FragId, b: FragId, tau: [f64; 3], score: f64) -> Candidate {
 /// A join at an arbitrary pose.
 fn pose_join(a: FragId, b: FragId, transform: Matrix4<f64>, score: f64) -> Candidate {
     let scores = Scores { seam: score, tight: 1.0, ..Scores::default() };
-    Candidate { a, b, transform, scores, accepted: true }
+    Candidate { a, b, transform, scores, accepted: true, tier: Tier::Probable }
 }
 
 fn translation(tau: [f64; 3]) -> Matrix4<f64> {

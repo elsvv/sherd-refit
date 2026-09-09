@@ -95,6 +95,7 @@ pub mod render;
 pub mod report;
 pub mod rng;
 pub mod spatial;
+pub mod tiers;
 pub mod types;
 pub mod vec3;
 

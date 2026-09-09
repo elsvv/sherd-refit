@@ -40,6 +40,8 @@
 //! the deepest excursion is the smallest positive distance, and that is found by a running
 //! minimum whose window shrinks with the best distance so far.
 
+use std::cmp::Ordering;
+
 use nalgebra::Matrix4;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -597,6 +599,56 @@ pub fn accept(s: &Scores, p: &crate::params::Params, sc: &Scales) -> bool {
         && s.pen <= p.max_pen
         && s.seam >= p.min_seam
         && s.cont_n >= p.min_cont_n
+}
+
+/// Whether `value` **fails** a floor: it is not at or above `limit`.
+///
+/// Written through `partial_cmp` so that a NaN fails rather than passing, which is the reading
+/// [`accept`]'s own `>=` has and the reading M1's threshold table was computed under.
+#[inline]
+#[must_use]
+pub fn under(value: f64, limit: f64) -> bool {
+    !matches!(value.partial_cmp(&limit), Some(Ordering::Greater | Ordering::Equal))
+}
+
+/// Whether `value` **fails** a ceiling: it is not at or below `limit`. A NaN fails.
+#[inline]
+#[must_use]
+pub fn over(value: f64, limit: f64) -> bool {
+    !matches!(value.partial_cmp(&limit), Some(Ordering::Less | Ordering::Equal))
+}
+
+/// Which of R §6.5's five limits these scores fail, in the order [`accept`] reads them.
+///
+/// The sentence a report prints beside a rejected candidate: `accept` answers yes or no, and a
+/// conservator asked to trust the answer needs the *which*. The gap is read against the pair's own
+/// limit as the report prints it (`s.gap` and `s.gap_limit`, both in `t`) rather than against
+/// `sc.gap` in units — the two are the same test divided by `t` on both sides, and a candidate
+/// sitting on the limit to the last bit could in principle be named here and accepted by
+/// [`accept`], which is why an empty list is reported as R §6.5's verdict and not as a
+/// contradiction.
+pub fn refusals(s: &Scores, p: &crate::params::Params) -> Vec<String> {
+    let mut failed = Vec::new();
+    if s.partial {
+        failed.push(format!("rejected early (tight below {})", p.early_reject_tight));
+        return failed;
+    }
+    if under(s.tight, p.min_tight) {
+        failed.push(format!("tight {:.3} < {}", s.tight, p.min_tight));
+    }
+    if over(s.gap, s.gap_limit) {
+        failed.push(format!("gap {:.4} t > {:.4} t", s.gap, s.gap_limit));
+    }
+    if over(s.pen, p.max_pen) {
+        failed.push(format!("penetration {:.4} > {}", s.pen, p.max_pen));
+    }
+    if under(s.seam, p.min_seam) {
+        failed.push(format!("seam {:.1} t < {} t", s.seam, p.min_seam));
+    }
+    if under(s.cont_n, p.min_cont_n) {
+        failed.push(format!("normal agreement {:.3} < {}", s.cont_n, p.min_cont_n));
+    }
+    failed
 }
 
 /// numpy's `median`: the middle of an odd sample, the mean of the two middle ones of an even one.

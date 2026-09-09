@@ -14,6 +14,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::tiers::Thresholds;
+
 /// Thresholds of the matcher; `Params::default()` is the reference's default run.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -114,6 +116,16 @@ pub struct Params {
     pub max_frac_points: u32,
     /// Seed of every draw the pipeline makes (R §10).
     pub seed: u64,
+    /// Roadmap item 3's confidence tier (audit §D.1), or `None` — the default — for a run that
+    /// does not compute one.
+    ///
+    /// Not one of R §1.1's 46 knobs, and last in the struct and skipped when it is `None` for
+    /// exactly that reason: a run with the tier pass off serialises the same 46 keys the reference
+    /// does, so `transforms.json`, `report.json` and every fixture the parity harness compares
+    /// against are the bytes they were. A run with the pass on carries the set it used here, in
+    /// both output files, which is where "the tier set used" lives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tiers: Option<Thresholds>,
 }
 
 impl Default for Params {
@@ -165,6 +177,7 @@ impl Default for Params {
             min_frac_points: 5000,
             max_frac_points: 12000,
             seed: 0,
+            tiers: None,
         }
     }
 }
@@ -178,12 +191,28 @@ mod tests {
         let p = Params::default();
         let json = serde_json::to_value(p).expect("Params serialises");
         let object = json.as_object().expect("an object");
-        assert_eq!(object.len(), 46, "R §1.1 lists 46 parameters");
+        assert_eq!(object.len(), 46, "R §1.1 lists 46 parameters, and the tier set is not one");
         assert_eq!(object["dihedral_tol"], 25.0);
         assert_eq!(object["stage1"], 250);
         assert_eq!(object["seed"], 0);
         let back: Params = serde_json::from_value(json).expect("Params deserialises");
         assert_eq!(back, p);
+    }
+
+    /// The tier set is the 47th key and only when a run used one, which is what keeps a
+    /// `--tiers off` run's two output files byte-identical to the reference's.
+    #[test]
+    fn the_tier_set_is_the_only_key_beyond_r_1_1_and_it_is_optional() {
+        let p = Params { tiers: Some(crate::tiers::Thresholds::default()), ..Params::default() };
+        let json = serde_json::to_value(p).expect("Params serialises");
+        let object = json.as_object().expect("an object");
+        assert_eq!(object.len(), 47);
+        assert_eq!(object["tiers"]["min_tight"], 0.35);
+        assert_eq!(serde_json::from_value::<Params>(json).expect("round trip"), p);
+        // And a file written before the tier existed still reads back, as `None`.
+        let mut older = serde_json::to_value(Params::default()).expect("Params serialises");
+        older.as_object_mut().expect("an object").remove("tiers");
+        assert_eq!(serde_json::from_value::<Params>(older).expect("round trip").tiers, None);
     }
 
     #[test]

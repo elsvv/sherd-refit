@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use nalgebra::Matrix4;
 
 use crate::executor::Executor;
-use crate::matching::pair::Candidate;
+use crate::matching::pair::{Candidate, Gate};
 use crate::matching::verify::pose_inverse;
 use crate::params::Params;
 use crate::types::FragId;
@@ -154,11 +154,11 @@ pub struct Assembly {
 ///   whose order is insertion order: pairs tied on score come back in the order the matcher
 ///   produced them, which is R §4.1's `itertools.combinations` order. `sort_by` in Rust is stable
 ///   too, and the insertion order is tracked explicitly rather than left to a hash map.
-fn best_per_pair(candidates: &[Candidate]) -> Vec<usize> {
+fn best_per_pair(candidates: &[Candidate], gate: Gate) -> Vec<usize> {
     let mut best: BTreeMap<(FragId, FragId), usize> = BTreeMap::new();
     let mut order: Vec<(FragId, FragId)> = Vec::new();
     for (i, c) in candidates.iter().enumerate() {
-        if !c.accepted {
+        if !c.admitted(gate) {
             continue;
         }
         match best.entry((c.a, c.b)) {
@@ -306,8 +306,26 @@ pub fn assemble(
     candidates: &[Candidate],
     p: &Params,
 ) -> Assembly {
+    assemble_with(exec, pieces, candidates, p, Gate::Accepted)
+}
+
+/// R §8 over the candidates one [`Gate`] admits.
+///
+/// [`Gate::Accepted`] is [`assemble`] — R §8 as the reference wrote it. [`Gate::Confirmed`] is
+/// audit §D.1's rule: *"the assembly is built from confirmed joins only; probable joins are listed
+/// and rendered, never placed"*. Nothing else in the pass changes, and that is deliberate — the
+/// tier decides which joins R §8 may see, and R §8's own greedy rule, its ties, its penetration
+/// and consistency tests and the sentences it writes for a refusal stay exactly as they are. A
+/// join listed under "confirmed joins not used" was therefore refused by R §8 and not by the tier.
+pub fn assemble_with(
+    exec: &dyn Executor,
+    pieces: &[Piece<'_>],
+    candidates: &[Candidate],
+    p: &Params,
+    gate: Gate,
+) -> Assembly {
     let started = std::time::Instant::now();
-    let accepted = best_per_pair(candidates);
+    let accepted = best_per_pair(candidates, gate);
     let inputs = Inputs { exec, pieces, candidates, accepted: &accepted, p };
     let mut grouping = Grouping::new(pieces.len());
     let mut used: Vec<usize> = Vec::new();

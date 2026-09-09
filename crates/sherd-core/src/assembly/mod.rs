@@ -24,5 +24,5 @@ pub mod greedy;
 pub mod groups;
 
 pub use consistency::{ROT_TOL_DEG, TRANS_TOL_T};
-pub use greedy::{Assembly, Rejected, Rejection, assemble};
+pub use greedy::{Assembly, Rejected, Rejection, assemble, assemble_with};
 pub use groups::{Grouping, Piece, recenter};

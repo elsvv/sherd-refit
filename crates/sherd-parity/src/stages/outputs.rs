@@ -394,6 +394,7 @@ fn markdown_row(
             transform: assembly::matrix(&c.transform),
             scores: c.scores,
             accepted: c.accepted,
+            tier: sherd_core::tiers::Tier::of_accept(c.accepted),
         });
     }
     // The reference's `used` and `rejected` hold the very objects its `cands` holds, so each one

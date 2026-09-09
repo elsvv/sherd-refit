@@ -693,6 +693,9 @@ pub fn reference_candidates(
                 transform: c.pose(),
                 scores: c.scores,
                 accepted: c.accepted,
+                // The harness rebuilds the reference's own candidate list, and the reference has
+                // no tier; R §8's gate here is `accepted`, which is what this band means.
+                tier: sherd_core::tiers::Tier::of_accept(c.accepted),
             });
         }
     }

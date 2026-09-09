@@ -135,10 +135,13 @@ pub fn upload<T: Pod>(gpu: &Gpu, label: &str, data: &[T]) -> Buffer {
 /// **previous** call's answer, which decodes as a plausible pose of the wrong pair.
 pub const SENTINEL: u32 = 0xFFFF_FFFF;
 
-/// A buffer the kernels write and the host reads back, pre-filled with [`SENTINEL`].
+/// A buffer the kernels write, pre-filled with [`SENTINEL`].
 ///
 /// `mapped_at_creation` costs one memset of a few hundred KB on a unified-memory adapter and turns
-/// "the kernel did not write this word" from an undetectable state into a detected one.
+/// "the kernel did not write this word" from an undetectable state into a detected one. It is
+/// applied to the device-side scratch as well as to what the host reads: `icp`'s correspondence
+/// array is never read back, but `SENTINEL` is `grid.wgsl`'s `MISS`, so a slice of it the search
+/// pass failed to write reads as "no correspondence" rather than as some previous call's index.
 pub fn output(gpu: &Gpu, label: &str, bytes: u64) -> Buffer {
     let buffer = gpu.device().create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),

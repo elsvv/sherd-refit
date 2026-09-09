@@ -419,10 +419,13 @@ pub fn physical_memory() -> Option<u64> {
 
 /// The process's resident set size in bytes, or `None` where the platform will not say.
 ///
-/// Linux reads `/proc/self/statm`, whose second field is the resident pages; macOS asks `ps`, for
-/// the same reason [`physical_memory`] asks `sysctl` — the workspace denies `unsafe_code` and
-/// `task_info` is the only other way to the number. `ps` costs about 5 ms, which is why
-/// [`RssMonitor`] samples it on a thread of its own and at 100 ms rather than in the stages.
+/// Linux reads `/proc/self/statm`, whose second field is the resident pages, **assumed 4 KiB** —
+/// `sysconf(_SC_PAGESIZE)` is a `libc` call and the workspace denies `unsafe_code`, so a kernel
+/// built with 64 KiB pages would read sixteen times low here; every machine this port is measured
+/// on is 4 KiB. macOS asks `ps`, for the same reason [`physical_memory`] asks `sysctl`, and
+/// `task_info` is the only other way to the number. The `ps` costs **4.2 ms** measured on this
+/// machine, which is why [`RssMonitor`] samples it on a thread of its own and at 100 ms rather
+/// than inside the stages.
 #[must_use]
 pub fn resident_memory() -> Option<u64> {
     #[cfg(target_os = "linux")]
@@ -450,7 +453,8 @@ pub fn resident_memory() -> Option<u64> {
 ///
 /// 100 ms is a compromise the measurement itself sets: `preprocess` on a warm cache is under a
 /// second on the development sets, so a coarser interval would miss its peak, and the sample costs
-/// one `ps` — about 5 ms of one core, 5 % of one of the ten this machine has.
+/// one `ps` — 4.2 ms of one core, about 4 % of one of the ten this machine has, and 0.4 % of the
+/// machine. A 28-minute 170-fragment run pays roughly 70 s of one core for it.
 const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Peak resident set size, per stage: a sampler thread and the high-water mark since the last

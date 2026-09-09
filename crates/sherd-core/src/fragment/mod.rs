@@ -407,8 +407,9 @@ impl Fragment {
     /// the last `try_place` — and the two stages that follow, R §9's refinement and R §11.4's
     /// writers, are the ones that hold a full-resolution original per job. Measured on
     /// `synthetic_20` (20 fragments, 3.66 M working-mesh faces): **472 MB** of whole-mesh trees
-    /// and **46 MB** of fracture trees, which is 12.9 B and 1.2 B per working-mesh face and, at
-    /// D §8's 170 fragments, about 4 GB and 400 MB.
+    /// and **46 MB** of fracture trees — 23.6 MB and 2.3 MB a fragment, or **129 B** and
+    /// **12.5 B** per working-mesh face, so at D §8's 170 × 200 k faces about **4.4 GB** and
+    /// **0.4 GB**.
     ///
     /// It cannot move a result: nothing reads either tree afterwards, and a fragment asked for one
     /// again simply builds it again — the `OnceLock` is reset, not poisoned. It is not enough on

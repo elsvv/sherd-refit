@@ -14,6 +14,14 @@
 //! still a `par_iter` over the collection with `--threads` sizing the pool, and the semaphore only
 //! decides when a job may start.
 //!
+//! Step H3 added two things the audit's §B.2 and §B.3 asked for and one it asked for in §C.3:
+//! R §9's refinement takes D §5 step 2's reservation for the original scan it reads, as
+//! preprocessing and R §11.4's writers do; both BVHs are released once their last reader is done,
+//! which is after the second pass and before the two stages that hold an original per job; and
+//! every stage records the peak resident set beside its seconds ([`StageLog`]), which is the
+//! measurement the second of those decisions was made on. R §10's seed reaches R §3.5's samplers
+//! from `Params::seed`, which is what `--seed` sets.
+//!
 //! Step D3 filled in the rest: [`run`] is the reference's `sherd_refit.pipeline.run`, stage for
 //! stage, and the schedule below it is the reference's too — [`pair_blocks`] is `_pair_blocks` and
 //! [`block_size`] the one number `_match_workers` leaves for a single process to act on. Step E2
@@ -332,7 +340,8 @@ impl StageLog {
         tracing::info!(stage, seconds, peak_mib = peak / (1024 * 1024), "stage done");
     }
 
-    /// D §4.3's neighbour of `timings`, or `None` where the resident set cannot be read.
+    /// `report.json`'s `memory` block — `timings`' neighbour — or `None` where the resident
+    /// set cannot be read.
     fn memory(&self) -> Option<MemoryReport> {
         let monitor = self.monitor.as_ref()?;
         Some(MemoryReport { peak_rss: monitor.peak(), stages: self.peaks.clone() })
@@ -558,7 +567,7 @@ pub fn run_with(
     // last pair, R §6.4's whole-mesh tree with the last `try_place`. R §8.2's recentring reads
     // only the surface samples, so what follows — R §9's refinement and R §11's writers, the two
     // stages that hold one full-resolution original per job — does not have to make room for
-    // 4 GB of trees on a 170-fragment collection. The `Piece` list is dropped with them, because
+    // 4.4 GB of trees on a 170-fragment collection. The `Piece` list is dropped with them, because
     // it holds the whole-mesh trees' `Arc`s; `placed` is R §8.2's own view, without them.
     let before = crate::memory::resident_memory();
     drop(pieces);

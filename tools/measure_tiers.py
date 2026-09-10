@@ -1227,7 +1227,16 @@ def render_colour(rows):
           "Quantiles are 0, 5, 50, 95, 100 %.", "",
           "| set | seed | distance | same-object (n) | quantiles | cross-object (n) | quantiles |",
           "|---|---:|---|---:|---|---:|---|"]
-    q = lambda v: "-" if not v else " / ".join("%.3g" % x for x in v)
+
+    def q(v):
+        """The five quantiles, or `-` when the class this row describes is empty.
+
+        ``quantiles`` answers an empty class with a list of ``None``, and on every collection this
+        project can run the stage on the *cross-object* class is exactly that: R §6.5 accepts no
+        pair that crosses an object (task S2 §5).  A dash is the honest cell; formatting it as a
+        number is what raised ``TypeError`` before this was fixed."""
+        return "-" if not v or v[0] is None else " / ".join(fmt(x, "%.3g") for x in v)
+
     for r in rows:
         for key in ("frac_delta_e", "shell_hist"):
             c = r[key]

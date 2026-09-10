@@ -1200,6 +1200,19 @@ fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
         },
         arms_sentence(th),
     ));
+    if th.agree_seeds > 1 {
+        lines.push(String::new());
+        lines.push(format!(
+            "This run also matched the collection **{} times**, at {} different seeds, and a join \
+             is confirmed here only where every one of those runs confirmed it at the same \
+             placement (within {} t and {}°). A join one run confirmed and another did not is in \
+             the probable band with that reason printed.",
+            th.agree_seeds,
+            th.agree_seeds,
+            crate::tiers::RESEARCH_T,
+            crate::tiers::RESEARCH_DEG,
+        ));
+    }
     if coloured {
         lines.push(String::new());
         lines.push(

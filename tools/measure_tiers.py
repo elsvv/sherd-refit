@@ -1640,6 +1640,15 @@ def stage_rules(a, out):
 #     It costs a second whole run and the table says so.
 R1_COLLECTIONS = ("dev45", "mixed_all", "synthetic_mix3_60")
 
+# The rule task R1 ships (`sherd_core::tiers::Thresholds::R1`), spelled the way :func:`r1_rules`
+# spells it, so that the table's own rows can be pointed at.  It is named here rather than found by
+# a sort because it is not the top of any single ranking: it is the best rule that is clean on the
+# development runs and on `synthetic_mix3_60`, holds audit §E step 8's terracotta row at ten of ten,
+# and confirms **no cross-object join** on `mixed_all` -- and every rule that beats it on the last
+# count alone buys that with a rival distance of 25-30 t, which loses the terracotta.
+R1_SHIPPED = ("support OR (margin(wide) >= 2, rival >= 5 t, re-search 2, rival refused, "
+              "strict on redraws)")
+
 
 def r1_group(name):
     """Which column of task R1's table a run belongs to."""
@@ -1857,8 +1866,15 @@ def stage_r1(a, out):
     table = sweep("all", "")
     # One answer per collection, so that the agreement mode below is compared with something it
     # can be compared with: a rule read off a single run, at that collection's first seed.
-    leading = {"support-only", "m1", "s3"} | {
-        t["rule"] for t in sorted(table, key=lambda t: (t["false"], -t["correct"]))[:30]}
+    # Two orders, because the two questions the table answers are different: "clean everywhere"
+    # ranks by the total false count, and "best single run a museum pays for once" ranks by the
+    # false count on the collection the prohibition is about.  A rule that leads either belongs in
+    # the one-answer comparison, and the three named rules are always in it.
+    def top(key, n=20):
+        return {t["rule"] for t in sorted(table, key=key)[:n]}
+    leading = ({"support-only", "m1", "s3", R1_SHIPPED}
+               | top(lambda t: (t["false"], -t["correct"]))
+               | top(lambda t: (t["per"].get("mixed_all", {}).get("false", 99), -t["correct"])))
     one = sweep("seed0", " @ seed 0", only=leading)
     agree = sweep("agree2", " + agree 2 seeds", only=leading)
 

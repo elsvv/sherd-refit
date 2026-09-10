@@ -403,6 +403,26 @@ struct RunArgs {
     /// draw the run made and does not on another.
     #[arg(long, value_name = "on|off")]
     tier_redraw_strict: Option<Switch>,
+    /// Task R1: match and tier the whole collection **N times**, at N different seeds, and confirm
+    /// a join only where every run confirmed that pair at the same placement.
+    ///
+    /// Off by default — `0` and `1` both mean one run — and the honest reason is the price: the matching stage and the tier
+    /// pass run once per seed, so `2` roughly doubles a run. What it buys is the last false join —
+    /// task R1's table reaches zero false confirmed joins on `mixed_all` at two seeds and no
+    /// single-run rule it measured does. A wrong pose is a function of the draw and a right one is
+    /// not; this is the re-search's question asked of a whole collection instead of one pair.
+    ///
+    /// It never promotes: a join no run confirmed stays where it was, and the extra runs' own
+    /// candidates, poses and assembly are thrown away.
+    /// At most 4: the extra seeds are `sherd_core::tiers::AGREE_OFFSETS`, and there are three of
+    /// them.
+    #[arg(
+        long,
+        default_value_t = Thresholds::default().agree_seeds,
+        value_parser = clap::value_parser!(u32).range(0..=4),
+        value_name = "N"
+    )]
+    tier_agree_seeds: u32,
     /// Degrees; worst rotation over the pose's twelve one-ULP neighbours a confirmed join may
     /// show. Off by default: M1 measured the whole range at 1.6e-14 to 4.1e-7 degrees, so there is
     /// no threshold in it and the number is reported instead.
@@ -568,6 +588,7 @@ impl RunArgs {
                     strict_on_redraws: self
                         .tier_redraw_strict
                         .map_or(preset.strict_on_redraws, |s| s == Switch::On),
+                    agree_seeds: self.tier_agree_seeds,
                     max_determined_deg: self.tier_max_determined_deg,
                     min_resample_accept: self.tier_resample_accept,
                 }),

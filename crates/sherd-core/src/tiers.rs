@@ -454,6 +454,16 @@ pub struct Thresholds {
     /// [`Probes::resamples`] already carries, so the test costs nothing a run has not paid for.
     #[serde(default)]
     pub strict_on_redraws: bool,
+    /// Task R1: how many independent **runs** of the whole matching, at different seeds, must
+    /// confirm a join at the same placement before it stays confirmed. `0` and `1` are off.
+    ///
+    /// A run-level knob and not a per-candidate test, like [`Thresholds::research_seeds`]: it
+    /// lives here so that `report.json` carries the rule the run used and `report.md` describes
+    /// it. It is the strongest witness this project has measured and the most expensive — the
+    /// matching and the tier pass run once per seed — and it is **off by default** for that
+    /// reason. `--tier-agree-seeds 2` is what turns it on (§R1 note §5).
+    #[serde(default)]
+    pub agree_seeds: u32,
     /// Degrees; off by default (see the type's own note).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_determined_deg: Option<f64>,
@@ -497,6 +507,7 @@ impl Thresholds {
         research_seeds: 0,
         rival_refused: false,
         strict_on_redraws: false,
+        agree_seeds: 0,
         max_determined_deg: None,
         min_resample_accept: None,
     };
@@ -1516,6 +1527,31 @@ fn research_pair(
         .collect()
 }
 
+/// Task R1: how much a run's own seed may be moved for an agreement run, one offset per extra
+/// seed.
+///
+/// Deliberately not [`RESAMPLE_OFFSETS`]: those two collections are already redrawn for the
+/// stability rows and the re-search, and an agreement run that reused them would be asking the
+/// same draw two questions and calling the second answer independent.
+pub const AGREE_OFFSETS: [u64; 3] = [3_000_000, 4_000_000, 5_000_000];
+
+/// Task R1: whether two poses of the same pair put the sherd in the same place, on the
+/// re-search's own terms — [`RESEARCH_T`] and [`RESEARCH_DEG`].
+///
+/// The distance is [`placement_gap`]'s — the **worst** displacement over every twentieth vertex of
+/// B — rather than the fracture centroid's, because this compares two whole runs and not a probe
+/// against its own pair, and the worst-vertex reading is the one [`SAME_PLACEMENT_T`] and
+/// [`rival`] already use for "is this a different placement".
+#[must_use]
+pub fn same_placement(b: &Fragment, here: &Matrix4<f64>, there: &Matrix4<f64>, t: f64) -> bool {
+    if !(t.is_finite() && t > 0.0) {
+        return false;
+    }
+    let moved = placement_gap(b, here, there) / t;
+    let angle = rotation_angle_deg(&(pose_inverse(there) * here));
+    moved.is_finite() && moved <= RESEARCH_T && angle.is_finite() && angle <= RESEARCH_DEG
+}
+
 /// Whether a re-search's own best accepted pose **is** this placement (task S3).
 ///
 /// Both halves have to hold, and both are read as `<=` so that a probe that moved the sherd by
@@ -1819,6 +1855,7 @@ mod tests {
         assert_eq!(th.min_research, 2, "both re-searches have to land on the placement");
         assert!(th.rival_refused, "the second placement must be one R §6.5 refuses");
         assert!(th.strict_on_redraws, "the strict half must hold on the redraws too");
+        assert_eq!(th.agree_seeds, 0, "the agreement mode is a flag, never a default");
         assert_eq!(th, Thresholds::R1, "the default *is* the preset the note names");
         // The strict half is M1's, value for value: S3 and R1 moved the second arm and nothing
         // else. Both are stated as a difference in named fields rather than by eye.
@@ -1849,7 +1886,7 @@ mod tests {
         // The two retired arms are skipped on the way out, so the tier set a report carries is
         // the numbers that are in force and no nulls.
         let json = serde_json::to_value(th).expect("Thresholds serialises");
-        assert_eq!(json.as_object().expect("an object").len(), 14);
+        assert_eq!(json.as_object().expect("an object").len(), 15);
         assert_eq!(serde_json::from_value::<Thresholds>(json).expect("round trip"), th);
         // A tier set written before task S3 has none of its keys, and reading it back has to give
         // M1's rule, which is what that file described.

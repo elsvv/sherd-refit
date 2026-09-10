@@ -220,6 +220,65 @@ fn a_measured_run_writes_the_same_outputs_and_one_more_file() {
     std::fs::remove_dir_all(&measured_dir).ok();
 }
 
+/// Task R1's agreement mode: the collection matched twice at two seeds, and a join confirmed only
+/// where both runs put the sherd in the same place.
+///
+/// Three claims. It **runs**: `--tier-agree-seeds 2` adds a `tier_agree` stage to the clock and
+/// writes the number it used into the tier set the report carries, so a reader of `report.json`
+/// knows which rule made it. It **never promotes**: every join it confirms was confirmed by the
+/// ordinary single-seed run of the same collection, because the pass only ever moves a candidate
+/// from confirmed to probable. And a join it demotes says **why**, in the same `failed` list every
+/// other refusal is written into, naming the seed that disagreed.
+#[test]
+fn the_agreement_mode_only_ever_takes_joins_out_of_the_confirmed_band() {
+    let input = repo_root().join("fixtures/slab/input");
+    let once_dir = scratch("agree-once");
+    let twice_dir = scratch("agree-twice");
+    run_with(&input, &once_dir, &AMBIGUOUS);
+    run_with(&input, &twice_dir, &["--tier-rival-refused", "off", "--tier-agree-seeds", "2"]);
+
+    let read = |dir: &Path| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(dir.join("report.json")).expect("report.json"))
+            .expect("valid JSON")
+    };
+    let once = read(&once_dir);
+    let twice = read(&twice_dir);
+    assert_eq!(once["params"]["tiers"]["agree_seeds"], 0, "off by default");
+    assert_eq!(twice["params"]["tiers"]["agree_seeds"], 2, "and the report carries the rule");
+    assert!(
+        twice["timings"]["tier_agree"].as_f64().expect("the pass is on the clock") >= 0.0,
+        "the agreement pass is a stage of its own"
+    );
+
+    let confirmed = |report: &serde_json::Value| -> BTreeMap<String, usize> {
+        let mut out = BTreeMap::new();
+        for c in report["candidates"].as_array().expect("candidates") {
+            if c["tier"] == "confirmed" {
+                *out.entry(format!("{}|{}", c["a"], c["b"])).or_default() += 1;
+            }
+        }
+        out
+    };
+    let (before, after) = (confirmed(&once), confirmed(&twice));
+    for (pair, n) in &after {
+        assert!(before.contains_key(pair), "{pair} was confirmed only by the agreement mode");
+        assert!(n <= &before[pair], "{pair} gained confirmed candidates");
+    }
+    // And a demotion is written where every other refusal is.
+    for c in twice["candidates"].as_array().expect("candidates") {
+        if c["tier"] == "probable"
+            && let Some(failed) = c["evidence"]["failed"].as_array()
+            && let Some(line) = failed.iter().filter_map(|f| f.as_str()).find(|f| {
+                f.starts_with("agreement:")
+            })
+        {
+            assert!(line.contains("did not confirm this pair at this placement"), "{line}");
+        }
+    }
+    std::fs::remove_dir_all(&once_dir).ok();
+    std::fs::remove_dir_all(&twice_dir).ok();
+}
+
 /// Roadmap item 3's off switch, and the rule it turns on.
 ///
 /// Two things at once, because they are one statement. `--tiers off` writes exactly the file set

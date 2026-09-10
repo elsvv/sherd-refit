@@ -633,6 +633,20 @@ pub fn run_with(
     // accepted-candidate graph and not the groups — and it needs R §6.1's fracture BVHs, which are
     // alive from the last pair until the block that releases them below.
     let mut tiered = tier_pass(engine, &fragments, &mut candidates, params, &mut stages);
+    // 2c'. Task R1's agreement mode, off unless `--tier-agree-seeds` is above one: the whole
+    // matching and the whole tier pass again, at another seed, and a join keeps the confirmed
+    // band only where every run put the sherd in the same place.
+    agree_pass(
+        engine,
+        &fragments,
+        &pairs,
+        &mut candidates,
+        tiered.as_mut(),
+        params,
+        options,
+        workers,
+        &mut stages,
+    )?;
     let gate = if params.tiers.is_some() { Gate::Confirmed } else { Gate::Accepted };
     // 2d. and then the half of the constraints that acts on the candidate list: a `must_join` is
     // promoted to the confirmed band. `assemble_under` below does the other half.
@@ -723,6 +737,19 @@ pub fn run_with(
         // whole, and a pair rematched with the larger budget changes them for pairs it never
         // touched. The pass is repeated rather than patched for that reason.
         tiered = tier_pass(engine, &fragments, &mut candidates, params, &mut stages);
+        // And the agreement mode again with it, for the same reason: the pass is a statement about
+        // the candidate list the tier just judged, and this is a different list.
+        agree_pass(
+            engine,
+            &fragments,
+            &pairs,
+            &mut candidates,
+            tiered.as_mut(),
+            params,
+            options,
+            workers,
+            &mut stages,
+        )?;
         honoured = plan.as_ref().map(|r| {
             constraints::apply(r, &names, &mut candidates, tiered.as_mut(), gate == Gate::Confirmed)
         });
@@ -1092,6 +1119,144 @@ fn with_device_slack<T: Send>(exec: &dyn Executor, body: impl FnOnce() -> T + Se
 /// library default and what `--tiers off` sets: every candidate then keeps
 /// [`Tier::of_accept`](crate::tiers::Tier::of_accept)'s band, R §8's gate is `accepted`, and the
 /// run is byte for byte the run it was before this pass existed.
+/// Task R1's agreement mode ([`Thresholds::agree_seeds`](crate::tiers::Thresholds::agree_seeds)):
+/// the collection is matched and tiered `n` times at `n` different seeds, and a join stays
+/// confirmed only where **every** run confirmed that pair at the same placement.
+///
+/// # Why it exists, and why it is off by default
+///
+/// Task R1's table is the first this project has read on a rule table that contains the museum's
+/// own ten-pot collection, and it says two things at once. The rule that ships confirms 42 correct
+/// joins there and **one** false one — a wrong-pose join 0.57 t from the truth, four hundredths of
+/// a wall past `evaluate.py`'s line — and no single-run rule the table measured reaches zero
+/// without taking the recall with it. Two runs at two seeds do reach zero: a wrong pose is a
+/// function of the draw and a right one is not, which is the same statement the re-search makes
+/// about a pair and this makes about a whole collection.
+///
+/// It costs what it says it costs: the matching stage and the tier pass, once per seed. On the
+/// ten-pot collection that is another 40 minutes a seed, which is why it is a mode a museum turns
+/// on for a final answer and not the default (§R1 note §5).
+///
+/// # What it does not do
+///
+/// It never *promotes*. A join no run confirmed stays where it was, and the agreement runs'
+/// own candidates are thrown away — this run's poses, scores and assembly are this run's. The
+/// only thing that crosses is a verdict: *did another draw of the same collection put this sherd
+/// here too?*
+#[allow(clippy::too_many_arguments, reason = "the matching stage's whole state, borrowed")]
+fn agree_pass(
+    engine: Engine<'_>,
+    fragments: &[Fragment],
+    pairs: &[(usize, usize)],
+    candidates: &mut [Candidate],
+    tiered: Option<&mut crate::tiers::TierReport>,
+    params: &Params,
+    options: &RunOptions,
+    workers: usize,
+    stages: &mut StageLog,
+) -> Result<()> {
+    let Some(report) = tiered else { return Ok(()) };
+    let seeds = report.thresholds.agree_seeds as usize;
+    if seeds < 2 {
+        return Ok(());
+    }
+    let started = Instant::now();
+    // The agreement runs are ordinary runs of this collection with another seed, and their own
+    // tier pass must not recurse into this one.
+    let inner = crate::tiers::Thresholds { agree_seeds: 0, ..report.thresholds };
+    let extra = (seeds - 1).min(crate::tiers::AGREE_OFFSETS.len());
+    // Which pairs are worth asking about: the ones this run confirmed. Everything else is already
+    // out of the confirmed band and no other run can put it in.
+    let asked: BTreeSet<(FragId, FragId)> = candidates
+        .iter()
+        .filter(|c| c.tier == Tier::Confirmed)
+        .map(|c| (c.a, c.b))
+        .collect();
+    // (pair -> the placements that run confirmed), one map per agreement seed.
+    let mut elsewhere: Vec<BTreeMap<(FragId, FragId), Vec<Matrix4<f64>>>> = Vec::new();
+    for k in 0..extra {
+        let seed = params.seed.wrapping_add(crate::tiers::AGREE_OFFSETS[k]);
+        let at_seed = Params { seed, tiers: Some(inner), ..*params };
+        // R §3.5 again and nothing else: a redrawn fragment shares its two BVHs through their
+        // `Arc`s, which is what `tiers::probe` already relies on for the stability redraws.
+        let redrawn: Vec<Fragment> = fragments
+            .par_iter()
+            .map(|f| {
+                let mut copy = f.clone();
+                copy.rebuild_samples(seed);
+                copy
+            })
+            .collect();
+        let per_pair = match_all(
+            engine,
+            &redrawn,
+            pairs,
+            &at_seed,
+            options.keep_per_pair,
+            workers,
+            Some("agree"),
+            &options.watch,
+        )?;
+        let mut theirs: Vec<Candidate> = per_pair.into_iter().flatten().collect();
+        let banded = crate::tiers::classify(engine, &redrawn, &theirs, &at_seed, &inner);
+        for (c, &tier) in theirs.iter_mut().zip(&banded.tiers) {
+            c.tier = tier;
+        }
+        let mut found: BTreeMap<(FragId, FragId), Vec<Matrix4<f64>>> = BTreeMap::new();
+        for c in theirs.iter().filter(|c| c.tier == Tier::Confirmed) {
+            if asked.contains(&(c.a, c.b)) {
+                found.entry((c.a, c.b)).or_default().push(c.transform);
+            }
+        }
+        tracing::info!(
+            seed,
+            confirmed_pairs = found.len(),
+            asked = asked.len(),
+            "agreement run done"
+        );
+        elsewhere.push(found);
+    }
+    // The verdict, pair by pair. `t_pair` is R §4.2's and costs two field reads.
+    let mut demoted = 0_usize;
+    for (i, c) in candidates.iter_mut().enumerate() {
+        if c.tier != Tier::Confirmed {
+            continue;
+        }
+        let b = &fragments[c.b as usize];
+        let t = crate::matching::scales::Scales::for_fragments(
+            params,
+            &fragments[c.a as usize],
+            b,
+        )
+        .t;
+        let disagreed = elsewhere.iter().position(|run| {
+            !run.get(&(c.a, c.b))
+                .is_some_and(|poses| {
+                    poses.iter().any(|there| crate::tiers::same_placement(b, &c.transform, there, t))
+                })
+        });
+        let Some(which) = disagreed else { continue };
+        c.tier = Tier::Probable;
+        report.tiers[i] = Tier::Probable;
+        if let Some(Some(e)) = report.evidence.get_mut(i) {
+            e.failed.push(format!(
+                "agreement: the run at seed {} did not confirm this pair at this placement",
+                params.seed.wrapping_add(crate::tiers::AGREE_OFFSETS[which])
+            ));
+        }
+        demoted += 1;
+    }
+    stages.finish("tier_agree", started.elapsed().as_secs_f64());
+    tracing::info!(
+        seeds = report.thresholds.agree_seeds,
+        asked = asked.len(),
+        demoted,
+        seconds = stages.timings["tier_agree"],
+        "agreement decided"
+    );
+    Ok(())
+}
+
 fn tier_pass(
     engine: Engine<'_>,
     fragments: &[Fragment],

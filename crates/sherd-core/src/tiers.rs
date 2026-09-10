@@ -136,8 +136,10 @@ pub struct ScoreRow {
     /// Deepest excursion, in `t`.
     pub pen_depth: f64,
     /// Set when a fragment is not watertight and R §6.4 could not run — `pen` is then `0` because
-    /// the question was refused, not because nothing penetrates, and a `pen ≤ 0` veto passes it
-    /// for free.
+    /// the question was refused, not because nothing penetrates. R §6.5's own `accept` reads that
+    /// `0` as a pass (`verify::accept`, the reference's behaviour, which parity freezes);
+    /// [`Thresholds::refusals`] does not, because a Confirmed band is a claim about evidence and
+    /// there is none here (V8-D1).
     pub pen_unavailable: bool,
     /// R §5.7's ranking key, `seam · tight`.
     pub score: f64,
@@ -319,8 +321,9 @@ impl Thresholds {
     /// means [`Tier::Confirmed`].
     ///
     /// A test whose evidence is **missing** fails: a candidate with no seam to slide along has not
-    /// passed the slide probe, it has refused it. That is the same reading as the margin's, and
-    /// M1's threshold table was computed under it.
+    /// passed the slide probe, it has refused it, and a pair on which R §6.4 could not run has not
+    /// passed `pen ≤ 0` either ([`Scores::pen_unavailable`], task G / V8-D1). That is the same
+    /// reading as the margin's, and M1's threshold table was computed under it.
     #[must_use]
     pub fn refusals(&self, scores: &Scores, probes: &Probes) -> Vec<String> {
         let mut failed: Vec<String> = Vec::new();
@@ -338,7 +341,11 @@ impl Thresholds {
         ceiling("gap", scores.gap, self.max_gap_t, &mut failed);
         floor("seam", scores.seam, self.min_seam, &mut failed);
         floor("cont_n", scores.cont_n, self.min_cont_n, &mut failed);
-        ceiling("pen", scores.pen, self.max_pen, &mut failed);
+        if scores.pen_unavailable {
+            failed.push("pen: penetration not measurable, a fragment is not watertight".to_owned());
+        } else {
+            ceiling("pen", scores.pen, self.max_pen, &mut failed);
+        }
         match probes.slide_t {
             Some(slide) => ceiling("slide", slide, self.max_slide_t, &mut failed),
             None => failed.push("slide: no shared seam to slide along".to_owned()),
@@ -1196,6 +1203,11 @@ mod tests {
             (Scores { seam: 4.9, ..scores }, probes.clone(), "seam"),
             (Scores { cont_n: 0.899, ..scores }, probes.clone(), "cont_n"),
             (Scores { pen: 0.001, ..scores }, probes.clone(), "pen"),
+            (
+                Scores { pen_unavailable: true, ..scores },
+                probes.clone(),
+                "pen: penetration not measurable",
+            ),
             (scores, Probes { slide_t: Some(0.11), ..probes.clone() }, "slide"),
             (scores, Probes { slide_t: None, ..probes.clone() }, "slide: no shared seam"),
             (scores, Probes { margin: None, rival_score: None, ..probes.clone() }, "neither arm"),
@@ -1207,6 +1219,37 @@ mod tests {
             assert!(failed[0].starts_with(want), "{want} is refused by {failed:?}");
             assert!(!Evidence::of(&s, &p, &th).failed.is_empty());
         }
+    }
+
+    /// V8-D1: where R §6.4 could not run, `pen ≤ 0` is a refusal and not a free pass.
+    ///
+    /// R §6.5's own `accept` keeps reading the `0` as "no penetration found" — that is the
+    /// reference's arithmetic and the parity harness freezes it — so the candidate stays
+    /// *accepted* and the band it loses is the Confirmed one. A join a museum is told to trust
+    /// has five measured tests behind it; on a fragment with holes one of the five has no answer,
+    /// and the honest place for the join is the Probable list with the reason printed.
+    #[test]
+    fn a_pair_whose_penetration_cannot_be_measured_is_never_confirmed() {
+        let th = Thresholds::default();
+        let (scores, probes) = confirmable();
+        assert!(th.refusals(&scores, &probes).is_empty(), "the fixture is a confirmed join");
+
+        let holes = Scores { pen: 0.0, pen_unavailable: true, ..scores };
+        let failed = th.refusals(&holes, &probes);
+        assert_eq!(failed, ["pen: penetration not measurable, a fragment is not watertight"]);
+        assert_eq!(Evidence::of(&holes, &probes, &th).failed, failed, "the report says why");
+
+        // Not a threshold a flag can widen: `--tier-max-pen` names a limit, and the refusal is
+        // that there is nothing to compare against it.
+        let loose = Thresholds { max_pen: 1.0, ..th };
+        assert_eq!(loose.refusals(&holes, &probes).len(), 1, "the evidence is still missing");
+        assert!(loose.refusals(&scores, &probes).is_empty(), "and a measured 0 still passes");
+
+        // R §6.5 is untouched: the same scores are accepted, which is why the join is Probable
+        // rather than Rejected and why `--tiers off` is byte-identical.
+        let p = crate::params::Params::default();
+        let sc = crate::matching::scales::Scales::for_pair(&p, 1.0, 0.0);
+        assert!(crate::matching::verify::accept(&holes, &p, &sc), "R §6.5 accepts it");
     }
 
     /// The disjunction: either arm confirms alone, and neither arm refuses together.

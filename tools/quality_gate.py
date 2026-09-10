@@ -4,6 +4,7 @@
     python tools/quality_gate.py [--bin target/release/sherd-refit-rs]
                                  [--seeds 0 1 2 3 4] [--backend cpu]
                                  [--out output/quality] [--sets NAME ...]
+    python tools/quality_gate.py --out DIR --score-only NAME RUNDIR [--score-only ...]
 
 This is the quality gate of everything built after the reference hand-over
 (D §13 question 7, task H4): from that commit the algorithm lives in Rust, the
@@ -107,6 +108,18 @@ affordable.  Measured on an M2 Pro 10-core: see the header the script writes.
 ``--keep-work`` leaves the work trees behind; by default they are removed once
 the last seed of a set has been scored, because forty of them do not fit beside
 the caches they came from.
+
+Scoring a run this script did not make (``--score-only``)
+---------------------------------------------------------
+D §12's small-set rule matches nothing above 27 fragments before audit §E's step
+12, so the three acceptance collections -- ``synthetic_60``, ``synthetic_170``
+and ``mixed_all`` -- are **not** in ``SETS`` and no ordinary run of this file can
+reach them.  ``--score-only NAME RUNDIR`` takes a run directory that already
+exists and scores it with the same :func:`score`, so the acceptance table and the
+development table come from one scorer; the seed, the wall clock and the
+``--tiers``/``--objects`` switches of the row are read from that run's own
+``report.json`` rather than from this script's flags, because nothing here
+produced the run.
 """
 from __future__ import annotations
 
@@ -203,6 +216,29 @@ TERRACOTTA_JOINS = {("021", "094"), ("094", "104")}
 # printed with the slots that are missing.  Task G measured what it would take to close it and
 # found no rule that does not cost a false join -- see notes/2026-09-10-g-tiers-findings.md.
 TERRACOTTA_CONFIRMED_SLOTS = 2 * 5
+
+
+# Audit §E step 12 / D §10.3's three acceptance rows.  These collections are matched **exactly
+# once**, at the final acceptance (D §12's small-set rule: nothing above 27 fragments is matched
+# before step 12), so they are deliberately **not** in `SETS` and no ordinary run of this script
+# can reach them.  What is here is the scoring half only, reached by `--score-only`, which reads a
+# run directory that already exists instead of producing one.
+#
+# The prohibition on them is the one step 12 states: cross-object joins 0 and group purity 1.000
+# **in the confirmed tier** (`pure_tiers`), beside the zero-false-joins rule :func:`tier_verdict`
+# applies to every set.  There is no accuracy or precision band: R §13 never measured these three,
+# so there is nothing to compare five draws against and `acc`/`prec` are `None`.
+ACCEPTANCE = {
+    "synthetic_60": "input/synthetic_pingsdorf_60",
+    "synthetic_170": "input/synthetic_pingsdorf_170",
+    "mixed_all": "input/sfspp/mixed_all",
+}
+
+BANDS.update({
+    name: dict(acc=None, prec=None, pure=False, pure_tiers=True,
+               note="D §10.3's acceptance row, scored once at audit §E step 12")
+    for name in ACCEPTANCE
+})
 
 
 def sh(cmd, cwd=ROOT):
@@ -587,19 +623,28 @@ def markdown(meta, rows, verdicts):
     tiers = bool(rows and rows[0].get("tiers"))
     objects = bool(rows and rows[0].get("objects") is not None)
     L = []
-    L.append("# Quality gate — the Rust core on the development sets at seeds %s"
-             % "-".join(str(s) for s in meta["seeds"]))
+    L.append("# Quality gate — the Rust core on %s at seeds %s"
+             % ("the acceptance collections" if meta.get("acceptance")
+                else "the development sets", "-".join(str(s) for s in meta["seeds"])))
     L.append("")
+    cache = ("each run's own cache state" if meta.get("score_only")
+             else "warm cache from the second seed of each set")
     L.append("`tools/quality_gate.py`, %s, commit `%s`, backend `%s`, `--tiers %s --objects %s "
-             "--object-disagreement %s`, `--no-preview --no-meshes`, "
-             "warm cache from the second seed of each set. Total wall **%.1f s** (%.1f min) for "
-             "%d runs. Scores are `tools/evaluate.py` (5 deg / 0.5 t, translation at the fragment "
-             "centroid); the terracotta has no staged ground truth and carries R §13's decision "
-             "row instead."
+             "--object-disagreement %s`, `--no-preview --no-meshes`, %s. Total wall **%.1f s** "
+             "(%.1f min) for %d runs. Scores are `tools/evaluate.py` (5 deg / 0.5 t, translation "
+             "at the fragment centroid); the terracotta has no staged ground truth and carries "
+             "R §13's decision row instead."
              % (meta["generated"], meta["commit"], meta["backend"],
                 "on" if tiers else "off", meta.get("objects", "off"),
-                meta.get("object_disagreement", "off"), meta["wall_total_s"],
+                meta.get("object_disagreement", "off"), cache, meta["wall_total_s"],
                 meta["wall_total_s"] / 60.0, len(rows)))
+    if meta.get("score_only"):
+        L.append("")
+        L.append("**Scored, not run** (`--score-only`): every row is a run directory that already "
+                 "existed. Its seed and its wall clock are that run's own `report.json` -- the "
+                 "wall is the sum of the stage timings, so it is the pipeline's own time and not "
+                 "the process's. D §12's small-set rule matches these collections exactly once, "
+                 "at audit §E's step 12, and this script never produces them.")
     if tiers:
         L.append("")
         L.append("The left half is `evaluate.py` over the joins R §8 **used**, which under "
@@ -696,6 +741,15 @@ def main(argv=None):
     ap.add_argument("--render-only", action="store_true",
                     help="re-render <out>/quality.{md,json} from the rows of a finished run, "
                          "without running anything")
+    ap.add_argument("--score-only", nargs=2, action="append", metavar=("NAME", "DIR"),
+                    help="score a run directory that already exists instead of running the "
+                         "binary, and write the same table for it. NAME is one of "
+                         "%s (audit §E step 12's acceptance collections, which D §12's "
+                         "small-set rule matches exactly once) or one of the eight development "
+                         "sets; DIR holds that run's transforms.json and report.json. The seed "
+                         "and the wall clock are read from the run's own report.json, so a row "
+                         "reports what the run did and not what this script did. Repeatable."
+                         % ", ".join(sorted(ACCEPTANCE)))
     a = ap.parse_args(argv)
 
     out = os.path.join(ROOT, a.out)
@@ -711,6 +765,47 @@ def main(argv=None):
             prev = json.load(f)
         return finish(out, prev["meta"], prev["rows"],
                       [s[0] for s in sets if any(r["set"] == s[0] for r in prev["rows"])])
+
+    if a.score_only:
+        dev = {s[0]: s[2] for s in SETS}
+        names = []
+        for name, work in a.score_only:
+            if name not in ACCEPTANCE and name not in dev:
+                ap.error("unknown set for --score-only: %s" % name)
+            gt_dir = ACCEPTANCE[name] if name in ACCEPTANCE else dev[name]
+            work = work if os.path.isabs(work) else os.path.join(ROOT, work)
+            with open(os.path.join(work, "report.json")) as f:
+                rep = json.load(f)
+            row, ev = score(name, gt_dir, work, cen_cache, rep.get("tiers") is not None)
+            row.update(set=name, seed=int(rep.get("engine", {}).get("seed", 0)),
+                       wall_s=sum(rep.get("timings", {}).values()))
+            rows.append(row)
+            commit = rep.get("engine", {}).get("commit", commit)
+            # The switches a row reports are the ones **that run** was given, read off its own
+            # `params` block, not this script's defaults: nothing here produced the run.
+            flags = dict(tiers="on" if rep.get("params", {}).get("tiers") else "off",
+                         objects="on" if rep.get("params", {}).get("objects") else "off",
+                         object_disagreement="on" if (rep.get("params", {}).get("objects") or {})
+                         .get("disagreement") else "off",
+                         backend=rep.get("engine", {}).get("backend", a.backend))
+            if ev is not None:
+                with open(os.path.join(out, "runs", "%s_seed%d.json"
+                                       % (name, row["seed"])), "w") as f:
+                    json.dump(ev, f, indent=1)
+            if name not in names:
+                names.append(name)
+            print("%-14s seed %d  %6.1f s  %s" % (
+                name, row["seed"], row["wall_s"],
+                "joins %d" % row["joins_used"] if not row["scored"] else
+                "acc %5.1f %%  prec %.3f  correct %d  wrong %d  cross %d"
+                % (100 * row["frag_acc"], row["precision"], row["correct"],
+                   row["wrong_pose"], row["cross_object"])))
+        meta = dict(generated=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    commit=commit, seeds=sorted({r["seed"] for r in rows}), binary=a.bin,
+                    wall_total_s=sum(r["wall_s"] for r in rows), runs=len(rows),
+                    score_only=True,
+                    acceptance=all(r["set"] in ACCEPTANCE for r in rows), **flags)
+        return finish(out, meta, rows, names)
 
     t_all = time.perf_counter()
     for name, indir, gt_dir in sets:

@@ -1946,6 +1946,17 @@ seeds each — 15 runs — not derived from the port.
    times; `--render-only` rebuilds the table from a finished run's JSON, so a change of wording
    costs nothing rather than forty runs.
 
+   **`--score-only NAME RUNDIR` scores a run this script did not make** (task A1). §12's small-set
+   rule matches nothing above 27 fragments before step 12, so `synthetic_60`, `synthetic_170` and
+   `mixed_all` are deliberately **not** in the script's `SETS` and no ordinary run of it can reach
+   them; what the file carries for them is the scoring half alone, plus the one prohibition step 12
+   states — cross-object joins 0 and group purity 1.000 **in the confirmed tier** — beside the
+   zero-false-joins rule every set already carries. The seed, the wall clock and the
+   `--tiers`/`--objects` switches of such a row are read from that run's own `report.json` and not
+   from the script's flags, because nothing in the script produced the run. That is how §10.3's
+   three acceptance rows below are scored: by the same `evaluate.py`, through the same `score()`,
+   as the eight development sets.
+
 **Local gates, run before every commit.** Layers 1, 2 and 4 above are what `cargo nextest` runs,
 and a default `cargo build`/`cargo clippy` compiles neither shape of `sherd-cli` — the
 `#[cfg(not(feature = "gpu"))]` arms of `cli/src/gpu.rs` are not type-checked by the default

@@ -1282,10 +1282,29 @@ S3_STRICT = dict(min_tight=0.35, max_gap_t=0.015, min_seam=5.0, min_cont_n=0.90,
                  max_pen=0.0, max_slide_t=0.1)
 
 
+# Task R1: the two collections above D §12's 27-fragment rule that task R1's table contains.
+#
+# They are not in `qg.SETS` and no ordinary run of the quality gate can reach them -- that is the
+# small-set rule and it stands.  What task R1 changed is which table the *rule* is chosen on: task
+# S3 chose its rule on the nine development sets alone and task A2 then measured thirteen false
+# confirmed joins on `mixed_all`, so a rule chosen without that collection in the table is a rule
+# chosen without the evidence.  These two rows are the evidence, and the runs behind them are the
+# ones the task text allows and no others.
+LARGE = [
+    ("mixed_all", "input/sfspp/mixed_all", "input/sfspp/mixed_all"),
+    ("synthetic_mix3_60", "input/synthetic_mix3_60/fragments", "input/synthetic_mix3_60"),
+]
+
+
+def known_sets():
+    """Every collection a dump may be made of: the nine development sets and task R1's two."""
+    return list(qg.SETS) + LARGE
+
+
 def stage_rule_runs(a, out):
     """The forty-five runs the rule table is chosen on: the tier on, two re-searches, --measure."""
     os.makedirs(os.path.join(out, "rules"), exist_ok=True)
-    sets = [s for s in qg.SETS if a.sets is None or s[0] in a.sets]
+    sets = [s for s in known_sets() if a.sets is None or s[0] in a.sets]
     total = 0.0
     for name, indir, _gt in sets:
         if not os.path.isdir(os.path.join(ROOT, indir)):
@@ -1322,7 +1341,7 @@ def stage_rule_runs(a, out):
                      rep.get("timings", {}).get("tiers", 0.0)))
         if not a.keep_work:
             shutil.rmtree(work, ignore_errors=True)
-    print("forty-five runs in %.1f s (%.1f min)" % (total, total / 60.0))
+    print("%d runs in %.1f s (%.1f min)" % (len(sets) * len(a.seeds), total, total / 60.0))
 
 
 def s3_derive(r):
@@ -1347,8 +1366,27 @@ def s3_derive(r):
     r["has_kept"] = r.get("margin") is not None
     r["has_wide"] = r.get("wide_margin") is not None
     r["wide_src"] = (r.get("wide_rival") or {}).get("source")
-    r["wide_moved"] = (r.get("wide_rival") or {}).get("moved_t")
+    # Task R1: the distance the margin arm reads is measured from **this** candidate
+    # (`Probes::wide_rival_moved_t`); `WideRival::moved_t` inside `wide_rival` is the distance from
+    # the pair's best, which is what selected that pose.  A dump written before task R1 carries
+    # only the second, and the fallback below is what makes those dumps still readable -- with the
+    # quantity they hold, which is not this one.
+    r["wide_pair_moved"] = (r.get("wide_rival") or {}).get("moved_t")
+    r["wide_moved"] = r.get("wide_rival_moved_t")
+    if r["wide_moved"] is None:
+        r["wide_moved"] = r["wide_pair_moved"]
     r["wide_acc"] = (r.get("wide_rival") or {}).get("accepted")
+    # `Thresholds::rival_refused`: a second placement R §6.5 itself would refuse.
+    r["rival_refused"] = r["wide_acc"] is False
+    # `Thresholds::strict_on_redraws`: the strict half on the two redraws as well.
+    r["redraw_strict"] = all(
+        d["tight"] >= S3_STRICT["min_tight"]
+        and d["gap"] <= S3_STRICT["max_gap_t"]
+        and d["seam"] >= S3_STRICT["min_seam"]
+        and d["cont_n"] >= S3_STRICT["min_cont_n"]
+        and not d.get("pen_unavailable", False)
+        and d["pen"] <= S3_STRICT["max_pen"]
+        for d in r.get("resamples", []))
     res = r.get("research") or []
     r["res_n"] = len(res)
     r["res_agree"] = sum(1 for x in res if x.get("agrees"))
@@ -1425,7 +1463,15 @@ def s3_rules(margins, researches, moveds):
         return d <= 1.0 or (r["wide_moved"] is not None and r["wide_moved"] >= d)
 
     rules = [
-        ("shipped", "support >= 1 OR margin(kept) >= 2",
+        # The rule the binary ships (`Thresholds::default()`), and the baseline every other row's
+        # gains and losses are read against.  It is named `shipped` because it *is* shipped: until
+        # task R1 closed V10-D3 this name sat on M1's rule, which task S3 replaced, and a
+        # `--stage rules` run printed M1's rule under it and measured every other rule against it.
+        ("shipped", "support >= 1 OR (margin(wide) >= 2 over a rival >= 5 t away "
+                    "AND re-search 1)",
+         lambda r: r["support"] >= 1
+         or (r["res_agree"] >= 1 and r["m_wide"] >= 2.0 and far(r, 5.0))),
+        ("m1", "support >= 1 OR margin(kept) >= 2  -- task M1's rule, `--tier-rule m1`",
          lambda r: r["support"] >= 1 or r["m_kept"] >= 2.0),
         ("support-only", "support >= 1",
          lambda r: r["support"] >= 1),
@@ -1448,7 +1494,7 @@ def s3_rules(margins, researches, moveds):
                         arm += " over a rival >= %g t away" % d
                     if k:
                         arm += " AND re-search %d" % k
-                    name = "%s | (%s)" % ("shipped" if keep else "support", arm)
+                    name = "%s | (%s)" % ("m1" if keep else "support", arm)
                     rules.append((name,
                                   ("support >= 1 OR margin(kept) >= 2 OR " if keep
                                    else "support >= 1 OR ") + arm,
@@ -1460,7 +1506,8 @@ def s3_rules(margins, researches, moveds):
     # veto with the third state S2 §10 asks for (`s3_colour_ok`).  Colour can only ever remove
     # confirmed joins here -- the nine development sets produce no false ones for it to remove --
     # so what these rows measure is a price, and the table is where that price is stated.
-    base = [t for t in rules if t[0] in ("shipped", "support-only") or "re-search 1" in t[1]]
+    base = [t for t in rules if t[0] in ("shipped", "m1", "support-only")
+            or "re-search 1" in t[1]]
     for dE in (5.0, 7.5):
         for rname, note, arm in base:
             rules.append(("%s & colour<=%g" % (rname, dE),
@@ -1492,7 +1539,7 @@ FALSE_S3 = ("wrong_pose", "non_adjacent", "cross_object")
 
 def stage_rules(a, out):
     """The evidence table: every rule, on all forty-five runs, correct and false per set."""
-    sets = [s for s in qg.SETS if a.sets is None or s[0] in a.sets]
+    sets = [s for s in known_sets() if a.sets is None or s[0] in a.sets]
     cen_cache = {}
     runs = []                                  # (set, seed, rows, ground-truth pair count)
     for name, _indir, gt in sets:
@@ -1556,6 +1603,400 @@ def stage_rules(a, out):
     with open(os.path.join(out, "rules.md"), "w") as f:
         f.write(render_rules(result, runs, sets))
     print(open(os.path.join(out, "rules.md")).read())
+
+
+# --------------------------------------------------- task R1: the rule table with `mixed_all` in it
+# Task S3 chose the shipped rule on the nine development collections, where it is perfectly clean.
+# Task A2 then ran it on `input/sfspp/mixed_all` -- ten real pots, 164 sherds, the collection this
+# project exists for -- and measured **thirteen** false confirmed joins at two seeds, every one of
+# them on the margin arm with no support.  A rule chosen on a table that does not contain that
+# collection is a rule chosen without the evidence, and this stage is the table with it in.
+#
+# Three things it does that `--stage rules` does not:
+#
+#   * it reports **per collection** and not per development set -- the nine development runs are
+#     one column, `mixed_all` is a column, `synthetic_mix3_60` is a column -- because a rule that
+#     is clean on 45 runs of nine collections and dirty on two runs of one is exactly the shape of
+#     the mistake task A2 found, and a single total hides it;
+#   * it carries the two witnesses task R1 added to the grid -- the **verdict** on the second
+#     placement (`Thresholds::rival_refused`) and the **redraws** (`Thresholds::strict_on_redraws`)
+#     -- neither of which is a number, so nothing in this table is a threshold fitted to the
+#     collection that judges it;
+#   * it measures the **two-seed agreement** of task C §3 as a rule of its own: a pair confirmed at
+#     two seeds *at the same placement*, which is what `--tier-agree-seeds 2` does in the binary.
+#     It costs a second whole run and the table says so.
+R1_COLLECTIONS = ("dev45", "mixed_all", "synthetic_mix3_60")
+
+
+def r1_group(name):
+    """Which column of task R1's table a run belongs to."""
+    return name if name in ("mixed_all", "synthetic_mix3_60") else "dev45"
+
+
+def r1_rules():
+    """Every rule task R1's table compares, as (name, note, predicate on a derived row).
+
+    The strict half is M1's throughout and never moves, exactly as in :func:`s3_rules`; the margin
+    arm's conjuncts are what vary.  Five dimensions, and every one of them is a quantity a run has
+    computed and reported since task S3:
+
+      * the margin itself (``m_wide``) and how far the second placement is (``wide_moved``) --
+        task S3's two numbers, swept here so that the table says whether either transfers;
+      * how many re-searches agree (``res_agree``) -- 1 is task S3's rule, 2 is what task A2 §6
+        named as "the first thing to put on a development-set table";
+      * whether R §6.5 would have **accepted** the second placement (``rival_refused``);
+      * whether the strict half holds on the two **redraws** (``redraw_strict``).
+    """
+    def far(r, d):
+        return d <= 1.0 or (r["wide_moved"] is not None and r["wide_moved"] >= d)
+
+    def arm(m, d, k, rej, redr):
+        def test(r):
+            if r["support"] >= 1:
+                return True
+            if not (r["m_wide"] >= m and far(r, d) and r["res_agree"] >= k):
+                return False
+            if rej and not r["rival_refused"]:
+                return False
+            if redr and not r["redraw_strict"]:
+                return False
+            return True
+        return test
+
+    def label(m, d, k, rej, redr):
+        parts = ["margin(wide) >= %g" % m]
+        if d > 1.0:
+            parts.append("rival >= %g t" % d)
+        if k:
+            parts.append("re-search %d" % k)
+        if rej:
+            parts.append("rival refused")
+        if redr:
+            parts.append("strict on redraws")
+        return "support OR (%s)" % ", ".join(parts)
+
+    rules = [
+        ("support-only", "support >= 1 -- the only rule task A2 measured clean on `mixed_all`",
+         lambda r: r["support"] >= 1),
+        ("m1", "support >= 1 OR margin(kept) >= 2 -- task M1's rule",
+         lambda r: r["support"] >= 1 or r["m_kept"] >= 2.0),
+        ("s3", "support >= 1 OR (margin(wide) >= 2, rival >= 5 t, re-search 1) -- task S3's",
+         arm(2.0, 5.0, 1, False, False)),
+    ]
+    seen = {n for n, _t, _a in rules}
+    # The sweep the task text asks for: the rival distance re-derived on `mixed_all`, the margin,
+    # and the re-search count -- with and without each of task R1's two witnesses.
+    for k in (1, 2):
+        for d in (5.0, 8.0, 10.0, 15.0, 20.0, 25.0, 30.0):
+            for m in (2.0, 5.0, 10.0):
+                for rej in (False, True):
+                    for redr in (False, True):
+                        name = label(m, d, k, rej, redr)
+                        if name in seen:
+                            continue
+                        seen.add(name)
+                        rules.append((name, name, arm(m, d, k, rej, redr)))
+    return rules
+
+
+def r1_vertices(input_dir, names, step=20):
+    """Every twentieth vertex of each fragment, in its own file coordinates.
+
+    `sherd_core::tiers::placement_gap`'s own sample, so that "the same placement" means offline
+    exactly what it means in the binary: the **worst** displacement over those vertices, in `t`.
+    """
+    try:
+        import open3d as o3d
+    except ImportError:                                    # pragma: no cover - open3d is required
+        return {}
+    by_stem = {}
+    for d in (input_dir, os.path.join(input_dir, "fragments")):
+        if not os.path.isdir(d):
+            continue
+        for f in sorted(os.listdir(d)):
+            stem, ext = os.path.splitext(f)
+            if ext.lower() in ev.MESH_EXT:
+                by_stem.setdefault(stem, os.path.join(d, f))
+    out = {}
+    for n in names:
+        p = by_stem.get(n)
+        if p is None:
+            continue
+        v = np.asarray(o3d.io.read_triangle_mesh(p).vertices)
+        if len(v):
+            out[n] = v[::step]
+    return out
+
+
+def r1_same_placement(vs, here, there, t):
+    """`sherd_core::tiers::same_placement`, in Python: RESEARCH_T at the worst vertex, RESEARCH_DEG."""
+    here, there = np.asarray(here), np.asarray(there)
+    a = vs @ here[:3, :3].T + here[:3, 3]
+    b = vs @ there[:3, :3].T + there[:3, 3]
+    moved = float(np.linalg.norm(a - b, axis=1).max()) / t
+    R = there[:3, :3].T @ here[:3, :3]
+    deg = float(np.degrees(np.arccos(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0))))
+    return moved <= 0.5 and deg <= 2.0
+
+
+def r1_tally(runs, arm, mode="all", verts=None):
+    """One rule over a list of runs: confirmed pairs, and what `evaluate.py` calls each of them.
+
+    Three readings, and the difference between them is what a museum pays for an answer:
+
+      * ``all`` -- every run, a pair counted once per seed.  This is the population task S3's own
+        table used and it is what §2 reports.
+      * ``seed0`` -- the lowest seed of each set only: **one** answer per collection, from one run.
+      * ``agree2`` -- the two lowest seeds of each set, and a pair counts only where both confirm
+        it at the same placement (`--tier-agree-seeds 2`).  One answer per collection, from two
+        runs.  ``seed0`` is the row it has to be compared with, not ``all``.
+    """
+    out = dict(conf=0, correct=0, false=0, cross=0, gt=0, runs=0)
+    if mode in ("all", "seed0"):
+        if mode == "seed0":
+            first = {}
+            for run in runs:
+                if run["set"] not in first or run["seed"] < first[run["set"]]["seed"]:
+                    first[run["set"]] = run
+            runs = list(first.values())
+        for run in runs:
+            conf = s3_pairs(run["rows"], arm)
+            out["gt"] += run["gt_pairs"]
+            out["runs"] += 1
+            out["conf"] += len(conf)
+            for r in conf.values():
+                if r["verdict"] == "correct":
+                    out["correct"] += 1
+                elif r["verdict"] in FALSE_S3:
+                    out["false"] += 1
+                if r["verdict"] == "cross_object":
+                    out["cross"] += 1
+        return out
+    by_set = {}
+    for run in runs:
+        by_set.setdefault(run["set"], []).append(run)
+    for name, group in by_set.items():
+        group = sorted(group, key=lambda r: r["seed"])[:2]
+        if len(group) < 2:
+            continue
+        first, rest = group[0], group[1:]
+        conf = s3_pairs(first["rows"], arm)
+        others = [s3_pairs(r["rows"], arm) for r in rest]
+        out["gt"] += first["gt_pairs"]
+        out["runs"] += len(group)
+        for key, r in conf.items():
+            vs = (verts or {}).get(name, {}).get(key[1])
+            t = first["thickness"]
+            if vs is None or not all(
+                    key in other
+                    and r1_same_placement(vs, r["transform"], other[key]["transform"], t)
+                    for other in others):
+                continue
+            out["conf"] += 1
+            if r["verdict"] == "correct":
+                out["correct"] += 1
+            elif r["verdict"] in FALSE_S3:
+                out["false"] += 1
+            if r["verdict"] == "cross_object":
+                out["cross"] += 1
+    return out
+
+
+def stage_r1(a, out):
+    """Task R1's table: every rule, per collection, with `mixed_all` in it."""
+    sets = [s for s in known_sets() if a.sets is None or s[0] in a.sets]
+    cen_cache, runs = {}, []
+    verts = {}
+    for name, indir, gt in sets:
+        for seed in a.seeds:
+            path = os.path.join(out, "rules", "%s_seed%d.json" % (name, seed))
+            if not os.path.exists(path):
+                continue
+            dump = json.load(open(path))
+            rows, gt_pairs = classify_rows(name, gt, dump, cen_cache)
+            s3_join_colour(rows, os.path.join(out, "rules",
+                                              "%s_seed%d.report.json" % (name, seed)))
+            runs.append(dict(set=name, seed=seed, rows=[s3_derive(r) for r in rows],
+                             gt_pairs=gt_pairs, thickness=dump["thickness"],
+                             names=dump["names"], timings=dump.get("timings", {})))
+            if name not in verts and gt is not None:
+                verts[name] = r1_vertices(os.path.join(ROOT, gt), dump["names"])
+    if not runs:
+        raise SystemExit("no dumps under %s/rules -- run --stage rule-runs first" % out)
+    groups = {}
+    for run in runs:
+        groups.setdefault(r1_group(run["set"]), []).append(run)
+
+    def sweep(mode, suffix, only=None):
+        rows = []
+        for name, note, arm in r1_rules():
+            if only is not None and name not in only:
+                continue
+            row = dict(rule=name + suffix, note=note, mode=mode, runs_per_answer=
+                       2 if mode == "agree2" else 1, per=dict())
+            for g, group in groups.items():
+                row["per"][g] = r1_tally(group, arm, mode=mode, verts=verts)
+            row["false"] = sum(d["false"] for d in row["per"].values())
+            row["correct"] = sum(d["correct"] for d in row["per"].values())
+            rows.append(row)
+        return rows
+
+    table = sweep("all", "")
+    # One answer per collection, so that the agreement mode below is compared with something it
+    # can be compared with: a rule read off a single run, at that collection's first seed.
+    leading = {"support-only", "m1", "s3"} | {
+        t["rule"] for t in sorted(table, key=lambda t: (t["false"], -t["correct"]))[:30]}
+    one = sweep("seed0", " @ seed 0", only=leading)
+    agree = sweep("agree2", " + agree 2 seeds", only=leading)
+
+    result = dict(runs=[dict(set=r["set"], seed=r["seed"], rows=len(r["rows"]),
+                             gt_pairs=r["gt_pairs"], timings=r["timings"]) for r in runs],
+                  table=table, one_answer=one + agree, distances=r1_distances(runs))
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, "r1.json"), "w") as f:
+        json.dump(result, f, indent=1)
+    with open(os.path.join(out, "r1.md"), "w") as f:
+        f.write(render_r1(result, runs))
+    print(open(os.path.join(out, "r1.md")).read())
+
+
+def render_r1(res, runs):
+    """Task R1's table, as the note prints it."""
+    L = ["# Task R1 -- the rule table, on a table that contains `mixed_all`", "",
+         "Every accepted candidate of the nine development sets at seeds 0-4 (**dev45**), of the "
+         "museum's ten-pot collection `input/sfspp/mixed_all` at seeds 0 and 1, and of "
+         "`synthetic_mix3_60` at seeds 0 and 1.  The strict half of the tier is task M1's "
+         "throughout and is held fixed at `tight >= 0.35, gap <= 0.015 t, seam >= 5 t, cont_n >= "
+         "0.90, pen <= 0 (and measurable), slide <= 0.1 t`; what every row varies is the **second "
+         "arm**.  A pair counts once per run, under its best-scoring candidate that clears the "
+         "rule -- `sherd_core::tiers::representatives`.", "",
+         "`false` is a confirmed pair `evaluate.py` calls `wrong_pose`, `non_adjacent` or "
+         "`cross_object`; `x` is the cross-object count inside it, which is the one audit §E "
+         "step 12 states as a prohibition.  `purity` is the confirmed band's own precision "
+         "(correct / confirmed) -- group purity is a property of an assembly and is reported for "
+         "the runs that were actually made, not for a rule read off a dump.", ""]
+    L += ["## 1. The runs behind it", "",
+          "| collection | runs | accepted candidates | ground-truth adjacent pairs (summed) |",
+          "|---|---:|---:|---:|"]
+    by_group = {}
+    for r in res["runs"]:
+        g = r1_group(r["set"])
+        d = by_group.setdefault(g, dict(runs=0, rows=0, gt=0))
+        d["runs"] += 1
+        d["rows"] += r["rows"]
+        d["gt"] += r["gt_pairs"]
+    for g in R1_COLLECTIONS:
+        d = by_group.get(g)
+        if d:
+            L.append("| `%s` | %d | %d | %d |" % (g, d["runs"], d["rows"], d["gt"]))
+    L += ["", "## 2. The rule table", ""]
+    head = "| rule |"
+    for g in R1_COLLECTIONS:
+        head += " %s correct | **false** | x | purity | recall |" % g
+    L += [head, "|---|" + "---:|" * (5 * len(R1_COLLECTIONS))]
+    for t in res["table"]:
+        cells = ""
+        for g in R1_COLLECTIONS:
+            d = t["per"].get(g)
+            if not d:
+                cells += " - | - | - | - | - |"
+                continue
+            purity = "%.3f" % (d["correct"] / d["conf"]) if d["conf"] else "-"
+            recall = "%.1f%%" % (100.0 * d["correct"] / d["gt"]) if d["gt"] else "-"
+            cells += " %d | %s | %d | %s | %s |" % (
+                d["correct"], "**%d**" % d["false"] if d["false"] else "0", d["cross"],
+                purity, recall)
+        L.append("| `%s` |%s" % (t["rule"], cells))
+    L += ["", "## 3. Every rule with zero false confirmed joins **everywhere**, by recall", "",
+          "The gate task R1 works to: zero on `mixed_all` at both seeds, zero on the 45 "
+          "development runs and zero on `synthetic_mix3_60`.  Ranked by correct confirmed joins "
+          "summed over all three columns.", ""]
+    clean = sorted([t for t in res["table"] if t["false"] == 0], key=lambda t: -t["correct"])
+    L += ["| rank | rule | correct (all) | dev45 | mixed_all | mix3_60 |",
+          "|---:|---|---:|---:|---:|---:|"]
+    for i, t in enumerate(clean, 1):
+        L.append("| %d | `%s` | %d | %d | %d | %d |"
+                 % (i, t["rule"], t["correct"],
+                    t["per"].get("dev45", {}).get("correct", 0),
+                    t["per"].get("mixed_all", {}).get("correct", 0),
+                    t["per"].get("synthetic_mix3_60", {}).get("correct", 0)))
+    if not clean:
+        L.append("| - | *no single-run rule in this table is clean everywhere* | - | - | - | - |")
+    L += ["", "### 3.1 One answer per collection: a single run against two seeds agreeing", "",
+          "A rule read off `all` above counts a pair once per seed; the two-seed agreement counts "
+          "it once, and costs two runs to say it.  So the two are compared here on the same "
+          "quantity -- **one answer per collection** -- with the single-run rows read at each "
+          "collection's first seed and the agreement rows read across its first two.  `runs` is "
+          "what the museum pays for that answer.", ""]
+    head = "| rule | runs |"
+    for g in R1_COLLECTIONS:
+        head += " %s correct | **false** | x |" % g
+    L += [head, "|---|---:|" + "---:|" * (3 * len(R1_COLLECTIONS))]
+    for t in sorted(res["one_answer"], key=lambda t: (t["false"], -t["correct"])):
+        cells = ""
+        for g in R1_COLLECTIONS:
+            d = t["per"].get(g)
+            cells += (" - | - | - |" if not d else " %d | %s | %d |" % (
+                d["correct"], "**%d**" % d["false"] if d["false"] else "0", d["cross"]))
+        L.append("| `%s` | %d |%s" % (t["rule"], t["runs_per_answer"], cells))
+    L += ["", "## 4. The best single-run rules, by recall, with what they still get wrong", "",
+          "A single-run rule is one a museum pays for once.  Ranked by `mixed_all` false joins "
+          "first, because that is the collection the prohibition is about, and by recall inside "
+          "that.", ""]
+    single = sorted(res["table"],
+                    key=lambda t: (t["per"].get("mixed_all", {}).get("false", 99),
+                                   -t["correct"]))[:15]
+    L += ["| rule | mixed_all correct/**false**/x | dev45 correct/**false** | mix3_60 |",
+          "|---|---:|---:|---:|"]
+    for t in single:
+        m = t["per"].get("mixed_all", {})
+        d = t["per"].get("dev45", {})
+        c = t["per"].get("synthetic_mix3_60", {})
+        L.append("| `%s` | %d / **%d** / %d | %d / **%d** | %d / **%d** |"
+                 % (t["rule"], m.get("correct", 0), m.get("false", 0), m.get("cross", 0),
+                    d.get("correct", 0), d.get("false", 0),
+                    c.get("correct", 0), c.get("false", 0)))
+    L += ["", "## 5. The rival distance, re-derived per collection", "",
+          "Task S3 chose `RIVAL_FAR_T = 5` on the 45 development runs; task A2 §4.1 found it "
+          "separates nothing on `mixed_all`.  This is the same reading over the population the "
+          "margin arm actually answers for -- candidates clearing the strict set with **no "
+          "support** -- per collection.  `separates` is whether *any* threshold on this quantity "
+          "alone would divide the correct joins from the false ones.", "",
+          "| collection | candidates | correct | false | correct: min / 5% / med / 95% / max | "
+          "false: the same | AUC | separates |", "|---|---:|---:|---:|---|---|---:|---|"]
+    for g in R1_COLLECTIONS:
+        d = res["distances"].get(g)
+        if not d:
+            continue
+        q = lambda v: " / ".join(fmt(x, "%.2f") for x in v)          # noqa: E731
+        L.append("| `%s` | %d | %d | %d | %s | %s | %s | %s |"
+                 % (g, d["n"], d["correct"], d["false"], q(d["q_correct"]), q(d["q_false"]),
+                    fmt(d["auc"]), {True: "**yes**", False: "no", None: "-"}[d["separates"]]))
+    L += ["", "Written by `tools/measure_tiers.py --stage r1` on %s."
+          % datetime.date.today().isoformat(), ""]
+    return "\n".join(L)
+
+
+def r1_distances(runs):
+    """The rival distance, re-derived per collection: does any threshold separate?
+
+    Task S3 chose `RIVAL_FAR_T = 5` on the 45 development runs, where a correct join's second
+    placement sits twenty walls away and a false one's sits at three.  Task A2 re-read it on
+    `mixed_all` and found the two distributions on top of each other.  This is that reading,
+    per collection, over the population a *second arm* draws from -- candidates clearing the strict
+    set with no support, which is the only population the margin arm ever answers for.
+    """
+    out = {}
+    for g in R1_COLLECTIONS:
+        pool = [r for run in runs if r1_group(run["set"]) == g for r in run["rows"]
+                if r["strict"] and r["support"] < 1 and r["wide_moved"] is not None]
+        pos = [r["wide_moved"] for r in pool if r["verdict"] == "correct"]
+        neg = [r["wide_moved"] for r in pool if r["verdict"] in FALSE_S3]
+        out[g] = dict(n=len(pool), correct=len(pos), false=len(neg),
+                      q_correct=quantiles(pos), q_false=quantiles(neg), auc=auc(pos, neg),
+                      # The best a single threshold on this quantity alone could do here.
+                      separates=(min(pos) > max(neg) if pos and neg else None))
+    return out
 
 
 def s3_evidence(runs):
@@ -1683,8 +2124,9 @@ def render_rules(res, runs, sets):
           "`recall` is confirmed **correct** pairs over ground-truth adjacent pairs, summed over "
           "the forty-five runs (%d). Each per-set cell is that rule's correct confirmed joins on "
           "the set over its five seeds, and in brackets what it gains or loses against the "
-          "shipped rule -- the cost of the rule in correct joins, per set, which is the number "
-          "the brief asks for." % gt_total, ""]
+          "rule the binary ships (`Thresholds::default()`, the row named `shipped`) -- the cost "
+          "of the rule in correct joins, per set, which is the number the brief asks for."
+          % gt_total, ""]
     clean = sorted([t for t in res["table"] if t["false"] == 0],
                    key=lambda t: -t["correct"])
     L += ["| rank | rule | correct | recall | gained | **lost** | " + " | ".join(names) + " |",
@@ -1707,8 +2149,8 @@ def render_rules(res, runs, sets):
                     "**%d**" % t["lost"] if t["lost"] else "0", " | ".join(cells)))
     L += ["", "### The correct joins the ten best clean rules lose", "",
           "A rule that drops an arm cannot only gain. These are the pairs the shipped rule "
-          "confirms and the candidate does not, named so that the trade is a list and not a "
-          "number.", "",
+          "(`Thresholds::default()`) confirms and the candidate does not, named so that the "
+          "trade is a list and not a number.", "",
           "| rule | lost | which |", "|---|---:|---|"]
     for t in clean[:10]:
         if not t["lost"]:
@@ -1750,7 +2192,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--stage", default="all",
-                    choices=["runs", "tiers", "features", "colour", "rule-runs", "rules", "all"])
+                    choices=["runs", "tiers", "features", "colour", "rule-runs", "rules", "r1",
+                             "all"])
     ap.add_argument("--bin", default=os.path.join("target", "release", "sherd-refit-rs"))
     ap.add_argument("--out", default=os.path.join("output", "measure"))
     ap.add_argument("--backend", default="cpu")
@@ -1781,6 +2224,8 @@ def main(argv=None):
         stage_rule_runs(a, out)
     if a.stage == "rules":
         stage_rules(a, out)
+    if a.stage == "r1":
+        stage_r1(a, out)
     return 0
 
 

@@ -433,6 +433,27 @@ pub struct Thresholds {
     /// Capped at [`RESAMPLE_OFFSETS`]`.len()`, whose collections the re-search borrows.
     #[serde(default)]
     pub research_seeds: u32,
+    /// Task R1: whether the second placement the margin arm beats must be one R §6.5 itself
+    /// would **refuse**.
+    ///
+    /// A rival the pipeline would have been willing to believe is a stronger objection than one it
+    /// would throw away, and a margin over an objection the pipeline shares says less than a
+    /// margin over one it does not. The field was reported from task S3 onwards
+    /// ([`WideRival::accepted`]) and read by nothing; task R1's table on the ten-pot collection is
+    /// where it earns a place in the rule — it removes six of that collection's thirteen false
+    /// confirmed joins and none of the terracotta's ten museum slots (§R1 note §4).
+    #[serde(default)]
+    pub rival_refused: bool,
+    /// Task R1: whether the strict half above must hold on the two **redraws** as well as on the
+    /// run's own draw.
+    ///
+    /// M1 §5.8 measured the redraws and left them out of the rule, because on the development sets
+    /// they cost confirmed joins and removed no false one. On a real ten-pot collection they
+    /// remove a **cross-object** join whose `gap` clears 0.015 t on the draw the run made and does
+    /// not on another (§R1 note §4). The draws are the two R §3.5 redraws
+    /// [`Probes::resamples`] already carries, so the test costs nothing a run has not paid for.
+    #[serde(default)]
+    pub strict_on_redraws: bool,
     /// Degrees; off by default (see the type's own note).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_determined_deg: Option<f64>,
@@ -447,10 +468,11 @@ fn default_rival_t() -> f64 {
 }
 
 impl Default for Thresholds {
-    /// Task S3's chosen tier: M1 §3's strict half, value for value, with the second arm the
-    /// evidence table chose (§S3 note §5).
+    /// Task R1's chosen tier: M1 §3's strict half, value for value, and the second arm the
+    /// evidence table chose once that table contained the museum's own ten-pot collection
+    /// (§R1 note §4).
     fn default() -> Self {
-        Self::S3
+        Self::R1
     }
 }
 
@@ -473,6 +495,8 @@ impl Thresholds {
         min_rival_t: SAME_PLACEMENT_T,
         min_research: 0,
         research_seeds: 0,
+        rival_refused: false,
+        strict_on_redraws: false,
         max_determined_deg: None,
         min_resample_accept: None,
     };
@@ -491,6 +515,29 @@ impl Thresholds {
         ..Self::M1
     };
 
+    /// Task R1's chosen tier, and the one that ships: task S3's, with the margin arm's three
+    /// remaining witnesses turned on.
+    ///
+    /// S3's rule was chosen on 45 development runs where it is perfectly clean, and task A2 then
+    /// measured it on the museum's own ten-pot collection, where it confirms **thirteen** false
+    /// joins at two seeds — every one of them on the margin arm with no support. Task R1 chose
+    /// this set on a table that contains that collection (§R1 note §4):
+    ///
+    /// * **both** re-searches must land on the placement (`min_research` 1 → 2) — task A2 §6
+    ///   already measured this as the first thing to try, and it halves the false band;
+    /// * the second placement must be one R §6.5 would refuse ([`Thresholds::rival_refused`]);
+    /// * the strict half must survive the two redraws ([`Thresholds::strict_on_redraws`]).
+    ///
+    /// **No number moved.** `min_margin` is still 2 and `min_rival_t` is still [`RIVAL_FAR_T`];
+    /// the three changes are booleans over evidence every run since task S3 has computed and
+    /// reported, so nothing here is a threshold fitted to the collection that judges it — which is
+    /// the trap task A2 §4.1 documented when the rival distance failed to transfer.
+    pub const R1: Self = Self {
+        min_research: 2,
+        rival_refused: true,
+        strict_on_redraws: true,
+        ..Self::S3
+    };
 }
 
 impl Thresholds {
@@ -526,6 +573,9 @@ impl Thresholds {
         match probes.slide_t {
             Some(slide) => ceiling("slide", slide, self.max_slide_t, &mut failed),
             None => failed.push("slide: no shared seam to slide along".to_owned()),
+        }
+        if self.strict_on_redraws && let Some(reason) = self.redraw_refusal(probes) {
+            failed.push(reason);
         }
         if let Some(limit) = self.max_determined_deg {
             match probes.determined_deg {
@@ -593,6 +643,54 @@ impl Thresholds {
         self.margin_of(probes).is_some_and(|m| m >= self.min_margin)
             && self.rival_moved_of(probes).is_some_and(|d| d >= self.min_rival_t)
             && probes.research_agree() >= self.min_research
+            && (!self.rival_refused || self.rival_was_refused(probes) == Some(true))
+    }
+
+    /// Whether R §6.5 refused the second placement the margin is read against.
+    ///
+    /// `None` on the kept reading, which does not record the rival's verdict, and on a pair with
+    /// no second placement at all — both of which the arm reads as a failed test when
+    /// [`Thresholds::rival_refused`] is on.
+    #[must_use]
+    pub fn rival_was_refused(&self, probes: &Probes) -> Option<bool> {
+        match self.margin_rival {
+            RivalKind::Kept => None,
+            RivalKind::Wide => probes.wide_rival.map(|w| !w.accepted),
+        }
+    }
+
+    /// Task R1: the first strict test one of the two redraws fails, named with the draw it failed
+    /// on — or `None` when every draw clears the strict half.
+    ///
+    /// The redraw rows are R §6 run again at **this very pose** on a collection whose R §3.5
+    /// samples were drawn afresh ([`Probes::resamples`]), so this asks the narrow question a
+    /// museum asks of a measurement: *would the same sherd, sampled again, still clear the bar?*
+    fn redraw_refusal(&self, probes: &Probes) -> Option<String> {
+        for (k, row) in probes.resamples.iter().enumerate() {
+            let draw = k + 1;
+            if under(row.tight, self.min_tight) {
+                return Some(format!("redraw {draw}: tight {:.4} < {}", row.tight, self.min_tight));
+            }
+            if over(row.gap, self.max_gap_t) {
+                return Some(format!("redraw {draw}: gap {:.4} > {}", row.gap, self.max_gap_t));
+            }
+            if under(row.seam, self.min_seam) {
+                return Some(format!("redraw {draw}: seam {:.4} < {}", row.seam, self.min_seam));
+            }
+            if under(row.cont_n, self.min_cont_n) {
+                return Some(format!(
+                    "redraw {draw}: cont_n {:.4} < {}",
+                    row.cont_n, self.min_cont_n
+                ));
+            }
+            if row.pen_unavailable {
+                return Some(format!("redraw {draw}: penetration not measurable"));
+            }
+            if over(row.pen, self.max_pen) {
+                return Some(format!("redraw {draw}: pen {:.4} > {}", row.pen, self.max_pen));
+            }
+        }
+        None
     }
 
     /// The one line a candidate neither arm reaches gets in `evidence.failed`, naming every test
@@ -607,12 +705,16 @@ impl Thresholds {
             (Some(_), Some(d)) if d < self.min_rival_t => parts
                 .push(format!("the second placement is {d:.2} t away, under {}", self.min_rival_t)),
             (None, _) | (_, None) => parts.push("no second placement to beat".to_owned()),
-            _ => parts.push(format!(
+            _ if probes.research_agree() < self.min_research => parts.push(format!(
                 "re-search agreed {}/{} < {}",
                 probes.research_agree(),
                 probes.research.len(),
                 self.min_research
             )),
+            _ => parts.push(
+                "the second placement is one R §6.5 would accept, so beating it is not evidence"
+                    .to_owned(),
+            ),
         }
         format!("no arm: {}", parts.join(" and "))
     }
@@ -1710,10 +1812,16 @@ mod tests {
         // Task S3's three, chosen on the evidence table of all 45 development runs (§S3 note §5).
         assert_eq!(th.margin_rival, RivalKind::Wide, "the pair's best second placement");
         assert_relative_eq!(th.min_rival_t, RIVAL_FAR_T);
-        assert_eq!(th.min_research, 1, "one independent re-search has to land on the placement");
-        assert_eq!(th.research_seeds, 2, "and two are performed");
-        assert_eq!(th, Thresholds::S3, "the default *is* the preset the note names");
-        // The strict half is M1's, value for value: task S3 moved the second arm and nothing else.
+        assert_eq!(th.research_seeds, 2, "two re-searches are performed");
+        // Task R1's three, chosen on the first table that contained `mixed_all` (§R1 note §4).
+        // Not one of them is a number: they are witnesses every run has computed since task S3,
+        // turned on. `min_margin` and `min_rival_t` are S3's, unmoved.
+        assert_eq!(th.min_research, 2, "both re-searches have to land on the placement");
+        assert!(th.rival_refused, "the second placement must be one R §6.5 refuses");
+        assert!(th.strict_on_redraws, "the strict half must hold on the redraws too");
+        assert_eq!(th, Thresholds::R1, "the default *is* the preset the note names");
+        // The strict half is M1's, value for value: S3 and R1 moved the second arm and nothing
+        // else. Both are stated as a difference in named fields rather than by eye.
         let m1 = Thresholds::M1;
         assert_eq!(
             Thresholds {
@@ -1721,24 +1829,45 @@ mod tests {
                 min_rival_t: m1.min_rival_t,
                 min_research: m1.min_research,
                 research_seeds: m1.research_seeds,
+                rival_refused: m1.rival_refused,
+                strict_on_redraws: m1.strict_on_redraws,
                 ..th
             },
             m1,
-            "the two rules differ in the four fields the flags expose and in nothing else"
+            "the rules differ in the fields the flags expose and in nothing else"
+        );
+        assert_eq!(
+            Thresholds {
+                min_research: Thresholds::S3.min_research,
+                rival_refused: false,
+                strict_on_redraws: false,
+                ..th
+            },
+            Thresholds::S3,
+            "R1 is S3 with three witnesses turned on"
         );
         // The two retired arms are skipped on the way out, so the tier set a report carries is
         // the numbers that are in force and no nulls.
         let json = serde_json::to_value(th).expect("Thresholds serialises");
-        assert_eq!(json.as_object().expect("an object").len(), 12);
+        assert_eq!(json.as_object().expect("an object").len(), 14);
         assert_eq!(serde_json::from_value::<Thresholds>(json).expect("round trip"), th);
-        // A tier set written before task S3 has none of the new keys, and reading it back has to
-        // give M1's rule, which is what that file described.
+        // A tier set written before task S3 has none of its keys, and reading it back has to give
+        // M1's rule, which is what that file described.
         let old: Thresholds = serde_json::from_str(
             r#"{"min_tight":0.35,"max_gap_t":0.015,"min_seam":5.0,"min_cont_n":0.9,
                 "max_pen":0.0,"max_slide_t":0.1,"min_margin":2.0,"min_support":1}"#,
         )
         .expect("S2's own tier set still reads");
         assert_eq!(old, Thresholds::M1, "an S2 report describes M1's rule, field for field");
+        // And one written by task S3 or task A2 -- twelve keys, none of task R1's -- reads back as
+        // S3's rule and not as this one.
+        let s3: Thresholds = serde_json::from_str(
+            r#"{"min_tight":0.35,"max_gap_t":0.015,"min_seam":5.0,"min_cont_n":0.9,
+                "max_pen":0.0,"max_slide_t":0.1,"min_margin":2.0,"min_support":1,
+                "margin_rival":"wide","min_rival_t":5.0,"min_research":1,"research_seeds":2}"#,
+        )
+        .expect("S3's own tier set still reads");
+        assert_eq!(s3, Thresholds::S3, "an A2 report describes S3's rule, field for field");
     }
 
     /// A scores/probe pair that clears every test of the default set — task S3's rule, which
@@ -1905,6 +2034,69 @@ mod tests {
         let alone = Probes { support: 0, ..no_rival(&probes) };
         assert_eq!(th.refusals(&family, &alone).len(), 1);
         assert!(th.refusals(&family, &alone)[0].starts_with("no arm"));
+    }
+
+    /// Task R1's two new conjuncts, one at a time, on the same confirmable fixture.
+    ///
+    /// Both are booleans over evidence every run has computed and reported since task S3; neither
+    /// moves a number. The table that turned them on is the first one that contained the museum's
+    /// own ten-pot collection (§R1 note §4), and each removes a family the development sets could
+    /// not show: the rival's verdict removes six of `mixed_all`'s thirteen false confirmed joins,
+    /// the redraws remove a **cross-object** one.
+    #[test]
+    fn the_margin_arm_wants_a_refused_rival_and_a_strict_redraw() {
+        let (scores, probes) = confirmable();
+        let th = Thresholds::default();
+        assert!(th.refusals(&scores, &probes).is_empty(), "the fixture is a confirmed join");
+        assert_eq!(th.rival_was_refused(&probes), Some(true));
+
+        // 1. A second placement R §6.5 would have accepted. Beating it is not evidence: the search
+        //    would have been willing to believe the other pose too.
+        let believable = Probes {
+            wide_rival: Some(wide(4.0, 8.2, RivalSource::Stage2, true)),
+            ..probes.clone()
+        };
+        assert_eq!(th.rival_was_refused(&believable), Some(false));
+        assert_eq!(th.arm(&believable), None);
+        assert_eq!(
+            th.refusals(&scores, &believable),
+            ["no arm: support 0 < 1 and the second placement is one R §6.5 would accept, so \
+              beating it is not evidence"
+                .to_owned()]
+        );
+        // Task S3's rule reads the same evidence and confirms it, which is the difference the
+        // table measured and the reason `--tier-rule s3` still exists.
+        assert_eq!(Thresholds::S3.arm(&believable), Some("margin"));
+        // It is a conjunct of the margin arm and not a strict test: a supported join is untouched.
+        assert_eq!(th.arm(&Probes { support: 1, ..believable.clone() }), Some("support"));
+
+        // 2. A candidate whose gap clears the limit on the draw the run made and does not on the
+        //    second redraw. That is a strict test and it refuses whichever arm would have spoken.
+        let unlucky = Probes {
+            resamples: vec![row(0.71, 0.0072, true), row(0.70, 0.0162, true)],
+            support: 4,
+            ..probes.clone()
+        };
+        assert_eq!(th.arm(&unlucky), Some("support"), "the arm is not what refuses it");
+        assert_eq!(
+            th.refusals(&scores, &unlucky),
+            ["redraw 2: gap 0.0162 > 0.015".to_owned()],
+            "the line names the draw and the limit"
+        );
+        assert!(Thresholds::S3.refusals(&scores, &unlucky).is_empty(), "S3 does not look");
+        // Every strict limit is read on every draw, and the first failure is the one printed.
+        for (draws, want) in [
+            (vec![row(0.34, 0.007, true), row(0.71, 0.007, true)], "redraw 1: tight 0.3400 < 0.35"),
+            (vec![row(0.71, 0.007, true), row(0.71, 0.007, false)], ""),
+        ] {
+            let p = Probes { resamples: draws, ..probes.clone() };
+            let failed = th.refusals(&scores, &p);
+            if want.is_empty() {
+                assert!(failed.is_empty(), "R §6.5's own verdict on a draw is not a strict test");
+            } else {
+                assert_eq!(failed, [want.to_owned()]);
+            }
+        }
     }
 
     /// Task R1 (V10's observation, closed): the margin arm's two halves are read at **one** pose.

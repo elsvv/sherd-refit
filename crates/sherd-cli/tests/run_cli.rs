@@ -26,6 +26,19 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+/// The one tier flag the slab fixture has to be run with when a test needs a **confirmed** join.
+///
+/// `fixtures/slab` is a curved wall that genuinely fits itself in two places — at the seam and
+/// 88° round — and R §6.5 accepts both (`slab_pair::the_curved_slab_has_a_second_fit`, and
+/// `report.json` puts the second placement 13.96 t away at a score the winner beats 4.5×). Task
+/// R1's `--tier-rival-refused` is precisely the rule that refuses a margin over a second placement
+/// the search itself would have believed, and a two-fragment collection has no third sherd for the
+/// support arm, so under the shipped rule this fixture confirms **nothing**. That is the right
+/// answer about this slab and the wrong fixture for a test whose subject is something else, so the
+/// tests below that need a confirmed join to look at turn that one conjunct off and say so here.
+/// Every other conjunct, and every other test in this file, is the default rule.
+const AMBIGUOUS: [&str; 2] = ["--tier-rival-refused", "off"];
+
 /// Runs `run INPUT --out OUT` and returns its standard output.
 fn run(input: &Path, out: &Path) -> String {
     run_with(input, out, &[])
@@ -220,7 +233,7 @@ fn the_tier_is_an_off_switch_and_the_assembly_is_built_from_the_confirmed_band()
     let off_dir = scratch("tiers-off");
     let on_dir = scratch("tiers-on");
     run_with(&input, &off_dir, &["--tiers", "off"]);
-    run(&input, &on_dir);
+    run_with(&input, &on_dir, &AMBIGUOUS);
 
     let read = |dir: &Path, name: &str| -> serde_json::Value {
         serde_json::from_slice(&std::fs::read(dir.join(name)).expect(name)).expect("valid JSON")
@@ -426,12 +439,16 @@ fn the_two_object_constraints_reach_the_object_report_without_moving_a_pose() {
     let input = repo_root().join("fixtures/slab/input");
     let plain = scratch("objects-plain");
     let same = scratch("objects-same");
-    run(&input, &plain);
+    run_with(&input, &plain, &AMBIGUOUS);
     let file = constraints_file(
         "objects-same",
         r#"{"version": 1, "same_object": [["pieceA", "pieceB"]]}"#,
     );
-    run_with(&input, &same, &["--constraints", &file.to_string_lossy()]);
+    run_with(
+        &input,
+        &same,
+        &["--tier-rival-refused", "off", "--constraints", &file.to_string_lossy()],
+    );
 
     let report = report_of(&same);
     assert_eq!(report["constraints"]["entries"][0]["list"], "same_object");
@@ -619,7 +636,7 @@ fn must_not_join_removes_the_pair_before_matching_and_the_report_lists_it() {
 fn a_pinned_pose_places_without_matching() {
     let input = repo_root().join("fixtures/slab/input");
     let found_dir = scratch("pinned-source");
-    run(&input, &found_dir);
+    run_with(&input, &found_dir, &AMBIGUOUS);
     let found = report_of(&found_dir);
     let candidates = found["candidates"].as_array().expect("candidates");
     assert!(candidates.len() > 1, "the matcher keeps several candidates for this pair");
@@ -659,7 +676,11 @@ fn different_object_vetoes_a_join_the_geometry_accepted() {
     let out = scratch("different-object");
     let file =
         constraints_file("diff", r#"{"version": 1, "different_object": [["pieceA", "pieceB"]]}"#);
-    run_with(&input, &out, &["--constraints", &file.to_string_lossy()]);
+    run_with(
+        &input,
+        &out,
+        &["--tier-rival-refused", "off", "--constraints", &file.to_string_lossy()],
+    );
 
     let report = report_of(&out);
     assert!(

@@ -336,17 +336,24 @@ struct RunArgs {
     /// confirms it; 0 makes that arm always true, which disables the disjunction.
     #[arg(long, default_value_t = Thresholds::default().min_support)]
     tier_support: u32,
-    /// Which confirmation rule the four flags below default to: `s3` — the rule task S3's
-    /// evidence table chose, and the one every run makes today — or `m1`, the rule task M1 chose
-    /// and every run made before it.
+    /// Which confirmation rule the flags below default to: `r1` — the rule task R1's evidence
+    /// table chose once that table contained the museum's own ten-pot collection, and the one
+    /// every run makes today — `s3`, the rule chosen on the 45 development runs alone, or `m1`,
+    /// the rule task M1 chose and every run made before task S3.
     ///
-    /// The difference is the **margin arm**. M1's reads R §5.7's returned list and asks only for a
-    /// factor of two. S3's reads the pair's *best* second placement (`--tier-margin-rival wide`),
-    /// refuses one closer than five wall thicknesses (`--tier-rival-moved`) because a rival that
-    /// near is the same break slid along itself, and wants an independent re-search of the pair to
-    /// land on the placement as well (`--tier-research`). The support arm and the strict half are
-    /// the same in both. Each of the four can still be set on its own, and overrides the preset.
-    #[arg(long, default_value_t = TierRule::S3, value_name = "s3|m1")]
+    /// The difference is the **margin arm**; the support arm and the strict half are M1's in all
+    /// three. M1's margin reads R §5.7's returned list and asks only for a factor of two. S3's
+    /// reads the pair's *best* second placement (`--tier-margin-rival wide`), refuses one closer
+    /// than five wall thicknesses (`--tier-rival-moved`) because a rival that near is the same
+    /// break slid along itself, and wants an independent re-search of the pair to land on the
+    /// placement as well (`--tier-research`). R1's asks for **both** re-searches, for the second
+    /// placement to be one R §6.5 itself refuses (`--tier-rival-refused`), and for the strict half
+    /// to hold on the two redraws as well (`--tier-redraw-strict`) — three witnesses every run has
+    /// computed and reported since task S3, and no threshold moved. On `mixed_all` that takes the
+    /// false confirmed band from thirteen joins to one and the cross-object count to zero.
+    ///
+    /// Each flag below can still be set on its own, and overrides the preset.
+    #[arg(long, default_value_t = TierRule::R1, value_name = "r1|s3|m1")]
     tier_rule: TierRule,
     /// Which second placement `--tier-margin` divides by: `kept` — R §5.7's returned list, the
     /// margin as M1 measured it — or `wide` (task S3).
@@ -379,6 +386,23 @@ struct RunArgs {
     /// redrawn collections the stability probe has already built.
     #[arg(long, value_name = "N")]
     resample_seeds: Option<u32>,
+    /// Whether the second placement the margin arm beats must be one R §6.5 itself would refuse
+    /// (task R1).
+    ///
+    /// A rival the search would have been willing to believe is an objection a margin does not
+    /// answer. On the museum's ten-pot collection this alone removes six of the thirteen false
+    /// confirmed joins task A2 measured, and it removes none of the terracotta's ten museum slots.
+    #[arg(long, value_name = "on|off")]
+    tier_rival_refused: Option<Switch>,
+    /// Whether the strict half must hold on the two redraws of R §3.5's samples as well as on the
+    /// run's own draw (task R1).
+    ///
+    /// The redraws are already computed for the stability rows, so this costs nothing; M1 §5.8
+    /// measured them and left them out because on the development sets they removed no false join.
+    /// On a real collection they remove a cross-object one whose `gap` clears the limit on the
+    /// draw the run made and does not on another.
+    #[arg(long, value_name = "on|off")]
+    tier_redraw_strict: Option<Switch>,
     /// Degrees; worst rotation over the pose's twelve one-ULP neighbours a confirmed join may
     /// show. Off by default: M1 measured the whole range at 1.6e-14 to 4.1e-7 degrees, so there is
     /// no threshold in it and the number is reported instead.
@@ -538,6 +562,12 @@ impl RunArgs {
                     min_rival_t: self.tier_rival_moved.unwrap_or(preset.min_rival_t),
                     min_research: self.tier_research.unwrap_or(preset.min_research),
                     research_seeds: self.resample_seeds.unwrap_or(preset.research_seeds),
+                    rival_refused: self
+                        .tier_rival_refused
+                        .map_or(preset.rival_refused, |s| s == Switch::On),
+                    strict_on_redraws: self
+                        .tier_redraw_strict
+                        .map_or(preset.strict_on_redraws, |s| s == Switch::On),
                     max_determined_deg: self.tier_max_determined_deg,
                     min_resample_accept: self.tier_resample_accept,
                 }),
@@ -584,8 +614,11 @@ impl RunArgs {
 /// Which confirmation rule the tier flags default to, by name (task S3).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 enum TierRule {
-    /// Task S3's rule, chosen on the evidence table of all 45 development runs.
+    /// Task R1's rule, chosen on the first evidence table that contained the museum's own ten-pot
+    /// collection, and the one every run makes today.
     #[default]
+    R1,
+    /// Task S3's rule, chosen on the 45 development runs alone.
     S3,
     /// Task M1's rule, which every run made before task S3.
     M1,
@@ -595,6 +628,7 @@ impl TierRule {
     /// The threshold set this preset starts from.
     fn preset(self) -> Thresholds {
         match self {
+            Self::R1 => Thresholds::R1,
             Self::S3 => Thresholds::S3,
             Self::M1 => Thresholds::M1,
         }
@@ -604,6 +638,7 @@ impl TierRule {
 impl std::fmt::Display for TierRule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::R1 => "r1",
             Self::S3 => "s3",
             Self::M1 => "m1",
         })
@@ -1578,7 +1613,8 @@ mod tests {
         assert_eq!(Params::default().objects, None, "for both of them");
 
         let on = params(&base).tiers.expect("`run` computes a tier unless told not to");
-        assert_eq!(on, Thresholds::default(), "M1 §3's chosen set, flag for flag");
+        assert_eq!(on, Thresholds::default(), "task R1's chosen set, flag for flag");
+        assert_eq!(on, Thresholds::R1, "which is the preset `--tier-rule r1` names");
         let objects = params(&base).objects.expect("`run` reads the objects unless told not to");
         assert_eq!(objects, ObjectParams::default(), "M1 §4's verdict, flag for flag");
         assert!(objects.demote.is_empty(), "no feature reached audit §D.2's own AUC of 0.800");

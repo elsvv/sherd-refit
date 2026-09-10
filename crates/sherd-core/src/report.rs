@@ -1052,6 +1052,12 @@ fn arms_sentence(th: &crate::tiers::Thresholds) -> String {
             if th.min_research == 1 { "s" } else { "" },
         );
     }
+    if th.rival_refused {
+        margin.push_str(
+            ", and that second placement being one R §6.5 itself refuses — a rival the search \
+             would have been willing to believe is an objection this one does not answer",
+        );
+    }
     format!("either {support} or {margin}")
 }
 
@@ -1178,15 +1184,20 @@ fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
     lines.push(format!(
         "A **confirmed** join clears R §6.5 and then a stricter set on top of it: tight ≥ {}, gap \
          ≤ {} t, seam ≥ {} t, normal agreement ≥ {}, penetration ≤ {}, the pose returns to within \
-         {} t after being pushed half a wall along the seam, and {}. The assembly above is built \
-         from these and from nothing else. The last column names the arm that answered for each \
-         join.",
+         {} t after being pushed half a wall along the seam,{} and {}. The assembly above is \
+         built from these and from nothing else. The last column names the arm that answered for \
+         each join.",
         th.min_tight,
         th.max_gap_t,
         th.min_seam,
         th.min_cont_n,
         th.max_pen,
         th.max_slide_t,
+        if th.strict_on_redraws {
+            " every one of those limits holding on the two redraws of R §3.5's samples as well,"
+        } else {
+            ""
+        },
         arms_sentence(th),
     ));
     if coloured {

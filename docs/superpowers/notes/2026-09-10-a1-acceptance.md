@@ -515,7 +515,8 @@ stashed, and nothing was sent anywhere.
 
 **Commits.** `A1.1` the `--score-only` mode of the quality gate with D §10.4 and the README's gate
 section; `A1.2` D §1, §10.3 and §12; `A1.3` the README's benchmark table and its new museum
-section; `A1.4` this note.
+section; `A1.4` this note; `A1.5` a paragraph split in the README's tier section, where `A1.3`'s
+caveat had been spliced into the middle of another sentence.
 
 ---
 

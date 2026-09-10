@@ -77,9 +77,10 @@ existed, so that each is a check a run can fail rather than a sentence in a note
   seed and are deliberately not gated -- a number fixed at what the tier happens
   to reach today makes the tier unimprovable in either direction.
 * **step 8, the terracotta** -- "the two joins confirmed" at seeds 0-4 is ten
-  (seed, join) slots, and the gate asks for ten.  On this tree it reaches nine;
-  the run says which slot is short and why it is a recall row rather than a
-  prohibition.  See ``TERRACOTTA_CONFIRMED_SLOTS``.
+  (seed, join) slots, and the gate asks for ten.  Since task S3's rule the tree
+  reaches ten and the gate passes on it; when it does not, the run says which
+  slot is short and why it is a recall row rather than a prohibition.  See
+  ``TERRACOTTA_CONFIRMED_SLOTS``.
 
 ``--tiers off`` runs the binary the way it ran before the tier existed and
 prints the table this script has always printed; that is the mode in which
@@ -230,9 +231,11 @@ TERRACOTTA_JOINS = {("021", "094"), ("094", "104")}
 # beat, and a three-fragment chain gives the support arm no second path either.  A constant fitted
 # to the observed answer cannot fail, and a gate that cannot fail is not a gate: it would record
 # the brief's row as met while the row is unmet, and it could not tell nine-at-seed-4 from
-# nine-at-some-other-seed.  So the number is the brief's, the run fails on it, and the failure is
-# printed with the slots that are missing.  Task G measured what it would take to close it and
-# found no rule that does not cost a false join -- see notes/2026-09-10-g-tiers-findings.md.
+# nine-at-some-other-seed.  So the number is the brief's, and when a tree falls short the failure
+# is printed with the slots that are missing.  Task G measured what it would take to close it and
+# found no rule that does not cost a false join (notes/2026-09-10-g-tiers-findings.md); task S3's
+# wide second placement closed it without one -- that pair has no rival in R §5.7's kept list and
+# does have one in the list `keep` truncated -- and every tree since reaches ten.
 TERRACOTTA_CONFIRMED_SLOTS = 2 * 5
 
 
@@ -478,8 +481,9 @@ def tier_verdict(name, rows):
     Plus, for the terracotta, audit §E's step-8 gate as task G restated it: the two joins are at
     least probable at every seed, nothing else is ever confirmed, and all ten of the (seed, join)
     slots are confirmed -- ``TERRACOTTA_CONFIRMED_SLOTS``, which is the audit's own ``2 * 5`` and
-    not a number read off a run.  This tree reaches nine and the gate fails on it; the failure is
-    marked a recall row, and the missing slot is named.
+    not a number read off a run.  Since task S3 this tree reaches ten and the gate passes on it; a
+    tree that falls short fails here, the failure is marked a recall row, and the missing slot is
+    named.
     """
     bad, notes = [], []
     for r in rows:

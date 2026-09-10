@@ -452,6 +452,7 @@ fn markdown_row(
         constraints: None,
         review: None,
         objects: None,
+        probable_top: 0, // no band to cut; `0` is "show all" in any case
     };
     let ours = report::report_markdown(
         &theirs.fragments,

@@ -423,9 +423,23 @@ struct RunArgs {
     /// pose, A grey and B orange, the seam's `t/3` voxels white, B's fracture samples coloured by
     /// their distance to A's fracture surface, and a caption with the scores, the band, the margin
     /// and the seed. `report.md`'s per-fragment index links them. Deterministic: two runs of one
-    /// collection write the same bytes.
+    /// collection write the same bytes. How many probable joins get one is `--probable-top`.
     #[arg(long)]
     review_images: bool,
+    /// How many rows of the **probable** band `report.md` shows, best score first; 0 shows all.
+    ///
+    /// The band is ordered by `seam x tight`, and on a real ten-pot collection it is long: task
+    /// A1 measured 2 761 probable pairs on `mixed_all`, 61 of them true joins, with **four fifths
+    /// of everything true in the band inside the first hundred rows**. So the default cuts the
+    /// bench worksheet at a hundred and says how long the whole band was ("100 of 2761 shown").
+    ///
+    /// The same cut applies to `report.md`'s per-fragment index and to `--review-images`, so that
+    /// a row, its picture and the count always agree. **`report.json` is never cut**: it carries
+    /// every candidate the run found, whatever this flag says, and re-reading it with
+    /// `--probable-top 0` costs nothing but the report writer. With `--tiers off` there is no band
+    /// and the flag does nothing.
+    #[arg(long, default_value_t = sherd_core::tiers::PROBABLE_TOP, value_name = "N")]
+    probable_top: usize,
 }
 
 impl RunArgs {
@@ -962,6 +976,7 @@ fn run(args: &RunArgs) -> Result<()> {
             None => None,
         },
         review_images: args.review_images,
+        probable_top: args.probable_top,
     };
     if args.force && !args.no_cache {
         clear_caches(&args.input, &args.out)?;

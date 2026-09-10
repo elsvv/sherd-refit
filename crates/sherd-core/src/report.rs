@@ -26,7 +26,7 @@
 //!
 //! Filled in by phase-1d step D2.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use nalgebra::Matrix4;
@@ -581,6 +581,12 @@ pub struct Outcome<'a> {
     /// Roadmap item 4's objects, their consensus and the joins it demoted, or `None` on a run with
     /// `--objects off` — in which case `## Objects` and the `objects` key are absent.
     pub objects: Option<&'a ObjectReport>,
+    /// `--probable-top`: how many rows of the probable band `report.md` shows, `0` for all of them
+    /// ([`crate::tiers::probable_shown`]).
+    ///
+    /// `report.json` is not cut by it — the whole band is in the file whatever this says, because
+    /// the flag is about what a person is handed and not about what the run found.
+    pub probable_top: usize,
 }
 
 /// R §11.2's `report.json` and R §11.3's `report.md`, both into `out_dir`.
@@ -1102,7 +1108,9 @@ fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
         lines.extend(confirmed.iter().map(|&i| row(i)));
     }
 
-    let probable = of_tier(Tier::Probable);
+    let (probable, probable_total) =
+        crate::tiers::probable_shown(outcome.candidates, outcome.probable_top);
+    let cut = probable_total > probable.len();
     lines.push(String::new());
     lines.push("## Probable joins".to_owned());
     lines.push(String::new());
@@ -1115,6 +1123,17 @@ fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
     if probable.is_empty() {
         lines.push("Every accepted join of this collection is confirmed.".to_owned());
     } else {
+        if cut {
+            lines.push(format!(
+                "**{} of {} shown**, best score first (`--probable-top {}`; `0` shows the whole \
+                 band). The rows below the cut are in `report.json`, which is never cut, and they \
+                 have no review image.",
+                probable.len(),
+                probable_total,
+                outcome.probable_top,
+            ));
+            lines.push(String::new());
+        }
         lines.push(format!("{head} why not confirmed |"));
         lines.push(format!("{rule}---|"));
         for &i in &probable {
@@ -1194,10 +1213,19 @@ fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
          **Best candidate per pair** below."
             .to_owned(),
     );
+    if cut {
+        lines.push(String::new());
+        lines.push(format!(
+            "The probable partners here are the same {} of {} rows the section above shows.",
+            probable.len(),
+            probable_total,
+        ));
+    }
     lines.push(String::new());
     // The image column exists only on a run that wrote images, which is what keeps a run without
     // `--review-images` byte for byte the run before the flag.
     let images = outcome.review;
+    let shown: BTreeSet<usize> = probable.iter().copied().collect();
     let head = "| fragment | partner | tier | score | seam (t) | tight | gap (t) | slide (t) | \
                 margin | support | why not confirmed |";
     let rule = "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|";
@@ -1216,7 +1244,12 @@ fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
             .copied()
             .filter(|&i| {
                 let candidate = &outcome.candidates[i];
-                (candidate.a == here || candidate.b == here) && candidate.tier != Tier::Rejected
+                (candidate.a == here || candidate.b == here)
+                    && match candidate.tier {
+                        Tier::Confirmed => true,
+                        Tier::Probable => shown.contains(&i),
+                        Tier::Rejected => false,
+                    }
             })
             .collect();
         mine.sort_by(|&x, &y| {
@@ -1593,6 +1626,7 @@ mod tests {
             constraints: None,
             review: None,
             objects: None,
+            probable_top: 0,
         };
         let timings = super::Timings::from_iter([
             ("preprocess".to_owned(), 16.3),
@@ -1639,6 +1673,7 @@ mod tests {
             constraints: None,
             review: None,
             objects: None,
+            probable_top: 0,
         };
         let stats = Vec::new();
         let timings = super::Timings::from_iter([("matching".to_owned(), 1.25)]);
@@ -1698,6 +1733,7 @@ mod tests {
             constraints: None,
             review: None,
             objects: None,
+            probable_top: 0,
         };
         let timings = super::Timings::from_iter([("matching".to_owned(), 12.34)]);
         let md = report_markdown(&stats, 3.75, &outcome, &timings, &Params::default());
@@ -1831,6 +1867,7 @@ mod tests {
                 constraints: None,
                 review: None,
                 objects: None,
+                probable_top: 0,
             };
             report_markdown(&stats, 3.75, &outcome, &timings, &Params::default())
         };
@@ -1874,5 +1911,89 @@ mod tests {
         assert_eq!(index.matches("| confirmed |").count(), 2);
         assert_eq!(index.matches("| probable |").count(), 2);
         assert_eq!(index.matches("| rejected |").count(), 0);
+    }
+
+    /// `--probable-top N`: the Probable section and the per-fragment index show the same best `N`
+    /// rows and say how long the band was, and `0` shows all of it.
+    ///
+    /// The cut is a report decision and nothing else: the three candidates are the same three in
+    /// both calls, and `report.json` is written from the same list whatever the flag says.
+    #[test]
+    fn probable_top_cuts_the_band_in_both_places_and_prints_the_total() {
+        use crate::tiers::{Evidence, Thresholds, TierReport};
+
+        let banded =
+            |a, b, seam, tight| Candidate { tier: Tier::Probable, ..candidate(a, b, seam, tight) };
+        // Scores 20, 10 and 5 -- deliberately out of pair order, so a list that came back sorted
+        // by pair rather than by score would fail here.
+        let cands = [banded(0, 1, 20.0, 0.5), banded(0, 2, 10.0, 0.5), banded(1, 2, 40.0, 0.5)];
+        let evidence = Evidence {
+            margin: None,
+            rival_moved_t: None,
+            placements: 1,
+            determined_deg: None,
+            determined_t: None,
+            slide_t: Some(1.9e-15),
+            resample_tight_min: 0.49,
+            resample_gap_max: 0.008,
+            resample_accept: 3,
+            support: 0,
+            failed: vec!["tight 0.5000 < 0.35".to_owned()],
+        };
+        let report = TierReport {
+            thresholds: Thresholds::default(),
+            tiers: vec![Tier::Probable; 3],
+            evidence: vec![Some(evidence.clone()), Some(evidence.clone()), Some(evidence)],
+            probes: vec![None, None, None],
+        };
+        let timings = super::Timings::from_iter([("matching".to_owned(), 1.0)]);
+        let make = |top: usize| {
+            let outcome = Outcome {
+                names: &names(),
+                candidates: &cands,
+                used: &[],
+                rejected: &[],
+                groups: &[vec![0], vec![1], vec![2]],
+                tiers: Some(&report),
+                constraints: None,
+                review: None,
+                objects: None,
+                probable_top: top,
+            };
+            report_markdown(&Vec::new(), 3.75, &outcome, &timings, &Params::default())
+        };
+        let band = |md: &str| {
+            md.split("## Probable joins")
+                .nth(1)
+                .and_then(|t| t.split("## Rejected").next().map(str::to_owned))
+                .expect("the section")
+        };
+        let index = |md: &str| {
+            md.split("## Candidates by fragment")
+                .nth(1)
+                .and_then(|t| t.split("## Best candidate").next().map(str::to_owned))
+                .expect("the index")
+        };
+
+        let all = make(0);
+        assert_eq!(band(&all).matches("| 1.90e-15 |").count(), 3, "every row");
+        assert!(!all.contains("shown**"), "nothing is cut, so nothing is said about a cut");
+        assert_eq!(index(&all).matches("| probable |").count(), 6, "each pair under both names");
+
+        let cut = make(2);
+        let section = band(&cut);
+        let rows: Vec<&str> = section.lines().filter(|l| l.contains("| 1.90e-15 |")).collect();
+        assert_eq!(rows.len(), 2, "the best two");
+        assert!(rows[0].starts_with("| two | three | 20.00 |"), "best score first: {rows:?}");
+        assert!(rows[1].starts_with("| one | two | 10.00 |"), "{rows:?}");
+        assert!(cut.contains("**2 of 3 shown**"), "the total is printed: {section}");
+        assert!(cut.contains("`report.json`, which is never cut"), "where the rest is");
+        let index = index(&cut);
+        assert_eq!(index.matches("| probable |").count(), 4, "the same two pairs, twice each");
+        assert!(
+            index.contains("the same 2 of 3 rows the section above shows"),
+            "the index says it too: {index}"
+        );
+        assert!(!index.contains("| one | three |"), "the cut pair is in neither place");
     }
 }

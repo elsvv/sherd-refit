@@ -1080,6 +1080,43 @@ pub fn representatives(candidates: &[Candidate]) -> Vec<usize> {
     order.iter().map(|key| best[key]).collect()
 }
 
+/// How many rows of the probable band a run **shows**, when nothing else is asked for.
+///
+/// A real ten-pot collection puts 2 761 pairs in that band (task A1 §3.2) and only 61 of them are
+/// true joins; the band is ordered by score, and the measurement is that the first hundred rows
+/// carry four fifths of everything true in it. So a hundred is a bench day rather than a bench
+/// month, and it is the number `--probable-top` defaults to. `0` shows the whole band.
+pub const PROBABLE_TOP: usize = 100;
+
+/// The probable band a report shows, best score first, and how long the whole band is.
+///
+/// `top` is `--probable-top`: the first `top` rows of the band, or all of it when `top` is `0`.
+/// One list, so that `report.md`'s Probable section, its per-fragment index and the review images
+/// can never disagree about which joins a run showed — a row with no picture, or a picture with no
+/// row, is worse on a bench than a shorter list.
+///
+/// The order is R §5.7's ranking key `seam · tight` descending over the pair representatives, and
+/// the sort is stable, so equal scores keep R §4.1's pair order and two runs of one collection cut
+/// the band in the same place.
+#[must_use]
+pub fn probable_shown(candidates: &[Candidate], top: usize) -> (Vec<usize>, usize) {
+    let mut band: Vec<usize> = representatives(candidates)
+        .into_iter()
+        .filter(|&i| candidates[i].tier == Tier::Probable)
+        .collect();
+    band.sort_by(|&x, &y| {
+        candidates[y]
+            .score()
+            .partial_cmp(&candidates[x].score())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let total = band.len();
+    if top > 0 {
+        band.truncate(top);
+    }
+    (band, total)
+}
+
 /// The tier per join, for `transforms.json`.
 #[must_use]
 pub fn joins(candidates: &[Candidate], names: &[String]) -> Vec<TierJoin> {
@@ -1100,11 +1137,40 @@ pub fn joins(candidates: &[Candidate], names: &[String]) -> Vec<TierJoin> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Evidence, Probes, SAME_PLACEMENT_T, SLIDE_BACK_T, SLIDE_T, ScoreRow, Thresholds, Tier,
-        principal_axis,
+        Evidence, PROBABLE_TOP, Probes, SAME_PLACEMENT_T, SLIDE_BACK_T, SLIDE_T, ScoreRow,
+        Thresholds, Tier, principal_axis, probable_shown,
     };
+    use crate::matching::pair::Candidate;
     use crate::matching::verify::Scores;
     use approx::assert_relative_eq;
+
+    /// `probable_shown` ranks the band by `seam · tight` and cuts it where `--probable-top` says.
+    ///
+    /// The list is the one three outputs share -- the Probable section, the per-fragment index and
+    /// the review images -- so what is asserted here is the order and the cut, once.
+    #[test]
+    fn the_probable_band_is_ranked_by_score_and_cut_where_the_flag_says() {
+        let candidate = |a, b, seam: f64, tier| Candidate {
+            a,
+            b,
+            transform: nalgebra::Matrix4::identity(),
+            scores: Scores { seam, tight: 0.5, ..Scores::default() },
+            accepted: tier != Tier::Rejected,
+            tier,
+        };
+        let candidates = [
+            candidate(0, 1, 10.0, Tier::Probable),
+            candidate(0, 2, 40.0, Tier::Confirmed),
+            candidate(1, 2, 30.0, Tier::Probable),
+            candidate(1, 3, 20.0, Tier::Probable),
+            candidate(2, 3, 50.0, Tier::Rejected),
+        ];
+        // Confirmed and rejected pairs are not in it, whatever they score.
+        assert_eq!(probable_shown(&candidates, 0), (vec![2, 3, 0], 3));
+        assert_eq!(probable_shown(&candidates, 2), (vec![2, 3], 3));
+        assert_eq!(probable_shown(&candidates, 99), (vec![2, 3, 0], 3), "a cut past the end");
+        assert_eq!(PROBABLE_TOP, 100, "A1 §3.2's measured bench day");
+    }
 
     /// The constants are the audit's own numbers, and `SAME_PLACEMENT_T` is the parity harness's.
     #[test]

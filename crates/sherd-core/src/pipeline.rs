@@ -235,6 +235,12 @@ pub struct RunOptions {
     pub constraints: Option<Constraints>,
     /// Write audit §D.1's review images ([`crate::review`]) for the confirmed and probable joins.
     pub review_images: bool,
+    /// `--probable-top`: how many rows of the probable band `report.md`, its per-fragment index and
+    /// the review images show, best score first; `0` shows the whole band
+    /// ([`crate::tiers::probable_shown`]).
+    ///
+    /// `report.json` always carries the whole band, so nothing a run found is lost by it.
+    pub probable_top: usize,
 }
 
 impl Default for RunOptions {
@@ -255,6 +261,7 @@ impl Default for RunOptions {
             measure: None,
             constraints: None,
             review_images: false,
+            probable_top: crate::tiers::PROBABLE_TOP,
         }
     }
 }
@@ -802,6 +809,7 @@ pub fn run_with(
             tiered.as_ref(),
             object_pass.as_ref(),
             params,
+            options.probable_top,
         )?;
         stages.finish("review", started.elapsed().as_secs_f64());
         review_files = files;
@@ -869,6 +877,7 @@ pub fn run_with(
         constraints: honoured.as_ref(),
         review: review.as_ref(),
         objects: object_pass.as_ref(),
+        probable_top: options.probable_top,
     };
     let tier_joins = tiered.as_ref().map(|_| crate::tiers::joins(&candidates, &names));
     write_transforms(

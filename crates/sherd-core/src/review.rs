@@ -68,6 +68,11 @@ pub type ReviewIndex = BTreeMap<(FragId, FragId), String>;
 /// Returns the files written, in pair order, and the index `report.md` links. Runs after matching
 /// and before the fracture BVHs are released, because the contact colouring is R §6.1's own
 /// distance against A's fracture tree.
+///
+/// `probable_top` is `--probable-top`, and it cuts the same rows here as in `report.md`
+/// ([`crate::tiers::probable_shown`]): every confirmed join, and the best `probable_top` of the
+/// probable band. A run with the tier pass **off** has no band to cut and draws every accepted
+/// pair, which is what keeps `--tiers off` the run it was before the flag existed.
 #[allow(
     clippy::too_many_arguments,
     reason = "one pass's whole input: what to draw, from what, into where, at which band"
@@ -81,12 +86,26 @@ pub fn write_review_images(
     tiers: Option<&TierReport>,
     objects: Option<&ObjectReport>,
     params: &Params,
+    probable_top: usize,
 ) -> Result<(Vec<PathBuf>, ReviewIndex)> {
+    let shown: std::collections::BTreeSet<usize> = if tiers.is_some() {
+        crate::tiers::probable_shown(candidates, probable_top).0.into_iter().collect()
+    } else {
+        std::collections::BTreeSet::new()
+    };
     let wanted: Vec<usize> = representatives(candidates)
         .into_iter()
         .filter(|&i| {
             let c = &candidates[i];
-            if tiers.is_some() { c.tier != Tier::Rejected } else { c.accepted }
+            if tiers.is_some() {
+                match c.tier {
+                    Tier::Confirmed => true,
+                    Tier::Probable => shown.contains(&i),
+                    Tier::Rejected => false,
+                }
+            } else {
+                c.accepted
+            }
         })
         .collect();
     if wanted.is_empty() {

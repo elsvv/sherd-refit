@@ -170,6 +170,9 @@ fn main() -> Result<()> {
         constraints: None,
         review: None,
         objects: None,
+        // The reference has no probable band to cut, and `tiers: None` is the switch that keeps
+        // every section it would appear in out of the file; `0` is "show all" all the same.
+        probable_top: 0,
     };
     let timings = Timings::from_iter([("output".to_owned(), 0.0)]);
     // No memory block: the harness rebuilds the reference's own file, and audit §B.3's

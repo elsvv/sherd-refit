@@ -177,8 +177,8 @@ impl FeatureKey {
     /// one colour statement a break makes and the only object feature this project has measured
     /// above audit §D.2's own AUC of 0.800 (0.985 on `synthetic_mix3_24`, 0.990 on
     /// `synthetic_mix3_60` for `frac_lab_a`). It **reports**: what it would cost to let it veto is
-    /// in `notes/2026-09-11-s2-colour.md` §4, and the answer is four correct joins for no false
-    /// one.
+    /// in `notes/2026-09-11-s2-colour.md` §4, and the answer is no false join removed on either
+    /// side of [`COLOUR_MAD_FLOOR`] — four correct joins lost without it, nothing at all with.
     ///
     /// A collection whose files carry no colour has no consensus on these three and prints no row
     /// for them, which is what keeps every SfS++ collection's `## Objects` section the bytes it
@@ -225,8 +225,9 @@ impl FeatureKey {
     /// A `k·MAD` rule divides by the spread, so a group whose members agree closely has *no*
     /// scale: task S2 measured `V012`'s eight sherds agreeing on their clay body to a MAD of
     /// **0.025** Lab units, which turned a difference of 0.29 — invisible to an eye, a quarter of
-    /// one just-noticeable difference — into **11.8 MAD** and demoted four correct joins on
-    /// `synthetic_mix3_24` seed 0 while removing no false one. A Lab channel, unlike a wall, comes
+    /// one just-noticeable difference — into **11.8 MAD** and, before this floor existed,
+    /// demoted four correct joins on `synthetic_mix3_24` seed 0 while removing no false one. With
+    /// the floor the same flag demotes nothing at all. A Lab channel, unlike a wall, comes
     /// with an absolute scale: one unit is about the smallest difference a person sees. Below the
     /// floor the group is one colour, and the eye's scale is used instead of a spread that is not
     /// there.

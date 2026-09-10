@@ -880,9 +880,9 @@ fn constraint_section(outcome: &Outcome<'_>) -> Vec<String> {
 /// **A deviation printed here has not refused anything.** M1 §4 measured every geometric feature
 /// on every collection with real object ids and the best AUC is 0.740, under audit §D.2's own
 /// 0.800 rule; task S2 measured the clay body at 0.985 on `synthetic_mix3_24`, above it, and then
-/// measured what letting it demote would cost — four correct joins for no false one — so the
-/// shortlist that may demote is still empty and every row below reports. The `demotes` column says
-/// which of them would act if a flag put them on that list.
+/// measured what letting it demote would do — it removes no false join on any collection this
+/// project can measure it on — so the shortlist that may demote is still empty and every row below
+/// reports. The `demotes` column says which of them would act if a flag put them on that list.
 fn object_section(outcome: &Outcome<'_>) -> Vec<String> {
     let Some(report) = outcome.objects else { return Vec::new() };
     let mut lines: Vec<String> = vec![String::new(), "## Objects".to_owned(), String::new()];
@@ -894,9 +894,8 @@ fn object_section(outcome: &Outcome<'_>) -> Vec<String> {
          the geometric features task M1 §4 measured the best at 0.740; of the colours task S2 \
          measured the clay body — the mean Lab of the faces the segmentation calls fracture — at \
          0.985 on a collection of three vessels, the first feature of this project above that \
-         bar. Letting it refuse a join by the median-absolute-deviation rule costs four correct \
-         joins there and removes no false one, so on the shipped settings every number below \
-         reports and none of them refuses a join.",
+         bar. Letting it refuse a join removes no false join on any collection measured, so on \
+         the shipped settings every number below reports and none of them refuses a join.",
         report.objects.len(),
         if report.objects.len() == 1 { "" } else { "s" },
         rejects,

@@ -393,8 +393,9 @@ struct RunArgs {
     ///
     /// **Empty by default, on the measurement**: M1 §4 found no geometric feature reaching audit
     /// §D.2's own AUC of 0.800 on any collection with real object ids, and task S2 found the clay
-    /// body above it (0.985) but measured the demotion costing four correct joins on
-    /// `synthetic_mix3_24` seed 0 for no false one. Turning one on without a table that justifies
+    /// body above it (0.985) but measured the demotion removing no false join on any collection
+    /// with colour — four correct ones lost before `objects::COLOUR_MAD_FLOOR` gave the rule a
+    /// scale, and nothing demoted at all after it. Turning one on without a table that justifies
     /// it is exactly what the audit's quality principles forbid; `frac_lab_a` is the one with a
     /// table behind it, and `objects::COLOUR_MAD_FLOOR` is what makes it safe on a collection
     /// that is one vessel.

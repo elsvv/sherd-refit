@@ -89,6 +89,7 @@ use serde::{Deserialize, Serialize};
 use crate::assembly::consistency::{agrees, rotation_angle_deg};
 use crate::executor::Engine;
 use crate::fragment::Fragment;
+use crate::fragment::features::Features;
 use crate::matching::icp::{self, pose_gap};
 use crate::matching::ladder;
 use crate::matching::pair::{Candidate, Pair, SurfaceLadder};
@@ -405,6 +406,60 @@ pub fn resample_accept(probes: &Probes) -> u32 {
     u32::try_from(redraws).unwrap_or(u32::MAX).saturating_add(1)
 }
 
+/// Task S2's colour evidence for one accepted candidate: what the photograph says about the two
+/// sherds, beside what the geometry says about their two fracture surfaces.
+///
+/// **Recorded and printed; not in the confirmation rule.** The rule is chosen on the whole evidence
+/// table and that is task S3's job, so this is a column of that table and nothing more — the same
+/// order the tier itself was built in, where M1 measured every probe before T1 wrote a threshold.
+///
+/// The two numbers answer two different questions and are deliberately not combined:
+///
+/// * [`frac_delta_e`](ColourAgreement::frac_delta_e) is CIE76 between the two **fracture** faces'
+///   mean Lab — the clay body against the clay body. It is the robust half: a break shows the
+///   fabric and nothing a potter put on the outside, so two sherds of one vessel agree here even
+///   when one is painted and the other is not.
+/// * [`shell_hist`](ColourAgreement::shell_hist) is the total variation between the two **shell**
+///   faces' Lab histograms — the photograph against the photograph. On a decorated vessel the skin
+///   varies *within* one object (S1 §1.3), so a large value is not by itself evidence against a
+///   join; what it is evidence of is that these two sherds do not show the same part of the same
+///   surface, which is a thing a conservator reading a review image wants to know.
+///
+/// Either half is `None` where the collection cannot answer it: a file with no colours, or a
+/// fragment R §3.4 gave no fracture face.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ColourAgreement {
+    /// CIE76 between the two fragments' fracture-face mean Lab.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frac_delta_e: Option<f64>,
+    /// Total variation between the two fragments' shell-face Lab histograms, `0`…`1`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell_hist: Option<f64>,
+}
+
+impl ColourAgreement {
+    /// The colour agreement of one pair, or `None` when neither half can be answered — which is
+    /// every SfS++ collection, and what keeps their outputs the bytes they were.
+    #[must_use]
+    pub fn of(a: &Fragment, b: &Fragment) -> Option<Self> {
+        Self::from_features(a.features.as_ref()?, b.features.as_ref()?)
+    }
+
+    /// [`ColourAgreement::of`] on two fragments' tables, which is all it reads.
+    #[must_use]
+    pub fn from_features(a: &Features, b: &Features) -> Option<Self> {
+        let frac_delta_e =
+            a.frac_colour.as_ref().zip(b.frac_colour.as_ref()).map(|(x, y)| x.delta_e(y));
+        let shell_hist = a
+            .shell_colour
+            .as_ref()
+            .zip(b.shell_colour.as_ref())
+            .and_then(|(x, y)| x.hist_distance(y));
+        (frac_delta_e.is_some() || shell_hist.is_some())
+            .then_some(Self { frac_delta_e, shell_hist })
+    }
+}
+
 /// What `report.md`, `report.json` and `transforms.json` print about one candidate's tier.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Evidence {
@@ -436,11 +491,20 @@ pub struct Evidence {
     /// The tier's tests this candidate failed; empty on a confirmed join.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub failed: Vec<String>,
+    /// Task S2's colour agreement across the seam — reported, never gated, absent on a collection
+    /// whose files carry no colours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<ColourAgreement>,
 }
 
 impl Evidence {
     /// The evidence of one probed candidate, with the tier the thresholds give it.
-    fn of(scores: &Scores, probes: &Probes, th: &Thresholds) -> Self {
+    fn of(
+        scores: &Scores,
+        probes: &Probes,
+        th: &Thresholds,
+        colour: Option<ColourAgreement>,
+    ) -> Self {
         let failed = th.refusals(scores, probes);
         let draws = std::iter::once(scores.tight).chain(probes.resamples.iter().map(|r| r.tight));
         let gaps = std::iter::once(scores.gap).chain(probes.resamples.iter().map(|r| r.gap));
@@ -456,6 +520,7 @@ impl Evidence {
             resample_accept: resample_accept(probes),
             support: probes.support,
             failed,
+            colour,
         }
     }
 }
@@ -525,7 +590,15 @@ pub fn classify(
     let evidence: Vec<Option<Evidence>> = candidates
         .iter()
         .zip(&probes)
-        .map(|(c, p)| p.as_ref().map(|p| Evidence::of(&c.scores, p, thresholds)))
+        .map(|(c, p)| {
+            p.as_ref().map(|p| {
+                let colour = fragments
+                    .get(c.a as usize)
+                    .zip(fragments.get(c.b as usize))
+                    .and_then(|(a, b)| ColourAgreement::of(a, b));
+                Evidence::of(&c.scores, p, thresholds, colour)
+            })
+        })
         .collect();
     let tiers: Vec<Tier> = candidates
         .iter()
@@ -1137,12 +1210,49 @@ pub fn joins(candidates: &[Candidate], names: &[String]) -> Vec<TierJoin> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Evidence, PROBABLE_TOP, Probes, SAME_PLACEMENT_T, SLIDE_BACK_T, SLIDE_T, ScoreRow,
-        Thresholds, Tier, principal_axis, probable_shown,
+        ColourAgreement, Evidence, PROBABLE_TOP, Probes, SAME_PLACEMENT_T, SLIDE_BACK_T, SLIDE_T,
+        ScoreRow, Thresholds, Tier, principal_axis, probable_shown,
     };
+    use crate::fragment::features::{ColourStats, Features};
     use crate::matching::pair::Candidate;
     use crate::matching::verify::Scores;
     use approx::assert_relative_eq;
+
+    /// Task S2's colour evidence answers what it can and nothing else, and a colourless pair has
+    /// no evidence rather than a zero one.
+    #[test]
+    fn the_colour_evidence_is_absent_where_the_files_have_no_colour() {
+        let stats = |a: f64, bin: usize| ColourStats {
+            lab_mean: [40.0, a, 15.0],
+            lab_mad: [1.0, 1.0, 1.0],
+            hist: (0..64).map(|k| u32::from(k == bin)).collect(),
+            points: 1_000,
+        };
+        let with = |frac: Option<f64>, shell: Option<usize>| Features {
+            frac_colour: frac.map(|a| stats(a, 0)),
+            shell_colour: shell.map(|bin| stats(0.0, bin)),
+            ..Features::default()
+        };
+
+        assert_eq!(
+            ColourAgreement::from_features(&Features::default(), &Features::default()),
+            None,
+            "an SfS++ pair has no colour evidence at all"
+        );
+
+        let both =
+            ColourAgreement::from_features(&with(Some(3.6), Some(1)), &with(Some(15.1), Some(2)))
+                .expect("both halves");
+        assert_relative_eq!(both.frac_delta_e.expect("a clay body each"), 11.5, epsilon = 1e-9);
+        assert_relative_eq!(both.shell_hist.expect("a skin each"), 1.0, epsilon = 1e-12);
+
+        // One side of one fragment missing is a missing half, not a missing pair: R §3.4 gives a
+        // fragment with no fracture face no clay body, and its skin still answers.
+        let half = ColourAgreement::from_features(&with(None, Some(1)), &with(Some(15.1), Some(1)))
+            .expect("the skins still answer");
+        assert_eq!(half.frac_delta_e, None);
+        assert_relative_eq!(half.shell_hist.expect("a skin each"), 0.0, epsilon = 1e-12);
+    }
 
     /// `probable_shown` ranks the band by `seam · tight` and cuts it where `--probable-top` says.
     ///
@@ -1293,7 +1403,7 @@ mod tests {
             let failed = th.refusals(&s, &p);
             assert_eq!(failed.len(), 1, "one test refuses {want}: {failed:?}");
             assert!(failed[0].starts_with(want), "{want} is refused by {failed:?}");
-            assert!(!Evidence::of(&s, &p, &th).failed.is_empty());
+            assert!(!Evidence::of(&s, &p, &th, None).failed.is_empty());
         }
     }
 
@@ -1313,7 +1423,7 @@ mod tests {
         let holes = Scores { pen: 0.0, pen_unavailable: true, ..scores };
         let failed = th.refusals(&holes, &probes);
         assert_eq!(failed, ["pen: penetration not measurable, a fragment is not watertight"]);
-        assert_eq!(Evidence::of(&holes, &probes, &th).failed, failed, "the report says why");
+        assert_eq!(Evidence::of(&holes, &probes, &th, None).failed, failed, "the report says why");
 
         // Not a threshold a flag can widen: `--tier-max-pen` names a limit, and the refusal is
         // that there is nothing to compare against it.
@@ -1380,7 +1490,7 @@ mod tests {
     fn the_evidence_summarises_the_three_draws() {
         let th = Thresholds::default();
         let (scores, probes) = confirmable();
-        let e = Evidence::of(&scores, &probes, &th);
+        let e = Evidence::of(&scores, &probes, &th, None);
         assert_relative_eq!(e.resample_tight_min, 0.70);
         assert_relative_eq!(e.resample_gap_max, 0.0075);
         assert_eq!(e.resample_accept, 3, "the run's own draw and both redraws");

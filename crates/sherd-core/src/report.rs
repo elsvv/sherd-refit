@@ -877,10 +877,12 @@ fn constraint_section(outcome: &Outcome<'_>) -> Vec<String> {
 /// above the joins, because "which pots are these" is the question a conservator asks of the
 /// groups they have just read.
 ///
-/// **A deviation printed here has not refused anything.** M1 §4 measured every one of these
-/// features on every collection with real object ids and the best AUC is 0.740, under audit §D.2's
-/// own 0.800 rule, so the shortlist that may demote is empty and every row below reports. The
-/// `demotes` column says which of them would act if a later measurement put them on that list.
+/// **A deviation printed here has not refused anything.** M1 §4 measured every geometric feature
+/// on every collection with real object ids and the best AUC is 0.740, under audit §D.2's own
+/// 0.800 rule; task S2 measured the clay body at 0.985 on `synthetic_mix3_24`, above it, and then
+/// measured what letting it demote would cost — four correct joins for no false one — so the
+/// shortlist that may demote is still empty and every row below reports. The `demotes` column says
+/// which of them would act if a flag put them on that list.
 fn object_section(outcome: &Outcome<'_>) -> Vec<String> {
     let Some(report) = outcome.objects else { return Vec::new() };
     let mut lines: Vec<String> = vec![String::new(), "## Objects".to_owned(), String::new()];
@@ -888,9 +890,13 @@ fn object_section(outcome: &Outcome<'_>) -> Vec<String> {
     lines.push(format!(
         "{} object{} — one per assembled group — with the median and MAD its members agree on. \
          {} member{} sit{} outside its object's consensus, and {} join{} demoted. A feature may \
-         **veto** only where its measured separation exceeds audit §D.2's own AUC of 0.800; task \
-         M1 §4 measured the best of them at 0.740 on the sets with real object ids, so on the \
-         shipped settings these numbers report and none of them refuses a join.",
+         **veto** only where its measured separation exceeds audit §D.2's own AUC of 0.800. Of \
+         the geometric features task M1 §4 measured the best at 0.740; of the colours task S2 \
+         measured the clay body — the mean Lab of the faces the segmentation calls fracture — at \
+         0.985 on a collection of three vessels, the first feature of this project above that \
+         bar. Letting it refuse a join by the median-absolute-deviation rule costs four correct \
+         joins there and removes no false one, so on the shipped settings every number below \
+         reports and none of them refuses a join.",
         report.objects.len(),
         if report.objects.len() == 1 { "" } else { "s" },
         rejects,
@@ -1046,13 +1052,17 @@ fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
         });
         found
     };
+    // Task S2's colour columns exist only where the collection's files carry colour, which is
+    // what keeps a colour-less collection's `report.md` the bytes it was: no evidence, no column.
+    let coloured =
+        representatives.iter().any(|&i| evidence_of(i).is_some_and(|e| e.colour.is_some()));
     // One row of the evidence table, shared by the confirmed and the probable list.
     let row = |i: usize| -> String {
         let candidate = &outcome.candidates[i];
         let (a, b) = pair_name(i);
         let s = &candidate.scores;
         let e = evidence_of(i);
-        format!(
+        let mut line = format!(
             "| {a} | {b} | {:.2} | {:.1} | {:.2} | {:.4} | {:.3} | {:.4} | {} | {} | {} | {} | \
              {} | {} |",
             candidate.score(),
@@ -1067,11 +1077,31 @@ fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
             e.map_or_else(|| "—".to_owned(), |e| e.placements.to_string()),
             e.map_or_else(|| "—".to_owned(), |e| format!("{}/3", e.resample_accept)),
             optional(e.and_then(|e| e.determined_deg), exp),
-        )
+        );
+        if coloured {
+            use std::fmt::Write as _;
+            let colour = e.and_then(|e| e.colour.as_ref());
+            let _ = write!(
+                line,
+                " {} | {} |",
+                optional(colour.and_then(|c| c.frac_delta_e), |x| format!("{x:.1}")),
+                optional(colour.and_then(|c| c.shell_hist), two),
+            );
+        }
+        line
     };
-    let head = "| A | B | score | seam (t) | tight | gap (t) | normal agr. | penetration | slide \
-                (t) | margin | support | placements | redraws | determined (deg) |";
-    let rule = "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|";
+    let head = if coloured {
+        "| A | B | score | seam (t) | tight | gap (t) | normal agr. | penetration | slide (t) | \
+         margin | support | placements | redraws | determined (deg) | fracture dE | shell hist |"
+    } else {
+        "| A | B | score | seam (t) | tight | gap (t) | normal agr. | penetration | slide (t) | \
+         margin | support | placements | redraws | determined (deg) |"
+    };
+    let rule = if coloured {
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+    } else {
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+    };
 
     let confirmed = of_tier(Tier::Confirmed);
     lines.push(String::new());
@@ -1095,6 +1125,20 @@ fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
         if th.min_support == 1 { "s" } else { "" },
         th.min_margin,
     ));
+    if coloured {
+        lines.push(String::new());
+        lines.push(
+            "The last two columns are the colour the scans carry, and **no test above reads \
+             them**: `fracture dE` is the CIE76 distance between the two sherds' bare clay — the \
+             fabric each break shows, which a slip or a paint never covers — and `shell hist` is \
+             how differently the two outer surfaces are coloured, on a scale where 0 is the same \
+             photograph and 1 shares no colour at all. A large `fracture dE` says these two \
+             sherds are unlikely to be one vessel; a large `shell hist` on a small `fracture dE` \
+             says they are one vessel seen in two places, which is what a decorated pot looks \
+             like."
+                .to_owned(),
+        );
+    }
     lines.push(String::new());
     if confirmed.is_empty() {
         lines.push(
@@ -1832,6 +1876,7 @@ mod tests {
             banded(0, 2, 0.0, 0.0, Tier::Rejected),
         ];
         let evidence = |failed: Vec<String>| Evidence {
+            colour: None,
             margin: Some(4.5),
             rival_moved_t: Some(9.0),
             placements: 2,
@@ -1928,6 +1973,7 @@ mod tests {
         // by pair rather than by score would fail here.
         let cands = [banded(0, 1, 20.0, 0.5), banded(0, 2, 10.0, 0.5), banded(1, 2, 40.0, 0.5)];
         let evidence = Evidence {
+            colour: None,
             margin: None,
             rival_moved_t: None,
             placements: 1,

@@ -401,6 +401,15 @@ fn caption(
             sc.t / SEAM_VOXEL,
         ),
     ];
+    // Task S2: one more line, and only where the collection has colour to put on it — a
+    // colour-less collection's review image is the image it was.
+    if let Some(colour) = evidence.and_then(|e| e.colour.as_ref()) {
+        let de = colour.frac_delta_e.map_or_else(|| "-".to_owned(), |x| format!("{x:.1}"));
+        let hist = colour.shell_hist.map_or_else(|| "-".to_owned(), |x| format!("{x:.2}"));
+        lines.push(format!(
+            "COLOUR: CLAY BODY DE76 {de} | SKIN HISTOGRAM DISTANCE {hist} | NOT PART OF THE BAND"
+        ));
+    }
     if let Some(sentence) = demoted {
         lines.push(sentence.to_uppercase());
     }

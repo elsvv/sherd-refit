@@ -713,6 +713,15 @@ mod tests {
                 lab_spread: Some([5.608, 1.0, 2.0]),
                 colour_points: 24_191,
                 colour_distinct: 24_191,
+                // Task S2's split, with one side present and one absent, so that the round trip
+                // has to carry a `ColourStats` **and** its absence.
+                shell_colour: Some(crate::fragment::features::ColourStats {
+                    lab_mean: [56.81, 11.93, 20.42],
+                    lab_mad: [3.37, 2.05, 2.33],
+                    hist: (0..64_u32).map(|k| k * 3).collect(),
+                    points: 427_547,
+                }),
+                frac_colour: None,
             }),
             bvh_full: std::sync::OnceLock::new(),
             bvh_frac: std::sync::OnceLock::new(),

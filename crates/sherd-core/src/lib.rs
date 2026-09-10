@@ -139,7 +139,12 @@ pub const ALGO_REF: &str = "2026-09-06/9d4b9d3";
 /// the one the subset was filtered with (defect D3 of the phase-1b verification). `6`: task O1
 /// added audit §D.2's `features` block to the metadata — the twenty scalars roadmap item 4's group
 /// consensus is built from ([`fragment::features::Features`]), measured on R §3.5's own draw and
-/// therefore a function of the same key the rest of the file is. Every tensor the
+/// therefore a function of the same key the rest of the file is. `7`: task S2 added the two
+/// [`ColourStats`](fragment::features::ColourStats) blocks of that same metadata — the source
+/// file's vertex colours split by R §3.4's labels into a shell side and a fracture side — which
+/// cannot be recomputed from a cache, because the vertices they are measured on are the file's and
+/// R §3.3 has decimated them away. A cache written before them is refused and its fragment read
+/// from the scan again. Every tensor the
 /// port reads back must be in the file, so an older cache is refused and its fragment recomputed,
 /// rather than being read back half empty.
-pub const CACHE_VERSION: u32 = 6;
+pub const CACHE_VERSION: u32 = 7;

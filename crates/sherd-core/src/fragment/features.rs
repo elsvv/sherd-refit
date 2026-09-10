@@ -58,7 +58,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::fragment::Fragment;
 use crate::fragment::samples::MatchData;
+use crate::mesh::geometry::median;
 use crate::spatial::kdtree::PointTree;
+use crate::types::FaceLabel;
+use crate::vec3::Vec3f;
 
 /// Fewest points any fit here will accept.
 ///
@@ -80,6 +83,210 @@ pub const MIN_PLANE_POINTS: usize = 6;
 /// R §3.2's rim rule, as `Fragment::from_mesh_file` already logs it: the plain ray mode more than
 /// this much above the wall is a rim or a collar (`fragment/mod.rs`, R §3.2).
 pub const RIM_RATIO: f64 = 1.15;
+
+/// Bins per Lab axis in [`ColourStats::hist`] — 4×4×4 = 64 (task S2, the brief's own number).
+pub const HIST_BINS: usize = 4;
+
+/// Low edge of the histogram window, per Lab axis (`L`, `a`, `b`).
+///
+/// The grid is **fixed and collection-independent** on purpose: a histogram whose edges move with
+/// the set it was computed on is not comparable between two fragments of two collections, and the
+/// whole point of the bins is a distance between two fragments. The window is the fired-earthenware
+/// range measured on the sets this project has — `L` from a dark grey-brown body to a pale buff
+/// slip, `a` from a green paint to a strongly red-firing fabric, `b` from neutral to yellow-brown —
+/// and a value outside it falls in the end bin rather than being dropped.
+///
+/// Measured, on the four vertex clouds task S2 §2 reads: the three `mix3` vessels have their
+/// median `(L, a, b)` at (33.9, 3.2, 9.2), (38.5, 15.3, 17.6) and (41.9, 8.5, 19.6) and the
+/// monochrome pingsdorf control at (53.4, 27.4, 31.5) — four different cells of this grid, which is
+/// what a coarse histogram has to do before it can be a distance.
+pub const HIST_LO: [f64; 3] = [20.0, -10.0, -5.0];
+
+/// High edge of the same window.
+pub const HIST_HI: [f64; 3] = [80.0, 30.0, 35.0];
+
+/// The colour of one side of a fragment — R §3.4's shell faces or its fracture faces — as the
+/// source file spells it.
+///
+/// Three statements about the same multiset of vertex colours, in CIE Lab: where it sits
+/// ([`lab_mean`](ColourStats::lab_mean)), how far it spreads ([`lab_mad`](ColourStats::lab_mad),
+/// the median absolute deviation, which a painted band does not drag the way a standard deviation
+/// does) and what shape it has ([`hist`](ColourStats::hist), the coarse 4×4×4 grid above). The mean
+/// is the robust statement about a fracture face, which is bare clay; the histogram is the
+/// statement a painted skin needs, where a mean over a cream ground and a blue-green band is a
+/// colour neither of them is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ColourStats {
+    /// Mean CIE Lab over this side's vertices.
+    pub lab_mean: [f64; 3],
+    /// Median absolute deviation from the per-channel median, channel by channel.
+    pub lab_mad: [f64; 3],
+    /// Counts in the fixed 4×4×4 Lab grid, `L` slowest and `b` fastest.
+    pub hist: Vec<u32>,
+    /// How many vertices this side carried.
+    pub points: usize,
+}
+
+impl ColourStats {
+    /// The three statements over one side's Lab values, or `None` when the side has none.
+    ///
+    /// `None` and never a zero: a fragment whose file has no colours, and a fragment R §3.4 gave
+    /// no fracture face at all, both have to read as *unavailable* rather than as black.
+    #[must_use]
+    pub fn of(labs: &[[f64; 3]]) -> Option<Self> {
+        if labs.is_empty() {
+            return None;
+        }
+        #[allow(clippy::cast_precision_loss, reason = "vertex counts are far below 2^53")]
+        let n = labs.len() as f64;
+        let mut sum = [0.0_f64; 3];
+        for lab in labs {
+            for c in 0..3 {
+                sum[c] += lab[c];
+            }
+        }
+        let lab_mean = [sum[0] / n, sum[1] / n, sum[2] / n];
+        let lab_mad = std::array::from_fn(|c| {
+            let mut values: Vec<f64> = labs.iter().map(|lab| lab[c]).collect();
+            let m = median(&values);
+            for v in &mut values {
+                *v = (*v - m).abs();
+            }
+            median(&values)
+        });
+        let mut hist = vec![0_u32; HIST_BINS * HIST_BINS * HIST_BINS];
+        for lab in labs {
+            hist[hist_index(*lab)] += 1;
+        }
+        Some(Self { lab_mean, lab_mad, hist, points: labs.len() })
+    }
+
+    /// CIE76 between two sides' mean Lab — the distance task S1 §5 measured colour's first AUC on.
+    #[must_use]
+    pub fn delta_e(&self, other: &Self) -> f64 {
+        let d: [f64; 3] = std::array::from_fn(|c| self.lab_mean[c] - other.lab_mean[c]);
+        ((d[0] * d[0] + d[1] * d[1]) + d[2] * d[2]).sqrt()
+    }
+
+    /// Total variation between the two normalised histograms: `0` for two identical shapes, `1`
+    /// for two that share no bin.
+    ///
+    /// Total variation and not `χ²` because the counts are vertex counts and two fragments of one
+    /// vessel differ in size by two orders of magnitude on these sets (S1 §2); normalising first
+    /// and then summing half the absolute difference is the one distance that reads the *shape*
+    /// and nothing about how many vertices the scanner wrote. Its known weakness is the bin edge —
+    /// two colours a just-noticeable difference apart on opposite sides of one count as fully
+    /// different — which is why the mean is reported beside it rather than replaced by it.
+    #[must_use]
+    pub fn hist_distance(&self, other: &Self) -> Option<f64> {
+        let total = |h: &[u32]| f64::from(h.iter().copied().fold(0_u32, u32::saturating_add));
+        let (mine, theirs) = (total(&self.hist), total(&other.hist));
+        if self.hist.len() != other.hist.len() || mine == 0.0 || theirs == 0.0 {
+            return None;
+        }
+        let sum: f64 = self
+            .hist
+            .iter()
+            .zip(&other.hist)
+            .map(|(&x, &y)| (f64::from(x) / mine - f64::from(y) / theirs).abs())
+            .sum();
+        Some(sum / 2.0)
+    }
+}
+
+/// Which cell of the fixed 4×4×4 grid one Lab value falls in, `L` slowest and `b` fastest.
+fn hist_index(lab: [f64; 3]) -> usize {
+    let mut at = 0_usize;
+    for c in 0..3 {
+        #[allow(clippy::cast_precision_loss, reason = "HIST_BINS is 4")]
+        let bins = HIST_BINS as f64;
+        let t = (lab[c] - HIST_LO[c]) / (HIST_HI[c] - HIST_LO[c]) * bins;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped into 0..HIST_BINS before the cast"
+        )]
+        let bin = t.floor().clamp(0.0, bins - 1.0) as usize;
+        at = at * HIST_BINS + bin;
+    }
+    at
+}
+
+/// The source file's vertices and colours, carried from R §3.1's read to R §3.4's labels.
+///
+/// [`Features::with_colour`] answers *what colour is this fragment*; the shell/fracture split needs
+/// the same vertices again **after** the segmentation exists, and the segmentation runs on the
+/// working mesh, which R §3.3's decimation has already stripped of colour. So the file's own
+/// vertices are held — as `f32`, because their only use is a nearest-face lookup — for the length
+/// of one `from_mesh_file_named` and dropped as soon as the split is taken. A file with no colours
+/// holds nothing and pays nothing, which is what keeps every SfS++ collection exactly where it was.
+#[derive(Clone, Debug, Default)]
+pub struct RawColours {
+    points: Vec<Vec3f>,
+    colours: Vec<[u8; 3]>,
+}
+
+impl RawColours {
+    /// The mesh's vertices and colours, or an empty carrier when the file has none.
+    #[must_use]
+    pub fn of(mesh: &crate::Mesh) -> Self {
+        let Some(colours) = mesh.colors.as_ref() else { return Self::default() };
+        if colours.is_empty() || colours.len() != mesh.v.len() {
+            return Self::default();
+        }
+        Self {
+            points: mesh.v.iter().copied().map(Vec3f::from_f64).collect(),
+            colours: colours.clone(),
+        }
+    }
+
+    /// True when there is nothing to split.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.colours.is_empty()
+    }
+}
+
+/// The file's vertex colours split by R §3.4's labels: `(shell, fracture)`.
+///
+/// # How a file vertex is given a label it never had
+///
+/// R §3.4 labels *faces of the working mesh*, which is the decimated, Taubin-smoothed mesh; the
+/// colours are on the vertices of the file. The bridge is the nearest working-mesh **face
+/// centroid**: the two meshes describe one surface, they are in one frame, and the smoothing moves
+/// a vertex by well under one `res`. The error this makes is a band about one `res` wide along the
+/// rim where shell meets fracture — and a fracture face is half a wall deep, five to seven `res`
+/// on these scans (S1 §1.2), so the band is a boundary effect and not a confusion of the two
+/// populations. It is measured rather than argued: S2 §2 compares the fracture side's mean against
+/// the clay body the generator painted it with.
+///
+/// Seed-independent by construction. Everything else in [`Features`] is measured on R §3.5's draw
+/// and moves with `--seed`; this is measured on the labels and the file, so a warm cache can carry
+/// it across a seed change the way it already carries [`Features::lab_mean`].
+#[must_use]
+pub fn split_colour(
+    raw: &RawColours,
+    centroids: &[[f64; 3]],
+    labels: &[FaceLabel],
+) -> (Option<ColourStats>, Option<ColourStats>) {
+    if raw.is_empty() || centroids.is_empty() || labels.len() != centroids.len() {
+        return (None, None);
+    }
+    let Some(tree) = PointTree::build(centroids) else { return (None, None) };
+    let mut seen: std::collections::BTreeMap<[u8; 3], [f64; 3]> = std::collections::BTreeMap::new();
+    let mut shell: Vec<[f64; 3]> = Vec::new();
+    let mut fracture: Vec<[f64; 3]> = Vec::new();
+    for (point, &rgb) in raw.points.iter().zip(&raw.colours) {
+        let face = tree.nearest(&point.to_f64()) as usize;
+        let lab = *seen.entry(rgb).or_insert_with(|| srgb_to_lab(rgb));
+        if labels[face].is_fracture() {
+            fracture.push(lab);
+        } else {
+            shell.push(lab);
+        }
+    }
+    (ColourStats::of(&shell), ColourStats::of(&fracture))
+}
 
 /// Every feature of one fragment, `None` where the fragment does not support the fit.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -120,6 +327,12 @@ pub struct Features {
     pub colour_points: usize,
     /// Number of distinct RGB triples among them — 1 is a flat paint job, not a fabric.
     pub colour_distinct: usize,
+    /// The colour of R §3.4's **shell** faces alone, or `None` where the file has none (task S2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_colour: Option<ColourStats>,
+    /// The colour of R §3.4's **fracture** faces alone — the clay body, where a sherd is bare.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frac_colour: Option<ColourStats>,
 }
 
 impl Features {
@@ -163,6 +376,8 @@ impl Features {
             lab_spread: None,
             colour_points: 0,
             colour_distinct: 0,
+            shell_colour: None,
+            frac_colour: None,
         }
     }
 
@@ -205,18 +420,22 @@ impl Features {
         self
     }
 
-    /// The four colour fields of `from`, carried onto a freshly computed geometric table.
+    /// The colour fields of `from`, carried onto a freshly computed geometric table.
     ///
     /// [`Fragment::rebuild_features`](crate::fragment::Fragment::rebuild_features) is the caller:
     /// R §3.5's samples move when the seed does and every geometric feature moves with them, but
     /// the fabric is a property of the file and re-reading a 500 000-vertex scan to learn it again
-    /// would be the most expensive thing a warm run did.
+    /// would be the most expensive thing a warm run did. The two [`ColourStats`] of task S2 are
+    /// carried for the same reason and one stronger: they need R §3.4's labels beside the file's
+    /// own vertices, and a warm run has thrown those vertices away.
     #[must_use]
     pub fn with_colour_of(mut self, from: &Self) -> Self {
         self.lab_mean = from.lab_mean;
         self.lab_spread = from.lab_spread;
         self.colour_points = from.colour_points;
         self.colour_distinct = from.colour_distinct;
+        self.shell_colour.clone_from(&from.shell_colour);
+        self.frac_colour.clone_from(&from.frac_colour);
         self
     }
 }
@@ -540,10 +759,85 @@ fn srgb_to_lab(rgb: [u8; 3]) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::{
-        Features, MIN_FIT_POINTS, axis_fit, circle_fit, fracture_roughness, plane_fit, sphere_fit,
-        srgb_to_lab,
+        ColourStats, Features, HIST_BINS, MIN_FIT_POINTS, RawColours, axis_fit, circle_fit,
+        fracture_roughness, hist_index, plane_fit, sphere_fit, split_colour, srgb_to_lab,
     };
+    use crate::types::FaceLabel;
+    use crate::vec3::Vec3f;
     use approx::assert_relative_eq;
+
+    /// Task S2: the split is decided by the nearest labelled face and by nothing else, and a side
+    /// with no vertex is `None` rather than a black one.
+    #[test]
+    fn the_colour_split_follows_the_labels() {
+        // Two faces a long way apart, one shell and one fracture, and four vertices near them.
+        let centroids = [[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]];
+        let labels = [FaceLabel::Shell, FaceLabel::Fracture];
+        let raw = RawColours {
+            points: vec![
+                Vec3f::new(1.0, 0.0, 0.0),
+                Vec3f::new(-1.0, 0.0, 0.0),
+                Vec3f::new(99.0, 0.0, 0.0),
+                Vec3f::new(101.0, 0.0, 0.0),
+            ],
+            colours: vec![[255, 255, 255], [255, 255, 255], [0, 0, 0], [0, 0, 0]],
+        };
+        let (shell, fracture) = split_colour(&raw, &centroids, &labels);
+        let shell = shell.expect("two vertices sit on the shell face");
+        let fracture = fracture.expect("two sit on the fracture face");
+        assert_eq!((shell.points, fracture.points), (2, 2));
+        assert_relative_eq!(shell.lab_mean[0], 100.0, epsilon = 1e-9, max_relative = 1e-9);
+        assert_relative_eq!(fracture.lab_mean[0], 0.0, epsilon = 1e-9);
+        // White against black is the whole of Lab's lightness axis, and the two histograms share
+        // no bin.
+        assert_relative_eq!(shell.delta_e(&fracture), 100.0, epsilon = 1e-9);
+        assert_relative_eq!(shell.hist_distance(&fracture).expect("both have points"), 1.0);
+        assert_relative_eq!(shell.hist_distance(&shell).expect("both have points"), 0.0);
+
+        // A file with no colours splits into nothing at all, which is the SfS++ case.
+        let (a, b) = split_colour(&RawColours::default(), &centroids, &labels);
+        assert!(a.is_none() && b.is_none(), "no colour is unavailable, not zero");
+    }
+
+    /// The 4x4x4 grid is fixed, clamps at both ends, and orders `L` slowest.
+    #[test]
+    fn the_lab_histogram_grid_is_fixed_and_clamped() {
+        assert_eq!(hist_index([-1000.0, -1000.0, -1000.0]), 0, "below every edge is bin 0");
+        let last = HIST_BINS * HIST_BINS * HIST_BINS - 1;
+        assert_eq!(hist_index([1000.0, 1000.0, 1000.0]), last, "above every edge is the last bin");
+        // One step in `b` moves one bin; one step in `L` moves sixteen.
+        assert_eq!(hist_index([21.0, -9.0, -4.0]), 0);
+        assert_eq!(hist_index([21.0, -9.0, 6.0]), 1);
+        assert_eq!(hist_index([21.0, 1.0, -4.0]), HIST_BINS);
+        assert_eq!(hist_index([36.0, -9.0, -4.0]), HIST_BINS * HIST_BINS);
+        // Every bin of a 64-bin histogram is counted exactly once over the whole cube.
+        let labs: Vec<[f64; 3]> = (0..HIST_BINS)
+            .flat_map(|i| {
+                (0..HIST_BINS).flat_map(move |j| {
+                    (0..HIST_BINS).map(move |k| {
+                        let at = |n: usize| f64::from(u32::try_from(n).expect("0..HIST_BINS"));
+                        [15.0f64.mul_add(at(i), 25.0), 10.0f64.mul_add(at(j), -5.0), 10.0 * at(k)]
+                    })
+                })
+            })
+            .collect();
+        let stats = ColourStats::of(&labs).expect("64 values");
+        assert!(stats.hist.iter().all(|&n| n == 1), "one value per bin: {:?}", stats.hist);
+        assert!(ColourStats::of(&[]).is_none(), "no values is no statistic");
+    }
+
+    /// The MAD is the median absolute deviation and not a standard deviation: one outlier in nine
+    /// moves it by nothing.
+    #[test]
+    fn the_colour_mad_is_a_median_and_not_a_mean() {
+        let mut labs: Vec<[f64; 3]> = (0..9).map(|k| [50.0 + f64::from(k % 3), 0.0, 0.0]).collect();
+        let tight = ColourStats::of(&labs).expect("nine values");
+        labs.push([500.0, 0.0, 0.0]);
+        let with_outlier = ColourStats::of(&labs).expect("ten values");
+        assert_relative_eq!(tight.lab_mad[0], 1.0);
+        assert_relative_eq!(with_outlier.lab_mad[0], 1.0, epsilon = 1e-12);
+        assert!(with_outlier.lab_mean[0] > tight.lab_mean[0] + 40.0, "the mean does move");
+    }
 
     /// Points on a known sphere give back its centre and its radius; a plane gives nothing useful
     /// and says so through the residual rather than by pretending.

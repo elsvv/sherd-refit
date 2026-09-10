@@ -138,8 +138,13 @@ impl Fragment {
         // before R §3.3's decimation drops them altogether, and that is the multiset task M1 §4
         // measured its table over.
         let mut colours = features::Features::default();
+        // Task S2's shell/fracture split needs the same vertices once R §3.4 has labelled the
+        // working mesh, and R §3.3's decimation drops them long before that; a file with no
+        // colours carries nothing here and pays nothing for the field.
+        let mut raw_colours = features::RawColours::default();
         let mut mesh = crate::io::load_mesh_with(path, |raw| {
             colours = std::mem::take(&mut colours).with_colour(raw);
+            raw_colours = features::RawColours::of(raw);
         })?;
 
         let n_orig_vertices = u32::try_from(mesh.v.len()).unwrap_or(u32::MAX);
@@ -199,6 +204,13 @@ impl Fragment {
         let v64: Vec<[f64; 3]> = working.v.iter().map(|p| p.to_f64()).collect();
         let geom = face_geometry(&v64, &working.f);
         let seg = segment_working_mesh(&working, &v64, &geom, thick, res, name);
+        // Task S2, here and nowhere else: the file's colours are still in memory and R §3.4's
+        // labels have just been written, which is the one moment both exist.
+        let (shell_colour, frac_colour) =
+            features::split_colour(&raw_colours, &geom.centroids, &seg.labels);
+        drop(raw_colours);
+        colours.shell_colour = shell_colour;
+        colours.frac_colour = frac_colour;
         let brk = breaklines_of(&v64, &working.f, &geom, &seg.labels, thick, name);
         let samples = samples_of(
             &v64,

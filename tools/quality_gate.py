@@ -453,9 +453,11 @@ def score(name, gt_dir, work, cen_cache, tiers=False):
 def tier_verdict(name, rows):
     """The confirmed tier's own prohibition, on all eight sets: zero false joins in it.
 
-    Plus, for the terracotta, M1 §5.6's restatement of audit §E's step-8 gate: the two joins are
-    at least probable at every seed, nothing else is ever confirmed, and nine of the ten
-    (seed, join) slots are confirmed.
+    Plus, for the terracotta, audit §E's step-8 gate as task G restated it: the two joins are at
+    least probable at every seed, nothing else is ever confirmed, and all ten of the (seed, join)
+    slots are confirmed -- ``TERRACOTTA_CONFIRMED_SLOTS``, which is the audit's own ``2 * 5`` and
+    not a number read off a run.  This tree reaches nine and the gate fails on it; the failure is
+    marked a recall row, and the missing slot is named.
     """
     bad, notes = [], []
     for r in rows:
@@ -734,9 +736,9 @@ def main(argv=None):
                          "--object-disagreement on -- audit §D.2 (b)'s mutual-disagreement "
                          "demotion; `off` runs the binary the way task T2 ran it")
     ap.add_argument("--object-disagreement", choices=("on", "off"), default="off",
-                    help="audit §D.2 (b), off by default on task O1's own measurement: it removes "
-                         "no false join -- the confirmed tier has none -- and costs nine of "
-                         "mixed_ABG seed 0's eleven")
+                    help="audit §D.2 (b), off by default on the measurement: it removes no false "
+                         "join -- the confirmed tier has none -- and costs 27 of mixed_ABG's 38 "
+                         "confirmed joins over seeds 0-4 (8/7/7/7/9 becomes 2/3/2/4/0; task C)")
     ap.add_argument("--keep-work", action="store_true", help="do not delete each set's run tree")
     ap.add_argument("--render-only", action="store_true",
                     help="re-render <out>/quality.{md,json} from the rows of a finished run, "

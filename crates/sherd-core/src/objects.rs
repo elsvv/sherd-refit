@@ -267,14 +267,20 @@ impl Default for ObjectParams {
     ///
     /// * **`demote` is empty** — M1 §4: no feature reaches audit §D.2's own AUC of 0.800 on any
     ///   collection with real object ids.
-    /// * **`disagreement` is off** — task O1's own measurement, §2 of its note. The arm is
-    ///   implemented exactly as audit §D.2 (b) words it and it is a **pure recall loss on this
-    ///   benchmark**: task T1 measured **0 false joins** in the confirmed tier over the eight
-    ///   development sets at seeds 0–4, so there is no false join for a contradiction to catch,
-    ///   and switching the arm on takes `mixed_ABG` seed 0 from 11 confirmed joins to 2. Every
-    ///   contradiction it finds is between joins R §8 has already reconciled — R §8 refuses the
-    ///   odd one out itself, with `InconsistentWithAssembled`. `--object-disagreement on` is the
-    ///   flag, and the day a false join survives the tier is the day to measure it again.
+    /// * **`disagreement` is off** — on the measurement, and this is where that measurement lives;
+    ///   everything else that quotes it cites this doc. The arm is implemented exactly as audit
+    ///   §D.2 (b) words it and it is a **pure recall loss on this benchmark**: the confirmed tier
+    ///   has **0 false joins** over the eight development sets at seeds 0–4 (task T1, and still 0
+    ///   today), so there is no false join for a contradiction to catch. What it costs, measured
+    ///   on this tree by task C (`quality_gate.py --sets mixed_ABG --object-disagreement on`,
+    ///   commit `cce1d66`): `mixed_ABG` goes from **8 / 7 / 7 / 7 / 9** confirmed joins at seeds
+    ///   0–4 to **2 / 3 / 2 / 4 / 0** — **27 of 38 demoted, every one of them correct, and no
+    ///   false join removed**. Every contradiction it finds is between joins R §8 has already
+    ///   reconciled — R §8 refuses the odd one out itself, with `InconsistentWithAssembled`.
+    ///   `--object-disagreement on` is the flag, and the day a false join survives the tier is the
+    ///   day to measure it again. (Task O1 measured 11 → 2 at seed 0 on its own tree; the
+    ///   denominator moved when task G stopped confirming a join whose penetration cannot be
+    ///   measured, so the figure is re-measured here rather than carried.)
     /// * **`merge` is on** — it needs no threshold, it can only *add* a join R §8 refused for a
     ///   reason that was never about the geometry, and every one it adds has passed the same two
     ///   tests R §8 applies to a placement.

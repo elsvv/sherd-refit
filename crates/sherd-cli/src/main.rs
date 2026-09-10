@@ -314,6 +314,15 @@ struct RunArgs {
     #[arg(long, default_value_t = Thresholds::default().min_cont_n)]
     tier_min_cont_n: f64,
     /// Penetrating surface fraction a confirmed join may not exceed (M1 §3; R §6.5 ships 0.005).
+    ///
+    /// This is a ceiling on a penetration that was **measured**. A pair one of whose fragments is
+    /// not watertight has no measurement at all -- R §6.4 cannot run on an open mesh -- and such a
+    /// join is refused the confirmed band whatever this flag says, including `--tier-max-pen 1`:
+    /// the band is a claim about evidence, and there is none here. Its row in `report.md` reads
+    /// `pen: penetration not measurable, a fragment is not watertight`, and the `watertight`
+    /// column of `## Fragments` says which sherd it was. On the development sets that is 3 of
+    /// `pot_B`'s 9 and 1 of `pot_C`'s 7; on a real ten-pot collection task A1 measured 5 of 164
+    /// sherds and 16 of 288 true pairs (5.6 %).
     #[arg(long, default_value_t = Thresholds::default().max_pen)]
     tier_max_pen: f64,
     /// `t`; how far the pose may stay from where it started after a +/-0.5 t push along the seam.
@@ -395,10 +404,12 @@ struct RunArgs {
     /// Audit §D.2 (b): two confirmed joins into one group that disagree about a fragment are both
     /// demoted to probable.
     ///
-    /// **Off by default, on the measurement.** Task T1 measured 0 false joins in the confirmed
-    /// tier over the eight development sets at seeds 0-4, so a contradiction has no false join to
-    /// catch here; switching the arm on takes mixed_ABG seed 0 from 11 confirmed joins to 2, every
-    /// one of them a correct join R §8 had already reconciled on its own.
+    /// **Off by default, on the measurement.** The confirmed tier has 0 false joins over the eight
+    /// development sets at seeds 0-4, so a contradiction has no false join to catch here; switching
+    /// the arm on takes mixed_ABG from 8 / 7 / 7 / 7 / 9 confirmed joins at seeds 0-4 to
+    /// 2 / 3 / 2 / 4 / 0 -- 27 of 38 demoted, every one of them a correct join R §8 had already
+    /// reconciled on its own (measured by task C on this tree; `ObjectParams::default`'s own doc
+    /// carries the measurement).
     #[arg(long, default_value_t = Switch::Off, value_name = "on|off")]
     object_disagreement: Switch,
     /// Audit §D.2 (c): a confirmed join between two groups merges them. `off` restores R §8's own

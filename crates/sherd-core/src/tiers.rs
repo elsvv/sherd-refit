@@ -45,12 +45,17 @@
 //! Rejected  = R §6.5 refused it, with the reason it has today
 //! ```
 //!
-//! **136 confirmed correct joins and 0 false ones** over the eight development sets at seeds 0–4 —
-//! 17.7 % of the 770 ground-truth adjacent pairs those forty runs could have found. The worst false
-//! join over all forty runs sits **37 %** outside a boundary (`mixed_ABG` seed 1,
-//! `Pot_A_Piece_08`–`Pot_B_Piece_07`, gap 0.0206 t against the limit of 0.015 t), which is what
-//! makes these thresholds rather than a fit: the search's own best zero-false rule, `gap ≤ 0.0064 t`
-//! alone, confirms five more and has its nearest false join 0.5 % of a boundary away.
+//! **130 confirmed correct joins and 0 false ones** over the eight development sets at seeds 0–4 —
+//! 16.9 % of the 770 ground-truth adjacent pairs those forty runs could have found. Those two
+//! numbers are measured on every run rather than stated here: `tools/quality_gate.py` prints them
+//! as its last line (`confirmed tier over 40 runs: 130 correct, 0 false, 16.9 % …`), and this page
+//! quotes that line. They were M1's **136** and 17.7 % until task G refused a join whose
+//! penetration cannot be measured, which cost three joins on `pot_B` and `mixed_ABG` and no false
+//! one (`notes/2026-09-10-g-tiers-findings.md` §1.3). The worst false join over all forty runs sits
+//! **37 %** outside a boundary (`mixed_ABG` seed 1, `Pot_A_Piece_08`–`Pot_B_Piece_07`, gap 0.0206 t
+//! against the limit of 0.015 t), which is what makes these thresholds rather than a fit: the
+//! search's own best zero-false rule, `gap ≤ 0.0064 t` alone, confirms five more — M1's table, at
+//! its own 136 — and has its nearest false join 0.5 % of a boundary away.
 //!
 //! # Why the disjunction, and why the support count is here at all
 //!
@@ -278,6 +283,11 @@ pub struct Thresholds {
     /// Cosine; shell-normal agreement across the seam (R §6.5 ships 0.8).
     pub min_cont_n: f64,
     /// Fraction of surface samples allowed inside the other fragment (R §6.5 ships 0.005).
+    ///
+    /// **Raising it cannot admit a pair whose penetration was never measured.** Where a fragment
+    /// is not watertight R §6.4 could not run, and [`Thresholds::refusals`] refuses the join
+    /// before this ceiling is read — so the pair stays Probable at any value of `max_pen`,
+    /// including 1.0 (task G / V8-D1, and the test that asserts it).
     pub max_pen: f64,
     /// `t`; how far the pose may stay from where it started after a ±[`SLIDE_T`] push along the
     /// seam.

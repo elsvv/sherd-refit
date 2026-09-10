@@ -37,6 +37,15 @@ after another on an otherwise idle machine:
     --backend cpu --seed <0|1> --no-preview --no-meshes --memory-budget 4.83 -v
 ```
 
+**The binary all six runs carried is stamped `486c91906ae1348acd8f1492d5b1eef2064db968`** — task
+G's HEAD, not any commit of this task: it was built at the start of the step and this task changed
+no crate code, so nothing rebuilt it. `engine.commit` in each `report.json` and `transforms.json`
+says so, and this matters to anyone re-running them: **byte-identity with these files is reachable
+only from `486c919`**, or from any later commit after substituting that one 40-character string.
+Task V9 did exactly that and reproduced both large collections — `transforms.json` byte for byte
+and the whole of `report.json` — from `ec72ad4` (V9 §2.2, V9-D19). This task's own forty-run gate
+(§6) was made with a binary stamped `58704d5`, its second commit.
+
 **The seed-0 run of each set is cold** — the work directory is empty, so R §3's whole preprocessing
 pass runs and writes `cache/<name>.sherd` for every fragment. **The seed-1 run is warm**: the same
 work directory, so the meshes, the labels and the breaklines are read from the cache and only
@@ -122,16 +131,27 @@ comparing stage to stage:
 | `synthetic_170` | 12 839 | 17 min | **17.9 min** | 0.083 s wall, 0.71 core-s |
 | `mixed_all` | 12 612 | 28 min | **20.5 min** | 0.097 s wall, 0.83 core-s |
 
-The per-pair costs the projection used — 0.523 core-s synthetic, 0.870 core-s real — are within
-11 % and 5 % of what the run measured at a hundred times the pair count. What the projection could
-not see is the stage that did not exist when it was written: **R §6.5's accepted list on a real
-ten-pot collection is 8 444 candidates, and the tier pass probes every one of them, which costs
-580 s — 32 % of `mixed_all`'s run.** On `synthetic_170` the same stage is 16.8 s, because 145
-candidates were accepted there rather than 8 444. So the tier's cost is linear in the *accepted*
-list and not in the pair count, and on real sherds the accepted list is fifty times longer. D §12's
-step-8 risk column asked that the probes stay "a few per cent of a pair"; per pair they do — 580 s
-over 8 444 candidates is 69 ms — but the collection-level share is a third of the run, and that is
-worth knowing before the next collection.
+The per-pair costs the projection used — 0.523 core-s synthetic, 0.870 core-s real — are **+10.5 %,
++36.2 % and −4.7 %** of what the three runs measured (0.58, 0.71 and 0.83 core-s in the table above)
+at a hundred times the pair count. *(Corrected in task C, V9-D11: this paragraph read "within 11 %
+and 5 %", which is `synthetic_60` and `mixed_all`; the collection it is about, `synthetic_170`, is
+36 % off. What held to 5–12 % is the end-to-end **wall** prediction, and it held because the
+per-pair cost was 36 % low and the 6.43× pool speed-up 33 % low in the other direction.)*
+
+What the projection could not see is the stage that did not exist when it was written: **R §6.5's
+accepted list on a real ten-pot collection is 8 444 candidates, and the tier pass probes every one
+of them, which costs 580 s — 32 % of `mixed_all`'s run.** On `synthetic_170` the same stage is
+16.8 s, because **464** candidates were accepted there rather than 8 444. So the tier's cost is
+linear in the *accepted* list and not in the pair count, and on real sherds the accepted list is
+**eighteen times** longer. Per accepted candidate the probe costs **36 ms** there and **69 ms**
+here, so a real ten-pot collection is about twice as dear a candidate *and* has eighteen times as
+many of them. D §12's step-8 risk column asked that the probes stay "a few per cent of a pair"; per
+candidate they do — 580 s over 8 444 is 69 ms — but the collection-level share is a third of the
+run, and that is worth knowing before the next collection. *(Corrected in task C, V9-D4: this
+paragraph said 145 and "fifty times". 145 is `synthetic_170`'s count of pair **representatives**,
+51 confirmed + 94 probable — the unit of §3.1's table — while 8 444 is a **candidate** count; the
+run's own log line reads `matching done … candidates=54045 accepted=464`, and `report.json` holds
+150 confirmed + 314 probable candidates.)*
 
 ### 2.3 Memory
 
@@ -226,8 +246,9 @@ The band is nevertheless **ordered**, which makes it usable. Sorting the probabl
 | all (2 761 / 2 795) | 61 | 62 | 2 % | 100 % |
 
 **The first hundred rows hold four fifths of everything true in the band, one in two of them is
-real, and the other 2 661 rows are worth eleven more joins between them.** That is a bench day, not
-a bench month, and it is the number the README's museum section now quotes.
+real, and the other 2 661 rows are worth twelve more joins at seed 0 and eleven at seed 1.** That is
+a bench day, not a bench month, and it is the number the README's museum section now quotes — and,
+since task C, the number `--probable-top` defaults to.
 
 ### 3.3 The assembly R §8 built from the confirmed band
 
@@ -386,9 +407,13 @@ that automatically today, and this table is the argument for a step that makes i
 ## 6. The development quality gate, unmoved
 
 `tools/quality_gate.py`, the eight development sets at seeds 0–4, on the final tree. **40 runs in
-10.0 min** (602.2 s; task G measured 421.7 s for the same forty on the same machine — this run
-followed two hours of full-load acceptance work and the difference is thermal, not a change: every
-cell of the table below is G's).
+10.0 min** (602.2 s) — and **every cell of the table below is task G's**. *(Corrected in task C,
+V9-D9: this sentence read "task G measured 421.7 s for the same forty … the difference is thermal".
+It is neither G's number nor a difference. G's own run of the same forty took **610.9 s**
+(`output/g/quality/quality.json`, `meta.wall_total_s`), so this run is 1.4 % **faster** than G's,
+not 43 % slower, and no thermal story is needed. 421.7 s is task **H4**'s figure, measured before
+the tier pass was the default; the five measured runs of the shipped-default gate are 602.2, 610.9,
+611.7, 614.9 and 602.6 s.)*
 
 | set | seed | frag acc | precision | correct | wrong pose | non-adj | cross-obj | purity | joins | confirmed | conf correct | conf false | conf recall | probable | correct found |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|

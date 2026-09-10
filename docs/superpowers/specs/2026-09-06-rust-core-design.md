@@ -27,14 +27,14 @@ cites it (§ numbers prefixed `R`).
 
 Targets (from the brief and the notes):
 
-| metric | Python today (M2 Pro, 9 workers) | target CPU-only | target with GPU |
-|---|---|---|---|
-| mid-size pair (42k/26k faces) | 6.9 core-s | ≤ 2.5 core-s | ≤ 0.15 s GPU + 0.05 core-s |
-| full-resolution pair (200k faces each) | 20–25 core-s | ≤ 7 core-s | ≤ 0.4 s GPU |
-| 170 fragments, ≈ 14 000 pairs, end to end | ≈ 4.6 h (projected) | ≤ 2 h (10 cores) | ≤ 30 min (M2 Pro 16-core GPU) |
-| preprocessing per fragment (1–10 M faces) | 5–15 s | ≤ 4 s typical, ≤ 15 s for 10 M faces | same (CPU) |
-| peak RSS, 170 fragments | 9 × 384 MB workers, but 16 GB exhausted on large scans | ≤ 6 GB (≤ 3 M faces/scan); ≤ 10 GB (10 M) | + ≤ 1 GB GPU |
-| quality | reference §R13 | identical gates | identical gates |
+| metric | Python today (M2 Pro, 9 workers) | target CPU-only | target with GPU | **measured at the final acceptance (task A1, CPU)** |
+|---|---|---|---|---|
+| mid-size pair (42k/26k faces) | 6.9 core-s | ≤ 2.5 core-s | ≤ 0.15 s GPU + 0.05 core-s | **0.71 core-s** (`synthetic_170`, 12 839 pairs, mean working mesh 55 k faces) and **0.83 core-s** (`mixed_all`, 12 612 pairs of real sherds, mean 28 k) — collection means, not a single pair |
+| full-resolution pair (200k faces each) | 20–25 core-s | ≤ 7 core-s | ≤ 0.4 s GPU | not isolated by A1; §10.3's development rows carry it |
+| 170 fragments, ≈ 14 000 pairs, end to end | ≈ 4.6 h (projected) | ≤ 2 h (10 cores) | ≤ 30 min (M2 Pro 16-core GPU) | **18.5 min** (`synthetic_170`, 164 fragments, cold cache) and **30.3 min** (`mixed_all`, 164 real sherds, cold) — **met, with 6.5× and 4.0×** |
+| preprocessing per fragment (1–10 M faces) | 5–15 s | ≤ 4 s typical, ≤ 15 s for 10 M faces | same (CPU) | **0.11 s** and **0.06 s** per fragment (17.9 s and 9.8 s for 164), on scans of 59 k and 28 k faces — the target's 1–10 M is an order the museum's own scans will bring and these two collections do not |
+| peak RSS, 170 fragments | 9 × 384 MB workers, but 16 GB exhausted on large scans | ≤ 6 GB (≤ 3 M faces/scan); ≤ 10 GB (10 M) | + ≤ 1 GB GPU | **2 647 MiB** worst of six runs — **met, at 44 %** of the row. Under `--memory-budget 4.83` the semaphore never blocked once |
+| quality | reference §R13 | identical gates | identical gates | **met on `synthetic_60` and `synthetic_170`** — 148 confirmed joins over four runs, every one correct, cross-object 0 and purity 1.000 including on the 6-piece intruder vessel. **Not met on `mixed_all`**: 10 of 51 confirmed joins over two seeds are false, three of them cross-object (§10.3, `notes/2026-09-10-a1-acceptance.md` §3.4) |
 
 Non-goals of the port: new matching algorithms, deep learning, changing thresholds, a GUI in
 phases 1–2, OpenGL/WebGPU-in-browser backends, f16 or f64 GPU paths.
@@ -1675,15 +1675,18 @@ the working-mesh budget and found three of its seven rows moving, pot_G's prohib
 | pot A (28 pairs) | ≤ 35 s | ≤ 15 s | every step |
 | pot H (55 pairs) | ≤ 40 s | ≤ 15 s | every step |
 | synthetic 20 (190 pairs) | ≤ 120 s | ≤ 40 s | every step |
-| synthetic 60 (≈ 1 770 pairs) | ≤ 15 min | ≤ 5 min | **final acceptance only** (decision 2026-09-07); projected **2.4 min** CPU, **1.9 min** GPU |
-| synthetic 170 (≈ 12 800 pairs) | ≤ 2 h | ≤ 30 min | **final acceptance only** (decision 2026-09-07); projected **17 min** CPU, **13.6 min** GPU |
-| `mixed_all` (12 589 pairs) | ≤ 2 h | ≤ 30 min | **final acceptance only** (decision 2026-09-07); projected **28 min** CPU, **24 min** GPU |
+| synthetic 60 (1 540 pairs) | ≤ 15 min | ≤ 5 min | **run once, at the final acceptance** (task A1, 2026-09-10): **2.1 min** CPU cold, **2.0 min** warm — inside, 7.0× |
+| synthetic 170 (12 839 pairs) | ≤ 2 h | ≤ 30 min | **run once, at the final acceptance** (task A1): **18.5 min** CPU cold, **18.4 min** warm — inside, 6.5× |
+| `mixed_all` (12 612 pairs) | ≤ 2 h | ≤ 30 min | **run once, at the final acceptance** (task A1): **30.3 min** CPU cold, **30.3 min** warm — inside, 4.0× |
 
 The last three rows are the team's decision of 2026-09-07: the large collections are not run
 during development — the development sets are the terracotta, pots A/B/C/G/H, `mixed_ABG` (a
 roadmap-item-4 target, not a phase gate; see below) and synthetic 20, and nothing above 27
 fragments is started — and the three large rows are checked
-once, as the final acceptance after phase 2 and roadmap items 3–4. Until then they are carried as
+once, as the final acceptance after phase 2 and roadmap items 3–4. **That run was made on
+2026-09-10 (task A1, audit §E step 12, `notes/2026-09-10-a1-acceptance.md`) and the three cells
+above are its measurements**; the table immediately below replaces the projection those cells used
+to carry. Until A1 they were carried as
 a **projection from the measured per-pair cost**. E1 measured that cost and E2 halved it
 (`notes/2026-09-07-e2-tuning.md` §10): one pair costs **0.523 core-s** on 200 000-face working
 meshes (synthetic 20, mean over its 190 pairs, against E1's 1.34) and **0.870 core-s** on real
@@ -1705,6 +1708,66 @@ still the term that grows with fragment size. **The projection is not a run and 
 the gate**, and it cannot see anything that is not linear in the pair count — R §8's assembly,
 R §9's refinement over 170 placed fragments, the merged writer — which on synthetic 20 are 0.03 s
 and 1.14 s against 14.64 s of matching.
+
+**Measured at the final acceptance, task A1** (`notes/2026-09-10-a1-acceptance.md`), CPU, tiers and
+objects at their shipped defaults, `--no-preview --no-meshes --memory-budget 4.83`, seeds 0 and 1,
+one run after another on an idle machine. **Cold is seed 0 into an empty work directory** (R §3's
+whole preprocessing pass, the cache written); **warm is seed 1 into the same directory** (the cache
+read, only R §3.5's three sampled arrays redrawn, R §3.7). Peak RSS from `/usr/bin/time -l`, which
+agrees with `report.json`'s own `memory` block to within 70 MiB on every run:
+
+| set | fragments | pairs | **CPU cold** (seed 0) | **CPU warm** (seed 1) | CPU gate | margin | peak RSS cold | peak RSS warm |
+|---|---:|---:|---:|---:|---|---:|---:|---:|
+| synthetic 60 | 56 | 1 540 | **128.1 s** (2.1 min) | **118.5 s** (2.0 min) | ≤ 15 min | **7.0×** | 2 266 MiB | 2 288 MiB |
+| synthetic 170 | 164 | 12 839 | **1 107.0 s** (18.5 min) | **1 104.4 s** (18.4 min) | ≤ 2 h | **6.5×** | 2 569 MiB | 2 715 MiB |
+| `mixed_all` | 164 | 12 612 | **1 818.5 s** (30.3 min) | **1 815.3 s** (30.3 min) | ≤ 2 h | **4.0×** | 1 754 MiB | 1 795 MiB |
+
+**Every row is inside its CPU gate at both seeds, cold and warm, and the worst peak resident set of
+the six runs is 2 647 MiB — 44 % of §1's 6 GB row.** Cold minus warm is the `preprocess` stage and
+nothing else (12.1 s, 16.6 s and 8.8 s), which is about one per cent of a run whose matching stage
+is a quarter of an hour: on these collections the cache is not what the wall clock is about. The
+GPU column of the three rows is **not** discharged — the acceptance was run on the CPU, which is
+what §E's step 12 asks for, and `Auto` is the CPU by policy (§12, task H2).
+
+**What the projection got right and what it could not see.** Stage for stage, E2's per-pair costs
+were close: 0.523 core-s projected against **0.71** measured on synthetic 170 and 0.870 against
+**0.83** on `mixed_all`, and the pool returns **8.4–8.5×** of ten cores on runs of this length
+rather than the 6.43× the projection assumed. The matching stage itself came in at 17.9 min
+(projected 17) and 20.5 min (projected 28). What the arithmetic could not see is a stage that did
+not exist when it was written: **R §6.5 accepts 8 444 candidates on `mixed_all`, the tier pass of
+roadmap item 3 probes every one of them, and that costs 580 s — 32 % of the run.** On synthetic 170
+the same stage is 16.8 s, because 145 candidates were accepted there. The tier's cost is linear in
+the *accepted* list, not in the pair count, and on a real ten-pot collection the accepted list is
+fifty times longer than on a synthetic one-pot collection of the same size. §12's step-8 risk column
+asked that the probes stay a few per cent of a pair; per candidate they are (69 ms), but the
+collection-level share is a third of the run.
+
+**Memory: §8's 4.4 GB whole-mesh BVH total is an extrapolation that no real collection here
+reaches.** It assumes 170 × 200 000 faces = 34 M working-mesh faces. Measured: synthetic 60
+**6.48 M** (mean 116 k a fragment), synthetic 170 **9.01 M** (mean 55 k), `mixed_all` **4.66 M**
+(mean 28 k). At H3's measured 129 B a face that is 0.84, 1.16 and 0.60 GB of whole-mesh tree, not
+4.4 GB, which is why the peaks above sit where they do. The per-face constant is not challenged by
+this run — the face count is. The memory semaphore never blocked on any of the six runs
+(`budget_mib=4508`, `waited=0`, peak concurrency 12–17 in preprocessing and 9 in R §9), so a budget
+of 4.5 GiB is not binding at this fragment size.
+
+**Quality at the acceptance, and the one gate that failed.** The confirmed tier is clean on both
+synthetic collections at both seeds — **148 confirmed joins, every one `correct`; cross-object 0 and
+group purity 1.000**, including on synthetic 170, which carries six pieces of a second vessel so
+that a cross-object join is possible there. On `mixed_all` it is not: **10 of the 51 confirmed joins
+over the two seeds are false** — two non-adjacent, five wrong-pose (all five 0.54–0.65 t from the
+truth, just outside `evaluate.py`'s 0.5 t) and, at seed 1, **three cross-object joins, every one
+Pot_E against Pot_I**, which takes group purity to 0.930 and breaches the prohibition step 12
+states. Every one of the ten was confirmed on the **margin** arm with `support` 0. The three
+cross-object joins are §D.2's empty shortlist arriving where it matters: the Pot_I sherd agrees with
+its Pot_E group to within the group's own MAD on every feature the cache carries — 0.046 mm of wall
+thickness in one of the three groups — so no `k·MAD` rule demotes them. Requiring `support ≥ 1`
+removes all ten and costs 124 of the 189 correct confirmed joins; it was **simulated and not
+applied**, because a threshold fitted on the set that judges it is not a threshold. Confirmed recall
+is 0.161–0.182, 0.118–0.125 and 0.066–0.076 of the ground truth's adjacent pairs; the probable band
+is 38–43, 92–94 and **2 761–2 795** pairs, and on the ten-pot collection only 61 of those 2 761 are
+true joins — though the band is ordered, and its top hundred rows by score hold four fifths of them
+at one-in-two precision. The whole diagnosis is `notes/2026-09-10-a1-acceptance.md` §3.
 
 **Measured on both backends, task G4** (`notes/2026-09-08-g4-tuning.md` §7), `bench`, so previews
 and meshes are off, which is what the gates above ask for. Cold is `--no-cache`; peak RSS from
@@ -1740,8 +1803,8 @@ core-seconds and peak RSS rises 1 576 → 1 879 MiB against §8's 6 GB. Every on
 files of those four sets — caches, placed meshes, merged meshes, PNGs, `transforms.json`,
 `report.*` outside its timings — is byte-identical to what phase 1d wrote, which is phase 1e's exit
 criterion (§12). Against the reference, cold on both sides: 52.7 → **4.5 s** on the terracotta,
-130.9 → **8.2 s** on pot H, 426.7 → **27.5 s** on synthetic 20. The three large sets have not been
-run and will not be until the final acceptance.
+130.9 → **8.2 s** on pot H, 426.7 → **27.5 s** on synthetic 20. The three large sets were run
+**once**, at the final acceptance of 2026-09-10 (task A1); their measured table is above.
 
 **`mixed_ABG` is a roadmap-item-4 target, not a phase-1 or phase-2 quality gate** (team decision
 2026-09-08, from V5-D1). It is the one *mixed* development set — 24 fragments of three pots, 276
@@ -2080,7 +2143,7 @@ join cannot enter, and a margin that says why.
 | 9 | **Review images and constraints.** `render::render_pair(a, b, T)` on the existing splat renderer: three views (down the seam's mean shell normal and the two shells), A grey and B orange, the seam's `t/3` cells — the list `seam_score` already forms — drawn white, B's fracture samples coloured by their distance to A's fracture surface, a caption with the numbers, the tier and the seed; `review/<a>__<b>.png` for confirmed and probable joins behind `--review-images`. `constraints.json` **v1**, versioned, names validated against the collection (an unknown name is an error, not a skip), with audit §D.1's semantics: `must_not_join` removes the pair before matching, `must_join` (optional pinned pose) promotes or pins, `same_object` / `different_object` feed step 10 and veto. Constraints filter and seed; they never edit a score. The report lists every constraint and what it did | **8 h** | the images are byte-identical between two runs of one seed; terracotta with `must_not_join [021, 094]` yields 094–104 only and reports it; `must_join [007, 021]` reports **unsatisfiable** and the run still succeeds; a pinned pose places the pair without matching it | nothing technical. The risk is that the three views are not the ones a conservator reads, and only the museum's bench can answer that — which is why the images ship before the acceptance set arrives, not after |
 | 10 | **Object separation** (roadmap item 4). `Features` per fragment in the cache (`CACHE_VERSION` 6); `GroupFeatures` = median and MAD per group; a join whose new fragment deviates by more than `k·MAD` on a **shortlisted** feature (step 7's AUC > 0.8) is **demoted to probable, not rejected** — the conservator decides, with the numbers in the review image; a support count per placement, feeding the tier (two independent consistent paths confirm a join whose own scores are only probable); mutual-disagreement demotion; **group merging through a confirmed join**, with the penetration test across both groups and consistency with every cross-group accepted join, replacing `Rejection::MergesGroups` (audit §C.5); every group reported as an object with its consensus and the fragments the consensus rejects; `same_object` / `different_object` honoured | **12 h** | `mixed_ABG`: cross-object joins **0** in the confirmed tier, group purity **1.000**, correct joins **≥ 12** (§10.3's baseline) at seeds 0–4. No change of used joins on the seven single-object sets, or one explained. `pot_H`'s largest group not smaller | thickness and shell radius are twins on four of the ten SfS++ pots (scale-pairs §4.3), so the two most promising features may be one feature. `MergesGroups` has never fired on four pieces and every consequence of removing it is unmeasured until step 12. Object ids are read by `evaluate.py` only: thresholds are fitted on the single-object sets and `synthetic_170`, `mixed_ABG` is the development test and `mixed_all` the acceptance test, and nothing else may read them |
 | 11 | **Spike: seam segments** — *optional, after 10* (audit §D.2 spike 1). Split each breakline at its corners (curvature maxima of the chain) into corner-to-corner segments and match **segments, not points**: equal length, mirrored dihedral profile, equal local thickness profile. The unit of comparison is the seam itself, so item 2's 5–22 % coverage ceiling does not apply. Run on `mixed_all`'s adjacency with **preprocessing only plus segment matching — no pair matching**, which is the small-set rule's second stated exception | **6 h** | a note with recall of adjacent pairs at K = 5/10/15 against scale-pairs §4.2's 0.36 / 0.47 / 0.53. **Adopted only if recall at K = 10 exceeds 0.8**; otherwise the note records the number and all-pairs stays the design | whether corners are detected consistently on the two sides of one crack is the whole question, and it is the reason this is a spike with a stated kill threshold rather than a phase |
-| 12 | **Final acceptance.** The **only** step that matches a collection above 27 fragments. On the CPU, warm cache, previews off: `synthetic_60`, `synthetic_170` and `mixed_all` at seeds 0 and 1; `evaluate.py` per run; peak RSS per stage from §8's monitor; §10.3's three projected rows **replaced by measurements**; the museum's acceptance set (audit §C.4 — 20–30 conservator-confirmed joins, a handful of confirmed non-joins, fragments with known object attribution, from their own scans) run the same way when it arrives; a README section for museum users on reading the tiers | **6 h** | wall inside §10.3's CPU gates — 2 h for `synthetic_170` and `mixed_all`, 15 min for `synthetic_60`; **cross-object 0 and group purity 1.000 in the confirmed tier**; confirmed recall and the probable list reported per set | the 17-minute and 28-minute figures of §10.3 are projections from a per-pair cost and cannot see R §8's assembly, R §9's refinement over 170 placed fragments or the merged writer. §8's 4.4 GB whole-mesh BVH total at 170 fragments is an extrapolation from a per-face constant measured at 20 (task H3) and this is where it becomes a measurement |
+| 12 | **Final acceptance — done, task A1, 2026-09-10** (`notes/2026-09-10-a1-acceptance.md`). The **only** step that has matched a collection above 27 fragments. Six runs on the CPU, tiers and objects at their shipped defaults, previews and meshes off, `--memory-budget 4.83`: `synthetic_60`, `synthetic_170` and `mixed_all` at seeds 0 (cold cache) and 1 (warm), each under `/usr/bin/time -l`, each scored by `evaluate.py` through `quality_gate.py --score-only`, peak RSS per stage from §8's monitor. §10.3's three projected rows are **replaced by measurements** there. The museum's own acceptance set (audit §C.4) has not arrived and is still to be run the same way | **6 h** | **Wall and memory: met.** 2.1 / 18.5 / 30.3 min cold against 15 min / 2 h / 2 h — 7.0×, 6.5× and 4.0× of margin — and 2.1–2.6 min / 18.4 min / 30.3 min warm; worst peak RSS **2 647 MiB**, 44 % of §1's 6 GB row; the memory semaphore never blocked. **Quality: met on the two synthetic collections, failed on `mixed_all`.** 148 confirmed joins over the four synthetic runs, every one `correct`, cross-object **0** and purity **1.000** — including on `synthetic_170`, whose six intruder pieces make a cross-object join possible. On `mixed_all`, **10 of 51 confirmed joins over two seeds are false** and three of them are cross-object at seed 1 (purity 0.930), which breaches the prohibition. Confirmed recall 0.161–0.182 / 0.118–0.125 / 0.066–0.076; probable list 38–43 / 92–94 / **2 761–2 795**. A README section for museum users on reading the tiers is written | **The projection was close and the tier pass was the surprise.** E2's per-pair costs held to 5–11 % at a hundred times the pair count and the pool returned 8.5× rather than 6.43×, but R §6.5 accepts 8 444 candidates on a real ten-pot collection and the tier probes every one, which is 580 s — a third of that run. §8's 4.4 GB BVH extrapolation was never tested: it assumes 34 M working-mesh faces and these collections have 4.7–9.0 M. **The failure `mixed_all` records is roadmap item 4's, not the tier's**: the Pot_I sherd of each impure group agrees with its Pot_E group to within the group's own MAD on every feature the cache carries, which is task M1 §4's AUC of 0.740 becoming a false join. Requiring `support ≥ 1` removes all ten and costs 124 of the 189 correct confirmed joins — measured, and deliberately not applied |
 | **steps 7–12 total** | | **50 agent-hours** | | |
 | ~~3a~~ | ~~pyo3 module, numpy interop, `SHERD_REFIT_BACKEND=rust` routing in the Python package, A/B on the fixtures~~ — **struck** (§13 question 7, task H4). Its exit criterion, "the Python pipeline with Rust kernels reproduces the Rust CLI", is a bridge back to a package that no longer holds the algorithm. Rebuilt only if the museum asks for a Python API | — | — | ~~packaging on Windows~~ |
 | app | **After step 12, unchanged in substance** (roadmap item 7's tail): Tauri 2 app on the same crate — collection open, run with progress and cancel, report view, GLB viewer, **review of probable joins writing step 9's `constraints.json`**, re-run; then packaging, code signing and the release pipeline. It is placed after the algorithm work rather than beside it because the screen it exists for — the probable-join review — is step 9's output | 4 weeks | museum walkthrough on the terracotta set; a tagged release with binaries and bundles | signing and notarisation; an Apple developer account and a Windows certificate (§13 question 9) |

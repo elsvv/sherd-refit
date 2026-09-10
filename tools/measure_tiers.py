@@ -1297,14 +1297,27 @@ LARGE = [
 
 
 def known_sets():
-    """Every collection a dump may be made of: the nine development sets and task R1's two."""
+    """Every collection a dump may be **read** for: the nine development sets and task R1's two."""
     return list(qg.SETS) + LARGE
+
+
+def runnable_sets(names):
+    """The collections `--stage rule-runs` may *run*, given `--sets`.
+
+    A large collection is reachable **only by naming it**.  D §12's small-set rule is a rule about
+    which collections a run may be made of, and a default that quietly swept a 164-sherd collection
+    at five seeds would break it -- which is exactly what the first draft of this function did.
+    """
+    chosen = [s for s in qg.SETS if names is None or s[0] in names]
+    if names:
+        chosen += [s for s in LARGE if s[0] in names]
+    return chosen
 
 
 def stage_rule_runs(a, out):
     """The forty-five runs the rule table is chosen on: the tier on, two re-searches, --measure."""
     os.makedirs(os.path.join(out, "rules"), exist_ok=True)
-    sets = [s for s in known_sets() if a.sets is None or s[0] in a.sets]
+    sets = runnable_sets(a.sets)
     total = 0.0
     for name, indir, _gt in sets:
         if not os.path.isdir(os.path.join(ROOT, indir)):

@@ -247,6 +247,19 @@ pub struct Probes {
     /// `score / wide_rival.score`, on exactly the terms [`Probes::margin`] is: `None` when there
     /// is no second placement or when it scores zero.
     pub wide_margin: Option<f64>,
+    /// How far [`Probes::wide_rival`] places B **from this candidate**, in `t` — the distance the
+    /// margin arm tests ([`Thresholds::rival_moved_of`]).
+    ///
+    /// [`WideRival::moved_t`] is the distance from the *pair's best* candidate, which is what
+    /// selected that pose as the pair's second placement; three candidates in four are not the
+    /// pair's best, and for them the two numbers are different. The arm's two halves — *this
+    /// candidate beats the rival by [`Thresholds::min_margin`]* and *the rival is a genuinely
+    /// different fit* — are statements about one pose and are therefore both read at this
+    /// candidate's, exactly as [`Probes::margin`] and [`Probes::rival_moved_t`] are (V10's
+    /// observation; task R1 §1).
+    ///
+    /// `None` wherever [`Probes::wide_rival`] is.
+    pub wide_rival_moved_t: Option<f64>,
     /// Worst rotation, in degrees, over the twelve one-ULP neighbours of this pose re-climbed
     /// through R §5.6's last two rungs.
     pub determined_deg: Option<f64>,
@@ -477,6 +490,7 @@ impl Thresholds {
         research_seeds: 2,
         ..Self::M1
     };
+
 }
 
 impl Thresholds {
@@ -545,12 +559,13 @@ impl Thresholds {
         }
     }
 
-    /// How far the second placement that margin is read against puts the sherd, in `t`.
+    /// How far the second placement that margin is read against puts the sherd, in `t`, measured
+    /// **from the candidate being judged** on both readings ([`Probes::wide_rival_moved_t`]).
     #[must_use]
     pub fn rival_moved_of(&self, probes: &Probes) -> Option<f64> {
         match self.margin_rival {
             RivalKind::Kept => probes.rival_moved_t,
-            RivalKind::Wide => probes.wide_rival.map(|w| w.moved_t),
+            RivalKind::Wide => probes.wide_rival_moved_t,
         }
     }
 
@@ -680,9 +695,15 @@ pub struct Evidence {
     /// stage-1 fallback). Absent where the pair has no second placement even there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wide_margin: Option<f64>,
-    /// How far the wide second placement puts the sherd, in `t`.
+    /// How far the wide second placement puts the sherd from **this** candidate, in `t` — the
+    /// number the margin arm tests ([`Probes::wide_rival_moved_t`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wide_rival_moved_t: Option<f64>,
+    /// The same distance from the **pair's best** candidate — what selected that pose as the
+    /// pair's second placement ([`WideRival::moved_t`]). Equal to the field above on the pair's
+    /// best candidate and different on the others; reported so that both are on the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wide_rival_pair_t: Option<f64>,
     /// Where the wide second placement came from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wide_rival_source: Option<RivalSource>,
@@ -745,7 +766,8 @@ impl Evidence {
             margin: probes.margin,
             rival_moved_t: probes.rival_moved_t,
             wide_margin: probes.wide_margin,
-            wide_rival_moved_t: probes.wide_rival.map(|w| w.moved_t),
+            wide_rival_moved_t: probes.wide_rival_moved_t,
+            wide_rival_pair_t: probes.wide_rival.map(|w| w.moved_t),
             wide_rival_source: probes.wide_rival.map(|w| w.source),
             wide_rival_accepted: probes.wide_rival.map(|w| w.accepted),
             placements: probes.placements,
@@ -1020,6 +1042,10 @@ fn one_pair(
                     wide_rival,
                     wide_margin: wide_rival
                         .and_then(|w| (w.score > 0.0).then(|| c.score() / w.score)),
+                    wide_rival_moved_t: wide_rival.map(|w| {
+                        let pose = Matrix4::from_fn(|r, q| w.transform[r][q]);
+                        placement_gap(b, &c.transform, &pose) / sc.t
+                    }),
                     determined_deg: determined.get(k).map(|d| d.0),
                     determined_t: determined.get(k).map(|d| d.1),
                     slide_t: slide[k],
@@ -1733,13 +1759,9 @@ mod tests {
             rival_score: Some(4.0),
             rival_moved_t: Some(8.2),
             margin: Some(8.15),
-            wide_rival: Some(WideRival {
-                score: 4.0,
-                moved_t: 8.2,
-                source: RivalSource::Stage2,
-                accepted: false,
-            }),
+            wide_rival: Some(wide(4.0, 8.2, RivalSource::Stage2, false)),
             wide_margin: Some(8.15),
+            wide_rival_moved_t: Some(8.2),
             determined_deg: Some(1.1e-13),
             determined_t: Some(7.0e-14),
             slide_t: Some(5.3e-14),
@@ -1759,9 +1781,22 @@ mod tests {
             rival_moved_t: None,
             wide_margin: None,
             wide_rival: None,
+            wide_rival_moved_t: None,
             placements: 1,
             ..probes.clone()
         }
+    }
+
+    /// A second placement at `moved` walls from the pair's best, with a pose that is a pure
+    /// translation of that size along `x` — so that a test can move the *candidate* instead and
+    /// see the two distances come apart.
+    fn wide(score: f64, moved: f64, source: RivalSource, accepted: bool) -> WideRival {
+        let mut transform = [[0.0; 4]; 4];
+        for (i, row) in transform.iter_mut().enumerate() {
+            row[i] = 1.0;
+        }
+        transform[0][3] = moved;
+        WideRival { score, transform, moved_t: moved, source, accepted }
     }
 
     fn row(tight: f64, gap: f64, accepted: bool) -> ScoreRow {
@@ -1809,10 +1844,7 @@ mod tests {
             ),
             (
                 scores,
-                Probes {
-                    wide_rival: probes.wide_rival.map(|w| WideRival { moved_t: 2.0, ..w }),
-                    ..probes.clone()
-                },
+                Probes { wide_rival_moved_t: Some(2.0), ..probes.clone() },
                 "no arm",
             ),
             (scores, Probes { research: vec![research(false); 2], ..probes.clone() }, "no arm"),
@@ -1875,6 +1907,40 @@ mod tests {
         assert!(th.refusals(&family, &alone)[0].starts_with("no arm"));
     }
 
+    /// Task R1 (V10's observation, closed): the margin arm's two halves are read at **one** pose.
+    ///
+    /// [`Probes::wide_margin`] is this candidate's own `score / rival.score`, so the distance
+    /// beside it has to be this candidate's too. [`WideRival::moved_t`] is the pair's — it is what
+    /// *selected* that pose as the pair's second placement — and three accepted candidates in four
+    /// are not the pair's best, so on those two the numbers are different quantities. The arm reads
+    /// [`Probes::wide_rival_moved_t`], and both are reported.
+    #[test]
+    fn the_wide_margin_and_its_distance_are_read_at_the_same_pose() {
+        let (scores, probes) = confirmable();
+        let th = Thresholds::default();
+        // The pair's best candidate: the pair's distance and this candidate's are the same number.
+        assert_eq!(th.rival_moved_of(&probes), probes.wide_rival.map(|w| w.moved_t));
+        assert_eq!(th.arm(&probes), Some("margin"));
+
+        // A non-best candidate of the same pair carries the **same** rival -- it is a property of
+        // the search -- and stands a wall and a third from it. The margin it beats that rival by
+        // is unchanged; the distance is not, and the arm refuses on the distance.
+        let other = Probes { wide_rival_moved_t: Some(1.3), ..probes.clone() };
+        assert_eq!(th.rival_moved_of(&other), Some(1.3), "the arm reads this candidate's distance");
+        assert_relative_eq!(other.wide_rival.expect("a rival").moved_t, 8.2);
+        assert_eq!(th.margin_of(&other), th.margin_of(&probes), "the margin is the same ratio");
+        assert_eq!(th.arm(&other), None, "1.3 t is under the five walls the rule asks for");
+        assert!(
+            th.refusals(&scores, &other)[0].ends_with("the second placement is 1.30 t away, under 5"),
+            "the refusal line names the distance it read: {:?}",
+            th.refusals(&scores, &other)
+        );
+        // And the evidence carries both, so a reader can tell which pose each is from.
+        let e = Evidence::of(&scores, &other, &th, None);
+        assert_eq!(e.wide_rival_moved_t, Some(1.3));
+        assert_eq!(e.wide_rival_pair_t, Some(8.2));
+    }
+
     /// Task S3's second placement: the margin arm is told which rival to divide by, and a pair
     /// whose kept list makes one placement can be spoken for by the wide one.
     ///
@@ -1887,13 +1953,9 @@ mod tests {
         let (_, probes) = confirmable();
         let one_placement = Probes {
             support: 0,
-            wide_rival: Some(WideRival {
-                score: 3.0,
-                moved_t: 7.4,
-                source: RivalSource::Stage2,
-                accepted: false,
-            }),
+            wide_rival: Some(wide(3.0, 7.4, RivalSource::Stage2, false)),
             wide_margin: Some(4.0),
+            wide_rival_moved_t: Some(7.4),
             ..no_rival(&probes)
         };
         let kept = Thresholds::M1;
@@ -1941,12 +2003,8 @@ mod tests {
             rival_score: None,
             rival_moved_t: None,
             wide_margin: Some(6.0),
-            wide_rival: Some(WideRival {
-                score: 5.0,
-                moved_t: 3.1,
-                source: RivalSource::Stage1,
-                accepted: true,
-            }),
+            wide_rival: Some(wide(5.0, 3.1, RivalSource::Stage1, true)),
+            wide_rival_moved_t: Some(3.1),
             research: vec![research(true), research(true)],
             ..probes.clone()
         };
@@ -1958,10 +2016,7 @@ mod tests {
             ["no arm: support 0 < 1 and the second placement is 3.10 t away, under 5".to_owned()]
         );
         // Move the rival out to a genuinely different fit and the same candidate confirms.
-        let far = Probes {
-            wide_rival: Some(WideRival { moved_t: 12.0, ..slid.wide_rival.expect("a rival") }),
-            ..slid.clone()
-        };
+        let far = Probes { wide_rival_moved_t: Some(12.0), ..slid.clone() };
         assert_eq!(th.arm(&far), Some("margin"));
         assert!(th.refusals(&scores, &far).is_empty());
 

@@ -348,4 +348,16 @@ fn the_wide_rival_is_additive_and_names_a_second_placement() {
     // And it is the *best* second placement, so the margin it makes is the tightest honest one.
     let margin = wide[0].score() / rival.score;
     assert!(margin > 1.0, "the winner is ahead of its rival: {margin:.2}");
+
+    // Task R1: the rival carries its own pose, because the margin arm measures how far it is from
+    // the candidate it is judging and not from the pair's best (`Probes::wide_rival_moved_t`).
+    // It is a rigid transform of this crate's convention and it is a *different* placement.
+    let pose = rival.transform;
+    assert_eq!(pose[3], [0.0, 0.0, 0.0, 1.0], "the last row of a rigid transform");
+    for r in 0..3 {
+        let norm: f64 = (0..3).map(|c| pose[r][c] * pose[r][c]).sum::<f64>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-9, "row {r} of the rival's rotation is not a unit: {norm}");
+    }
+    let same = (0..4).all(|r| (0..4).all(|c| (pose[r][c] - wide[0].transform[(r, c)]).abs() < 1e-12));
+    assert!(!same, "the rival's pose is the winner's");
 }

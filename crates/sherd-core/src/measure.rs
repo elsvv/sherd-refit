@@ -113,6 +113,12 @@ pub struct CandidateMeasure {
     /// `score / wide_rival.score`, on the same strict terms [`CandidateMeasure::margin`] is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wide_margin: Option<f64>,
+    /// How far [`CandidateMeasure::wide_rival`] places B from **this** candidate, in `t` — the
+    /// number the margin arm tests. [`WideRival::moved_t`] inside the field above is the same
+    /// distance from the *pair's best* candidate, which is what selected that pose; both are
+    /// carried so that a rule read off this dump can use either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wide_rival_moved_t: Option<f64>,
     /// Worst rotation, in degrees, over the twelve one-ULP neighbours of this pose re-climbed
     /// through R §5.6's last two rungs.
     pub determined_deg: Option<f64>,
@@ -217,6 +223,7 @@ pub fn measure(
                 margin: p.margin,
                 wide_rival: p.wide_rival,
                 wide_margin: p.wide_margin,
+                wide_rival_moved_t: p.wide_rival_moved_t,
                 determined_deg: p.determined_deg,
                 determined_t: p.determined_t,
                 slide_t: p.slide_t,

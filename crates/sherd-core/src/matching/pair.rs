@@ -87,9 +87,25 @@ pub enum RivalSource {
 pub struct WideRival {
     /// `seam · tight` of that placement, measured by R §6 exactly as the winner's is.
     pub score: f64,
+    /// The rival's own pose, row-major, in the convention every other transform of this crate
+    /// uses (`p_A = T · p_B`).
+    ///
+    /// It is carried because the distance the **margin arm** reads is measured from the candidate
+    /// being judged and not from the pair's best
+    /// ([`Probes::wide_rival_moved_t`](crate::tiers::Probes::wide_rival_moved_t)), and that
+    /// distance cannot be recovered from [`WideRival::moved_t`] alone.
+    pub transform: [[f64; 4]; 4],
     /// How far it places B from the pair's **best** candidate, in `t`
     /// ([`placement_gap`](crate::tiers::placement_gap)); always above
     /// [`SAME_PLACEMENT_T`](crate::tiers::SAME_PLACEMENT_T).
+    ///
+    /// This is the distance that **selected** this pose as the pair's second placement, and it is
+    /// a property of the pair. It is *not* the number the margin arm tests: a pair's non-best
+    /// candidate is judged against this rival at its own pose, so
+    /// [`Probes::wide_rival_moved_t`](crate::tiers::Probes::wide_rival_moved_t) — measured from
+    /// the candidate under test, exactly as [`Probes::rival_moved_t`](crate::tiers::Probes::rival_moved_t)
+    /// is — is what [`Thresholds::rival_moved_of`](crate::tiers::Thresholds::rival_moved_of)
+    /// returns. Both are reported.
     pub moved_t: f64,
     /// Whether it came out of R §5.6's own list or out of the stage-1 fallback.
     pub source: RivalSource,
@@ -487,6 +503,9 @@ impl<'a> Pair<'a> {
             if found.is_none_or(|w| c.score() > w.score) {
                 *found = Some(WideRival {
                     score: c.score(),
+                    transform: std::array::from_fn(|r| {
+                        std::array::from_fn(|q| c.transform[(r, q)])
+                    }),
                     moved_t: moved,
                     source,
                     accepted: c.accepted,
@@ -635,8 +654,9 @@ pub struct Candidate {
     /// every candidate of a run with the tier pass off carries.
     ///
     /// The same value on every candidate of a pair: it is a property of the pair's search and not
-    /// of one pose, and the distance in it is measured from the pair's best candidate
-    /// ([`Pair::match_pair_wide`]).
+    /// of one pose, and [`WideRival::moved_t`] is measured from the pair's best candidate
+    /// ([`Pair::match_pair_wide`]). The distance the margin arm reads is measured from the
+    /// candidate being judged instead ([`Probes::wide_rival_moved_t`](crate::tiers::Probes::wide_rival_moved_t)).
     pub wide: Option<WideRival>,
 }
 

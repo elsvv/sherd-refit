@@ -1912,7 +1912,31 @@ seeds each — 15 runs — not derived from the port.
    so its row is R §13's set of *decisions*, read straight off `report.json`: the two joins and no
    others, 007 unplaced, both penetrations 0, both tight contacts ≥ 0.27, the two seams within
    20 % of 20.3 t and 10.7 t. Its `evaluate.py` columns read `—`, which is a missing ground truth
-   and not a missing measurement. `mixed_ABG` carries §10.3's baseline instead of a gate.
+   and not a missing measurement. Under `--tiers off` `mixed_ABG` carries §10.3's baseline instead
+   of a gate.
+
+   **Audit §E's two roadmap rows are stated on the tier they are about** (task G, defects V8-D2 and
+   V8-D3), because a row restated only in a note is not a row a run can fail:
+
+   * *Step 10, `mixed_ABG`, under `--tiers on`.* The **prohibition** — cross-object joins 0 and
+     group purity 1.000 **in the confirmed tier** — is gated at every seed, which is what roadmap
+     item 4 was built to deliver. The **recall** half, "correct joins ≥ 12", is gated over the
+     **confirmed and probable bands together**: the audit's 12 counts the joins R §6.5's own
+     assembly used before a tier existed, the tier adds no join R §6.5 refused, and the two upper
+     bands together are that same population — and the list a conservator works from. Measured on
+     this tree: 21 / 19 / 17 / 19 / 19 at seeds 0–4. Correct **confirmed** joins are *reported* per
+     seed (8 / 7 / 7 / 7 / 9) and deliberately not gated: a floor fitted to what the tier reaches
+     today would fail every future step that trades a confirmed join for a safer rule, and would
+     pass every step that loosens one.
+   * *Step 8, the terracotta.* "Both joins confirmed at seeds 0–4" is **ten** (seed, join) slots and
+     the gate asks for ten. This tree reaches **nine**: at seed 4 the pair 021–094 comes back from
+     R §5.7 as a single placement, so the margin arm has nothing to beat, and a three-fragment chain
+     gives the support arm no second path. The gate used to ask for nine, a constant fitted to that
+     measurement — a gate that cannot fail. It now fails, names the missing slot, and says that the
+     failure is a *recall* row and not a prohibition: nothing outside R §13's two is ever confirmed
+     and both are at least probable at every seed. Closing it needs an algorithm change (R §5.7's
+     `keep`, or evidence the margin arm does not have); task G measured the two rules that suggest
+     themselves and both cost false joins — `notes/2026-09-10-g-tiers-findings.md`.
 
    The script is Python, next to the metric it calls, and not a subcommand of the binary: a Rust
    twin would have to reimplement `evaluate.py`'s buckets, its centroid-referenced pose error and

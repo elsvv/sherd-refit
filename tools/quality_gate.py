@@ -61,6 +61,25 @@ merging two groups is still scored.  ``zero false joins in the confirmed tier``
 is a prohibition on that set and it is gated on all eight collections,
 ``mixed_ABG`` included.
 
+Audit §E's two roadmap rows, stated on the tier they are about
+---------------------------------------------------------------
+Task G (V8-D2, V8-D3) restated the two rows the audit wrote before the tier
+existed, so that each is a check a run can fail rather than a sentence in a note:
+
+* **step 10, ``mixed_ABG``** -- the *prohibition* is cross-object joins 0 and
+  group purity 1.000 **in the confirmed tier**, gated at every seed.  The
+  *recall* half, "correct joins >= 12", is gated over the **confirmed and
+  probable bands together**: the audit's 12 counted the joins R §6.5's assembly
+  used before there was a tier, the tier finds no join R §6.5 did not accept, and
+  the two upper bands together are both that same population and the list a
+  conservator actually works from.  Correct **confirmed** joins are reported per
+  seed and are deliberately not gated -- a number fixed at what the tier happens
+  to reach today makes the tier unimprovable in either direction.
+* **step 8, the terracotta** -- "the two joins confirmed" at seeds 0-4 is ten
+  (seed, join) slots, and the gate asks for ten.  On this tree it reaches nine;
+  the run says which slot is short and why it is a recall row rather than a
+  prohibition.  See ``TERRACOTTA_CONFIRMED_SLOTS``.
+
 ``--tiers off`` runs the binary the way it ran before the tier existed and
 prints the table this script has always printed; that is the mode in which
 R §13's bands are a comparison, because R §13's own draws are the reference's
@@ -142,25 +161,48 @@ BANDS = {
                   note="at most two joins used, every one a wrong-pose join on an adjacent pair"),
     "pot_H": dict(acc=(0.273, 0.364), prec=(0.333, 0.500), pure=True),
     "synthetic_20": dict(acc=(0.85, 0.95), prec=(1.0, 1.0), pure=True),
-    # D §10.3, decision 2026-09-08: the one mixed development set is roadmap item 4's baseline,
-    # not a phase gate.  Its numbers are reported and never fail the run.
-    "mixed_ABG": dict(acc=None, prec=None, pure=False,
+    # D §10.3, decision 2026-09-08: under ``--tiers off`` the one mixed development set is roadmap
+    # item 4's baseline and nothing it does fails the run.  Under ``--tiers on`` audit §E's step-10
+    # row applies and is stated here on the tier it is about (task G, V8-D2):
+    #
+    #   pure_tiers   -- cross-object joins 0 and group purity 1.000, *in the confirmed tier*.  This
+    #                   is the prohibition: separating three pots is what item 4 was built for, and
+    #                   it is the half of the row that must never regress.
+    #   recall_floor -- correct joins >= 12 over **confirmed and probable together**.  The audit's
+    #                   12 is the count of joins R §6.5's own assembly *used* before the tier
+    #                   existed (D §10.3's baseline row); the tier does not add joins, it sorts the
+    #                   ones R §6.5 accepted into bands, so the quantity that can be held against
+    #                   that baseline is the two upper bands together -- which is also the list a
+    #                   conservator is handed.  Confirmed-correct alone is *reported* per seed and
+    #                   never gated: fixing a number the tier's own strictness moves would make the
+    #                   tier unimprovable.
+    "mixed_ABG": dict(acc=None, prec=None, pure=False, pure_tiers=True, recall_floor=12,
                       note="roadmap item 4's baseline (D §10.3), not a gate"),
 }
 
 EPS = 5e-3  # the bands above are quoted to three digits
 
+# A gate reason that is a *recall* row rather than a prohibition, marked so the run's last line can
+# say which kind of failure it is.  A museum cares about the difference: a breached prohibition is a
+# join the tool asserts and the pot denies; an unmet recall row is a true join the tool declined to
+# assert, which is still on the conservator's probable list with the reason printed beside it.
+RECALL = "recall row -- "
+
 # R §13's terracotta decision row, as the pairs it names.  The museum's four scans have no
 # staged ground truth, so a confirmed join on any other pair of that collection is a false one.
 TERRACOTTA_JOINS = {("021", "094"), ("094", "104")}
 
-# M1 §5.6, measured before this gate was written: the chosen tier confirms both terracotta joins
-# at seeds 0-3 and one of the two at seed 4, where the pair's search returned a single placement
-# and the margin arm therefore has nothing to beat.  The collection is a three-fragment chain, so
-# the support arm can never fire on it.  Audit §E's step-8 gate "terracotta's two joins confirmed"
-# is therefore stated as nine of the ten (seed, join) slots, with the two joins at least *probable*
-# at every seed and nothing else ever confirmed.
-TERRACOTTA_CONFIRMED_SLOTS = 9
+# Audit §E's step-8 gate, "terracotta's two joins confirmed", over the five seeds: both joins at
+# every seed is **ten** (seed, join) slots.  It is stated at ten and not at the number this tree
+# reaches (task G, V8-D3).  The gate used to read nine, which is what M1 §5.6 measured -- at seed 4
+# the pair 021-094 comes back from R §5.7 as a single placement, so the margin arm has nothing to
+# beat, and a three-fragment chain gives the support arm no second path either.  A constant fitted
+# to the observed answer cannot fail, and a gate that cannot fail is not a gate: it would record
+# the brief's row as met while the row is unmet, and it could not tell nine-at-seed-4 from
+# nine-at-some-other-seed.  So the number is the brief's, the run fails on it, and the failure is
+# printed with the slots that are missing.  Task G measured what it would take to close it and
+# found no rule that does not cost a false join -- see notes/2026-09-10-g-tiers-findings.md.
+TERRACOTTA_CONFIRMED_SLOTS = 2 * 5
 
 
 def sh(cmd, cwd=ROOT):
@@ -192,28 +234,40 @@ def representatives(cands):
 
 
 def tier_score(name, gt_dir, rep, tr, cen_cache):
-    """Every confirmed pair of one run, classified by evaluate.py's rule on its **own** pose.
+    """Every confirmed and every probable pair of one run, classified by evaluate.py's rule.
 
-    Returns (counts, recall, the false ones themselves).  The confirmed tier is a statement about
-    joins and not about the assembly, so a confirmed join R §8 refused is scored here all the same
-    -- which is the whole point of gating the tier rather than the placement.
+    A candidate is scored on its **own** pose rather than on the assembly, so a confirmed join
+    R §8 refused is scored here all the same -- which is the whole point of gating the tier rather
+    than the placement.  Returns (confirmed counts, probable counts, the collection's adjacent
+    pairs, the false confirmed ones themselves).
+
+    The probable band is counted for one reason: audit §E's step-10 recall row is a count of
+    *joins found*, and the tier does not find joins -- it sorts the ones R §6.5 accepted into
+    bands.  Confirmed and probable together are what R §6.5 accepted, and they are what a
+    conservator is handed (V8-D2).
     """
     cands = representatives(rep.get("candidates", []))
-    confirmed = [c for c in cands if c.get("tier") == "confirmed"]
-    probable = [c for c in cands if c.get("tier") == "probable"]
-    counts = dict(confirmed=len(confirmed), probable=len(probable),
-                  correct=0, wrong_pose=0, non_adjacent=0, cross_object=0, unscorable=0)
+    bands = dict(confirmed=[c for c in cands if c.get("tier") == "confirmed"],
+                 probable=[c for c in cands if c.get("tier") == "probable"])
+
+    def empty(band):
+        return dict(band=len(bands[band]), correct=0, wrong_pose=0, non_adjacent=0,
+                    cross_object=0, unscorable=0)
+
+    conf, prob = empty("confirmed"), empty("probable")
     bad = []
 
     if gt_dir is None:                                  # the terracotta: R §13's decision row
-        for c in confirmed:
-            key = tuple(sorted((digits(c["a"]), digits(c["b"]))))
-            if key in TERRACOTTA_JOINS:
-                counts["correct"] += 1
-            else:
-                counts["non_adjacent"] += 1
-                bad.append((c["a"], c["b"], "non_adjacent"))
-        return counts, len(TERRACOTTA_JOINS), bad
+        for counts, band in ((conf, "confirmed"), (prob, "probable")):
+            for c in bands[band]:
+                key = tuple(sorted((digits(c["a"]), digits(c["b"]))))
+                if key in TERRACOTTA_JOINS:
+                    counts["correct"] += 1
+                else:
+                    counts["non_adjacent"] += 1
+                    if band == "confirmed":
+                        bad.append((c["a"], c["b"], "non_adjacent"))
+        return conf, prob, len(TERRACOTTA_JOINS), bad
 
     with open(os.path.join(ROOT, gt_dir, "ground_truth.json")) as f:
         gt = json.load(f)
@@ -229,27 +283,28 @@ def tier_score(name, gt_dir, rep, tr, cen_cache):
     present = set(names)
     gt_pairs = {p for p in adjacency if p[0] in present and p[1] in present}
 
-    for c in confirmed:
-        a, b = c["a"], c["b"]
-        key = tuple(sorted((a, b)))
-        if object_of.get(a, "?") != object_of.get(b, "?"):
-            verdict = "cross_object"
-        elif a in unknown or b in unknown or a not in gt_poses or b not in gt_poses:
-            verdict = "unscorable"
-        else:
-            M_est = np.asarray(c["T"])
-            M_gt = ev_mod.rel(gt_poses[key[0]], gt_poses[key[1]])
-            M = M_est if (a, b) == key else np.linalg.inv(M_est)
-            deg, d_cen, d_org = ev_mod.pose_error(M, M_gt, cen.get(key[1]))
-            d = d_cen if cen else d_org
-            if key not in adjacency:
-                verdict = "non_adjacent"
+    for counts, band in ((conf, "confirmed"), (prob, "probable")):
+        for c in bands[band]:
+            a, b = c["a"], c["b"]
+            key = tuple(sorted((a, b)))
+            if object_of.get(a, "?") != object_of.get(b, "?"):
+                verdict = "cross_object"
+            elif a in unknown or b in unknown or a not in gt_poses or b not in gt_poses:
+                verdict = "unscorable"
             else:
-                verdict = ("correct" if deg <= 5.0 and d <= 0.5 * thickness else "wrong_pose")
-        counts[verdict] += 1
-        if verdict in ("wrong_pose", "non_adjacent", "cross_object"):
-            bad.append((a, b, verdict))
-    return counts, len(gt_pairs), bad
+                M_est = np.asarray(c["T"])
+                M_gt = ev_mod.rel(gt_poses[key[0]], gt_poses[key[1]])
+                M = M_est if (a, b) == key else np.linalg.inv(M_est)
+                deg, d_cen, d_org = ev_mod.pose_error(M, M_gt, cen.get(key[1]))
+                d = d_cen if cen else d_org
+                if key not in adjacency:
+                    verdict = "non_adjacent"
+                else:
+                    verdict = ("correct" if deg <= 5.0 and d <= 0.5 * thickness else "wrong_pose")
+            counts[verdict] += 1
+            if band == "confirmed" and verdict in ("wrong_pose", "non_adjacent", "cross_object"):
+                bad.append((a, b, verdict))
+    return conf, prob, len(gt_pairs), bad
 
 
 def terracotta_gate(rep, tr, tiers=False):
@@ -313,14 +368,21 @@ def score(name, gt_dir, work, cen_cache, tiers=False):
                    demoted=len(obj.get("demotions", [])),
                    consensus_rejects=sum(len(o.get("rejects", [])) for o in obj["objects"]))
     if tiers:
-        counts, gt_pairs, bad = tier_score(name, gt_dir, rep, tr, cen_cache)
-        row.update(tiers=True, confirmed=counts["confirmed"], probable=counts["probable"],
-                   conf_correct=counts["correct"], conf_wrong_pose=counts["wrong_pose"],
-                   conf_non_adjacent=counts["non_adjacent"],
-                   conf_cross_object=counts["cross_object"],
-                   conf_unscorable=counts["unscorable"],
+        conf, prob, gt_pairs, bad = tier_score(name, gt_dir, rep, tr, cen_cache)
+        row.update(tiers=True, confirmed=conf["band"], probable=prob["band"],
+                   conf_correct=conf["correct"], conf_wrong_pose=conf["wrong_pose"],
+                   conf_non_adjacent=conf["non_adjacent"],
+                   conf_cross_object=conf["cross_object"],
+                   conf_unscorable=conf["unscorable"],
+                   prob_correct=prob["correct"], prob_wrong_pose=prob["wrong_pose"],
+                   prob_non_adjacent=prob["non_adjacent"],
+                   prob_cross_object=prob["cross_object"],
+                   prob_unscorable=prob["unscorable"],
+                   found_correct=conf["correct"] + prob["correct"],
                    conf_gt_pairs=gt_pairs,
-                   conf_recall=(counts["correct"] / gt_pairs) if gt_pairs else None,
+                   conf_recall=(conf["correct"] / gt_pairs) if gt_pairs else None,
+                   found_recall=((conf["correct"] + prob["correct"]) / gt_pairs)
+                   if gt_pairs else None,
                    conf_false=[list(x) for x in bad],
                    confirmed_pairs=sorted(
                        tuple(sorted((digits(c["a"]), digits(c["b"]))))
@@ -367,23 +429,46 @@ def tier_verdict(name, rows):
                        % (r["seed"], false, "" if false == 1 else "s",
                           "; ".join("%s-%s %s" % tuple(x) for x in r["conf_false"])))
     if name == "terracotta":
-        slots = sum(1 for r in rows for p in TERRACOTTA_JOINS if p in
-                    {tuple(x) for x in r["confirmed_pairs"]})
+        slots, short = 0, []
         for r in rows:
-            known = {tuple(x) for x in r["confirmed_pairs"]} | {tuple(x) for x in r["probable_pairs"]}
+            confirmed = {tuple(x) for x in r["confirmed_pairs"]}
+            known = confirmed | {tuple(x) for x in r["probable_pairs"]}
+            slots += len(TERRACOTTA_JOINS & confirmed)
+            short += ["%s at seed %d" % ("-".join(p), r["seed"])
+                      for p in sorted(TERRACOTTA_JOINS - confirmed)]
             missing = sorted(TERRACOTTA_JOINS - known)
             if missing:
                 bad.append("seed %d: %s not even probable" % (r["seed"], missing))
         if slots < TERRACOTTA_CONFIRMED_SLOTS:
-            bad.append("%d of 10 (seed, join) slots confirmed, %d required (M1 §5.6)"
-                       % (slots, TERRACOTTA_CONFIRMED_SLOTS))
-        notes.append("R §13's two joins confirmed in %d of the 10 (seed, join) slots and probable "
-                     "in the rest." % slots)
+            bad.append("%saudit §E step 8 (\"terracotta's two joins confirmed\"): %d of the %d "
+                       "(seed, join) slots confirmed -- %s only probable. Nothing outside "
+                       "R §13's two is confirmed at any seed and both are at least probable at "
+                       "every seed, so no prohibition is breached: what is unmet is the audit's "
+                       "recall row."
+                       % (RECALL, slots, TERRACOTTA_CONFIRMED_SLOTS, ", ".join(short)))
+        notes.append("R §13's two joins confirmed in %d of the %d (seed, join) slots and probable "
+                     "in the rest." % (slots, TERRACOTTA_CONFIRMED_SLOTS))
+    # Audit §E's step-10 recall row, on the sets that have one (V8-D2).  Correct confirmed joins
+    # are *reported* per seed on every set, because that is the number a reader asks for and the
+    # number a fitted gate would freeze.
+    notes.append("Correct confirmed joins per seed: %s."
+                 % "/".join(str(r["conf_correct"]) for r in rows))
+    floor = BANDS[name].get("recall_floor")
+    if floor is not None:
+        notes.append("Correct confirmed + probable joins per seed: %s, against the floor of %d."
+                     % ("/".join(str(r["found_correct"]) for r in rows), floor))
+        for r in rows:
+            if r["found_correct"] < floor:
+                bad.append("%sseed %d: %d correct joins in the confirmed and probable bands "
+                           "together, below audit §E step 10's floor of %d (D §10.3's baseline)"
+                           % (RECALL, r["seed"], r["found_correct"], floor))
     recalls = [r["conf_recall"] for r in rows if r["conf_recall"] is not None]
     if recalls:
-        notes.append("Confirmed recall %.3f-%.3f of the ground truth's adjacent pairs; "
+        found = [r["found_recall"] for r in rows]
+        notes.append("Confirmed recall %.3f-%.3f of the ground truth's adjacent pairs "
+                     "(%.3f-%.3f with the probable band); "
                      "%d-%d confirmed and %d-%d probable joins per seed."
-                     % (min(recalls), max(recalls),
+                     % (min(recalls), max(recalls), min(found), max(found),
                         min(r["confirmed"] for r in rows), max(r["confirmed"] for r in rows),
                         min(r["probable"] for r in rows), max(r["probable"] for r in rows)))
     else:
@@ -394,7 +479,13 @@ def tier_verdict(name, rows):
 
 
 def verdict(name, rows):
-    """R §13 over one set's seeds: (gate, [gate reasons], band, [band notes])."""
+    """R §13 over one set's seeds.
+
+    Returns ``(gate, [what to print], band, [band notes], [the failures themselves])``.  The last
+    element is kept apart from the fourth because the printed lines carry the tier's notes as well
+    as its failures, and the run's last line has to tell a breached prohibition from an unmet
+    recall row (:data:`RECALL`).
+    """
     b = BANDS[name]
     gate_bad, band_bad = [], []
     tiers = rows[0].get("tiers", False)
@@ -406,14 +497,21 @@ def verdict(name, rows):
             if not r["decision_ok"]:
                 gate_bad.append("seed %d: %s" % (r["seed"], "; ".join(r["decision_fail"])))
         detail = "; ".join("seed %d: %s" % (r["seed"], r["decision"]) for r in rows)
-        ok = ["Zero false joins in the confirmed tier."] + tier_notes if tiers else \
-             ["R §13's two joins at every seed."]
-        return (("FAIL" if gate_bad else "pass"), gate_bad or ok, "n/a", [detail])
+        ok = (["Zero false joins in the confirmed tier."] if tiers else
+              ["R §13's two joins at every seed."])
+        # The notes are printed whether the row passes or fails: what the tier reached is the
+        # number a reader of a failing row needs most (V8-D3).
+        return (("FAIL" if gate_bad else "pass"), (gate_bad or ok) + tier_notes, "n/a", [detail],
+                gate_bad)
 
     accs = [r["frag_acc"] for r in rows]
     precs = [r["precision"] for r in rows]
 
-    if b["pure"]:                                   # R §13's last row, the prohibition
+    # R §13's last row on the seven single-object sets, and -- under `--tiers on` -- audit §E's
+    # step-10 prohibition on `mixed_ABG`, which is the same two numbers read off the confirmed
+    # tier's own assembly (V8-D2).
+    pure = b["pure"] or (tiers and b.get("pure_tiers", False))
+    if pure:                                        # R §13's last row, the prohibition
         for r in rows:
             if r["cross_object"]:
                 gate_bad.append("seed %d: %d cross-object joins" % (r["seed"], r["cross_object"]))
@@ -446,8 +544,11 @@ def verdict(name, rows):
     checked = []
     if tiers:
         checked.append("zero false joins in the confirmed tier")
-    if b["pure"]:
+    if pure:
         checked.append("cross-object 0 and group purity 1.000")
+    if tiers and b.get("recall_floor") is not None:
+        checked.append("%d correct joins in the confirmed and probable bands together"
+                       % b["recall_floor"])
     if b.get("zero_acc"):
         checked.append("fragment accuracy 0 %")
     if b.get("wrong_pose_only"):
@@ -475,7 +576,7 @@ def verdict(name, rows):
     if tiers:
         detail = [span, "R §13's band is the reference's accepted-tier draws and is not compared "
                         "against a confirmed-tier assembly."]
-    return (gate, gate_bad or ([ok] + tier_notes), band, detail)
+    return (gate, (gate_bad or [ok]) + tier_notes, band, detail, gate_bad)
 
 
 def fmt(x, spec="%.3f"):
@@ -506,14 +607,16 @@ def markdown(meta, rows, verdicts):
                  "itself**: every confirmed pair of the run, classified by `evaluate.py`'s rule "
                  "applied to that candidate's *own* pose, so a confirmed join R §8 refused is "
                  "scored too. `conf recall` is confirmed-correct over the ground truth's adjacent "
-                 "pairs present in the collection.")
+                 "pairs present in the collection, and `correct found` is the same classification "
+                 "over the confirmed **and** probable bands together -- what R §6.5 accepted, and "
+                 "the list a conservator works from (audit §E step 10, V8-D2).")
     L.append("")
     head = ("| set | seed | frag acc | precision | correct | wrong pose | non-adj | cross-obj | "
             "purity | joins | wall s |")
     rule = "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
     if tiers:
-        head += " confirmed | conf correct | conf false | conf recall | probable |"
-        rule += "---:|---:|---:|---:|---:|"
+        head += " confirmed | conf correct | conf false | conf recall | probable | correct found |"
+        rule += "---:|---:|---:|---:|---:|---:|"
     if objects:
         head += " merges | demoted | outside |"
         rule += "---:|---:|---:|"
@@ -530,8 +633,9 @@ def markdown(meta, rows, verdicts):
                 r["set"], r["seed"], r["joins_used"], r["wall_s"])
         if tiers:
             false = r["conf_wrong_pose"] + r["conf_non_adjacent"] + r["conf_cross_object"]
-            line += " %d | %d | %d | %s | %d |" % (
-                r["confirmed"], r["conf_correct"], false, fmt(r["conf_recall"]), r["probable"])
+            line += " %d | %d | %d | %s | %d | %d |" % (
+                r["confirmed"], r["conf_correct"], false, fmt(r["conf_recall"]), r["probable"],
+                r["found_correct"])
         if objects:
             line += " %d | %d | %d |" % (
                 r["merges"], r["demoted"], r["consensus_rejects"])
@@ -551,13 +655,17 @@ def markdown(meta, rows, verdicts):
              "failure of one exits non-zero.%s **Band** compares the port's five draws of fragment "
              "accuracy and precision with the *reference's* five draws, which is a comparison and "
              "not a bound (task H4's note)%s."
-             % (" Under `--tiers on` audit §D.1's own prohibition joins them on all eight sets: "
-                "**zero wrong-pose, non-adjacent and cross-object joins in the confirmed tier**."
+             % (" Under `--tiers on` audit §D.1's own prohibition joins them on all eight sets "
+                "(**zero wrong-pose, non-adjacent and cross-object joins in the confirmed tier**), "
+                "and audit §E's two roadmap rows join them where they apply: `mixed_ABG`'s "
+                "cross-object 0 and purity 1.000 in the confirmed tier with a floor of 12 correct "
+                "joins over the confirmed **and** probable bands, and the terracotta's ten "
+                "(seed, join) slots."
                 if tiers else "",
                 "; under `--tiers on` it is not made at all, because the reference's draws are "
                 "accepted-tier assemblies and these are confirmed-tier ones" if tiers else ""))
     L.append("")
-    for name, (g, why, band, span) in verdicts.items():
+    for name, (g, why, band, span, _) in verdicts.items():
         L.append("* **`%s` \u2014 gate %s, band %s.** %s %s" % (name, g, band,
                                                                 " ".join(why), " ".join(span)))
     L.append("")
@@ -655,26 +763,38 @@ def finish(out, meta, rows, names):
         f.write(md)
     with open(os.path.join(out, "quality.json"), "w") as f:
         json.dump(dict(meta=meta, rows=rows,
-                       verdicts={k: dict(gate=g, gate_detail=why, band=b, band_detail=span)
-                                 for k, (g, why, b, span) in verdicts.items()}),
+                       verdicts={k: dict(gate=g, gate_detail=why, band=b, band_detail=span,
+                                         failures=fails)
+                                 for k, (g, why, b, span, fails) in verdicts.items()}),
                   f, indent=1)
     print()
     print(md)
-    failed = [k for k, (g, _, _, _) in verdicts.items() if g == "FAIL"]
-    outside = [k for k, (_, _, b, _) in verdicts.items() if b == "outside"]
+    failed = [k for k, v in verdicts.items() if v[0] == "FAIL"]
+    outside = [k for k, v in verdicts.items() if v[2] == "outside"]
     print("total wall %.1f s (%.1f min); %s" % (
         meta["wall_total_s"], meta["wall_total_s"] / 60.0,
         "FAILED: " + ", ".join(failed) if failed else
         "every set holds R §13's prohibitions" +
         ("" if not outside else "; outside the reference's own band: " + ", ".join(outside))))
+    if failed:
+        fails = [(k, line) for k in failed for line in verdicts[k][4]]
+        recall_only = all(line.startswith(RECALL) for _, line in fails)
+        for k, line in fails:
+            print("  %-13s %s" % (k, line))
+        print("  %s" % ("no prohibition was breached: every failure above is a recall row -- a "
+                        "true join the tier declined to assert, on the probable list with its "
+                        "reason" if recall_only else
+                        "at least one failure above is a prohibition, not a recall row"))
     if rows and rows[0].get("tiers"):
         false = sum(r["conf_wrong_pose"] + r["conf_non_adjacent"] + r["conf_cross_object"]
                     for r in rows)
         good = sum(r["conf_correct"] for r in rows)
+        found = sum(r["found_correct"] for r in rows)
         pairs = sum(r["conf_gt_pairs"] for r in rows)
         print("confirmed tier over %d runs: %d correct, %d false, %.1f %% of the %d "
-              "ground-truth adjacent pairs"
-              % (len(rows), good, false, 100.0 * good / pairs if pairs else 0.0, pairs))
+              "ground-truth adjacent pairs; with the probable band %d correct, %.1f %%"
+              % (len(rows), good, false, 100.0 * good / pairs if pairs else 0.0, pairs,
+                 found, 100.0 * found / pairs if pairs else 0.0))
     return 1 if failed else 0
 
 

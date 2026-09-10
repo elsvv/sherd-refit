@@ -1,6 +1,6 @@
 # A2 — the second acceptance: task S3's rule on the two large collections
 
-**Date:** 2026-09-11. **Tree:** branch `rust-core`, `1e34e79` (task S3) → `A2.1`…`A2.4`. **Machine:**
+**Date:** 2026-09-11. **Tree:** branch `rust-core`, `1e34e79` (task S3) → `A2.1`…`A2.6`. **Machine:**
 Apple M2 Pro, 10 cores (6P + 4E), 16 GB, macOS 24.6.0, rustc 1.97.0, `--release`, Python 3.12 in
 `.venv` (open3d 0.19.0, numpy 2.5.2, scipy 1.18.1). This is the second time this project has matched
 a collection above 27 fragments: audit §E's step 12 was task A1's, and task S3 replaced the rule
@@ -634,4 +634,5 @@ on — the same discipline A1 §3.5 states.
 stashed, and nothing was sent anywhere.
 
 **Commits.** `A2.1` D §10.3, §10.4, §11 and §12; `A2.2` the README's museum sections; `A2.3` a
-one-word correction to step 12a's run count; `A2.4` this note.
+one-word correction to step 12a's run count; `A2.4` this note; `A2.5` the cache version the object
+features live in, which the README still gave as 6 and which task S2 moved to 7; `A2.6` this list.

@@ -353,19 +353,6 @@ fn report_rows(collection: &Collection, report: &mut StageReport) -> Result<()> 
     markdown_row(collection, report, &typed)
 }
 
-/// R §11.3's `report.md`, rendered by the port from the reference's own `report.json` and diffed
-/// against the reference's own file **line for line**.
-///
-/// The dump's `outputs/report.md` is that file: `tools/dump_outputs.py` renders it with the
-/// reference's own `report.write_report` over the same `report.json` this row reads, so what is
-/// compared here is two renderings of one set of numbers — every heading, every column, every
-/// rounding, R §11.3's legend line with its Python floats, the "not assembled" line, the rejection
-/// sentences and the order of the last table's pairs.
-///
-/// The `## Timing` block is where the comparison stops, on both sides. It is wall-clock seconds,
-/// two runs of one input disagree on them, and the dump carries them as `null`
-/// (`pipeline._dump_outputs`), so there is nothing there to compare. The *order* of that block is
-/// R §11.2's and is checked in `sherd-core`'s own tests instead (V4-D4).
 /// The reference's groups as [`FragId`] lists, or `None` when one of them names a fragment the
 /// manifest does not have.
 fn group_ids(groups: &[Vec<String>], id: &impl Fn(&str) -> Option<usize>) -> Option<Vec<Vec<u32>>> {
@@ -380,6 +367,19 @@ fn group_ids(groups: &[Vec<String>], id: &impl Fn(&str) -> Option<usize>) -> Opt
         .collect()
 }
 
+/// R §11.3's `report.md`, rendered by the port from the reference's own `report.json` and diffed
+/// against the reference's own file **line for line**.
+///
+/// The dump's `outputs/report.md` is that file: `tools/dump_outputs.py` renders it with the
+/// reference's own `report.write_report` over the same `report.json` this row reads, so what is
+/// compared here is two renderings of one set of numbers — every heading, every column, every
+/// rounding, R §11.3's legend line with its Python floats, the "not assembled" line, the rejection
+/// sentences and the order of the last table's pairs.
+///
+/// The `## Timing` block is where the comparison stops, on both sides. It is wall-clock seconds,
+/// two runs of one input disagree on them, and the dump carries them as `null`
+/// (`pipeline._dump_outputs`), so there is nothing there to compare. The *order* of that block is
+/// R §11.2's and is checked in `sherd-core`'s own tests instead (V4-D4).
 fn markdown_row(
     collection: &Collection,
     report: &mut StageReport,

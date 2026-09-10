@@ -198,7 +198,8 @@ fn two_objects_stay_apart_and_the_odd_fragment_is_a_singleton() {
 }
 
 /// **R §8 never puts a join between two of its own groups**, so `Rejection::MergesGroups` — and
-/// with it audit §D.2 (c)'s merge, which replaces that rejection — is unreachable.
+/// with it audit §D.2 (c)'s merge, which replaces that rejection — is not reached: argued below
+/// from R §8's own rule, and sampled at four thousand random graphs (V8-D5).
 ///
 /// Task O1 measured the branch firing **zero times** over the eight development sets at seeds 0–4
 /// and went looking for the reason. It is R §8's own greedy rule: a group grows until no remaining
@@ -208,10 +209,12 @@ fn two_objects_stay_apart_and_the_odd_fragment_is_a_singleton() {
 /// group rather than spanning two. A join whose placement R §8 refuses is removed and cannot span
 /// anything either. The groups are the connected components of the joins R §8 did not refuse.
 ///
-/// This is the measurement rather than the argument: four thousand random graphs of six fragments,
-/// with poses that make roughly a third of the placements disagree, and **not one** of them ever
-/// reaches the branch. The property asserted is the stronger one — no accepted join of the list
-/// ends with its two fragments in different groups.
+/// This is the measurement beside the argument, and it is a sample and not a proof: four thousand
+/// random graphs of **eight** fragments, with poses that make roughly a third of the placements
+/// disagree, and **not one** of them ever reaches the branch. What the argument establishes is
+/// that no *reachable* state has an accepted join spanning two groups; what four thousand graphs
+/// establish is that this shape of input does not find a hole in it. The property asserted is the
+/// stronger one — no accepted join of the list ends with its two fragments in different groups.
 #[test]
 fn r_8s_groups_are_components_so_no_join_ever_spans_two_of_them() {
     const N: u32 = 8;

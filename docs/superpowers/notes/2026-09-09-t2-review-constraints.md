@@ -293,7 +293,9 @@ identity trees (1.2 GB each) and `mixed_ABG`'s 56 MB of PNGs were compared, meas
 throughout and ended above 7 GiB. The baseline worktree under the scratchpad is removed with
 `git worktree remove`.
 
-Nothing above 24 fragments was matched by this task's own runs; the quality gate's `mixed_ABG` (27)
-is the largest collection, and it was matched by the gate exactly as T1 ran it. The branch was never
+Nothing above 24 fragments was matched by this task's own runs; the quality gate's `mixed_ABG` (24
+meshes, three pots) is the largest collection, and it was matched by the gate exactly as T1 ran it.
+*(Corrected in task G, V8-D6: this sentence used to call the same set 27 fragments in its second
+half. `ls input/sfspp/mixed_ABG/*.obj` is 24.)* The branch was never
 switched, and `sherd_refit/` was not touched — the Python is the frozen parity oracle, and both of
 this step's behaviours are algorithm changes, which since `f4466d6` are made in `crates/` alone.

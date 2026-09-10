@@ -336,6 +336,18 @@ struct RunArgs {
     /// confirms it; 0 makes that arm always true, which disables the disjunction.
     #[arg(long, default_value_t = Thresholds::default().min_support)]
     tier_support: u32,
+    /// Which confirmation rule the four flags below default to: `s3` — the rule task S3's
+    /// evidence table chose, and the one every run makes today — or `m1`, the rule task M1 chose
+    /// and every run made before it.
+    ///
+    /// The difference is the **margin arm**. M1's reads R §5.7's returned list and asks only for a
+    /// factor of two. S3's reads the pair's *best* second placement (`--tier-margin-rival wide`),
+    /// refuses one closer than five wall thicknesses (`--tier-rival-moved`) because a rival that
+    /// near is the same break slid along itself, and wants an independent re-search of the pair to
+    /// land on the placement as well (`--tier-research`). The support arm and the strict half are
+    /// the same in both. Each of the four can still be set on its own, and overrides the preset.
+    #[arg(long, default_value_t = TierRule::S3, value_name = "s3|m1")]
+    tier_rule: TierRule,
     /// Which second placement `--tier-margin` divides by: `kept` — R §5.7's returned list, the
     /// margin as M1 measured it — or `wide` (task S3).
     ///
@@ -344,12 +356,20 @@ struct RunArgs {
     /// full R §5.6 list the run computed and then threw away, and where that too makes one
     /// placement it refines the best stage-1 pose that is a second one and scores it by R §6. The
     /// pair's own returned candidates are the same either way.
-    #[arg(long, default_value_t = Rival::default(), value_name = "kept|wide")]
-    tier_margin_rival: Rival,
-    /// Independent re-searches of the pair that must land on the placement, when the re-search is
-    /// the arm that confirms it; 0 switches that arm off (task S3).
-    #[arg(long, default_value_t = Thresholds::default().min_research, value_name = "N")]
-    tier_research: u32,
+    #[arg(long, value_name = "kept|wide")]
+    tier_margin_rival: Option<Rival>,
+    /// `t`; how far the second placement must be from the candidate's before beating it counts as
+    /// evidence (task S3).
+    ///
+    /// 1 means every second placement counts, which is M1's reading. 5 is the shipped one: a rival
+    /// two or three walls away is the same seam at another offset, and outscoring a slide says
+    /// nothing about which offset is right.
+    #[arg(long, value_name = "T")]
+    tier_rival_moved: Option<f64>,
+    /// Independent re-searches of the pair that must land on the placement before the **margin**
+    /// arm confirms it; 0 lets the margin stand alone, which is M1's rule (task S3).
+    #[arg(long, value_name = "N")]
+    tier_research: Option<u32>,
     /// How many independent re-searches a run performs for each accepted pair (task S3).
     ///
     /// A re-search is that pair's whole R §5–§6 search run again on a collection whose R §3.5
@@ -357,12 +377,8 @@ struct RunArgs {
     /// draws — and what is recorded is whether its best accepted candidate puts the sherd where
     /// this one does. The cost is one pair match per accepted pair per seed; at most 2, whose
     /// redrawn collections the stability probe has already built.
-    #[arg(long, default_value_t = Thresholds::default().research_seeds, value_name = "N")]
-    resample_seeds: u32,
-    /// Margin a confirmed join must also clear before the re-search arm confirms it; off by
-    /// default, which lets the agreement stand alone (task S3).
-    #[arg(long, value_name = "X")]
-    tier_research_margin: Option<f64>,
+    #[arg(long, value_name = "N")]
+    resample_seeds: Option<u32>,
     /// Degrees; worst rotation over the pose's twelve one-ULP neighbours a confirmed join may
     /// show. Off by default: M1 measured the whole range at 1.6e-14 to 4.1e-7 degrees, so there is
     /// no threshold in it and the number is reported instead.
@@ -480,6 +496,10 @@ impl RunArgs {
     /// `--second-pass-candidates → second_pass_stage2`, and every other flag to the field of the
     /// same name. Everything R §1.1 has no flag for keeps its default.
     fn params(&self) -> Params {
+        // Task S3: the four flags the two confirmation rules disagree about default to the
+        // preset's values and are read one at a time, so `--tier-rule m1 --tier-research 1` is
+        // M1's rule with one of S3's conjuncts and not a fifth rule nobody measured.
+        let preset = self.tier_rule.preset();
         Params {
             stage1: self.stage1,
             stage2: self.candidates,
@@ -514,10 +534,10 @@ impl RunArgs {
                     max_slide_t: self.tier_max_slide,
                     min_margin: self.tier_margin,
                     min_support: self.tier_support,
-                    margin_rival: self.tier_margin_rival.into(),
-                    min_research: self.tier_research,
-                    research_seeds: self.resample_seeds,
-                    research_min_margin: self.tier_research_margin,
+                    margin_rival: self.tier_margin_rival.map_or(preset.margin_rival, Into::into),
+                    min_rival_t: self.tier_rival_moved.unwrap_or(preset.min_rival_t),
+                    min_research: self.tier_research.unwrap_or(preset.min_research),
+                    research_seeds: self.resample_seeds.unwrap_or(preset.research_seeds),
                     max_determined_deg: self.tier_max_determined_deg,
                     min_resample_accept: self.tier_resample_accept,
                 }),
@@ -558,6 +578,35 @@ impl RunArgs {
                 })
             })
             .collect()
+    }
+}
+
+/// Which confirmation rule the tier flags default to, by name (task S3).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+enum TierRule {
+    /// Task S3's rule, chosen on the evidence table of all 45 development runs.
+    #[default]
+    S3,
+    /// Task M1's rule, which every run made before task S3.
+    M1,
+}
+
+impl TierRule {
+    /// The threshold set this preset starts from.
+    fn preset(self) -> Thresholds {
+        match self {
+            Self::S3 => Thresholds::S3,
+            Self::M1 => Thresholds::M1,
+        }
+    }
+}
+
+impl std::fmt::Display for TierRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::S3 => "s3",
+            Self::M1 => "m1",
+        })
     }
 }
 

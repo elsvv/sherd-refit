@@ -127,6 +127,17 @@ pub const RESEARCH_T: f64 = 0.5;
 /// development sets an agreeing re-search lands within hundredths of a degree (§S3 note §3.2).
 pub const RESEARCH_DEG: f64 = 2.0;
 
+/// How far a second placement must be from a candidate's before beating it counts as evidence,
+/// in `t` (task S3, and [`Thresholds::min_rival_t`]'s default).
+///
+/// Five walls, and the reason is the failure it removes. A rival two or three walls away is the
+/// **same seam at another offset** — the wrong-pose family of `pot_H` and `pot_A`, where the
+/// sherd is slid along a straight break — and outscoring a slide by a factor of two says nothing
+/// about which offset is right. A rival five walls away is a different fit, and beating *that* is
+/// a statement. Measured (§S3 note §4.3): over the 45 development runs the wrong-pose candidates
+/// that clear the strict set put their best rival at a median of 3.0 t, the correct ones at 18 t.
+pub const RIVAL_FAR_T: f64 = 5.0;
+
 /// How far the slide probe pushes the placed sherd along the seam before restarting, in `t`
 /// (audit §D.1: "restart the last fracture rung from ±0.5 t along the breakline tangent").
 pub const SLIDE_T: f64 = 0.5;
@@ -387,22 +398,28 @@ pub struct Thresholds {
     /// Task S3: which second placement [`Thresholds::min_margin`] is read against.
     #[serde(default)]
     pub margin_rival: RivalKind,
-    /// Task S3: how many independent re-searches must land on the placement before the re-search
-    /// arm confirms. `0` switches that arm off.
+    /// Task S3: `t`; how far that second placement must be from the candidate before beating it
+    /// counts. [`SAME_PLACEMENT_T`] is the loosest value that means anything — every rival is
+    /// already more than one wall away — and is what M1's rule reads.
+    #[serde(default = "default_rival_t")]
+    pub min_rival_t: f64,
+    /// Task S3: how many independent re-searches must land on the placement before the **margin**
+    /// arm confirms. `0` lets the margin stand alone, which is M1's rule.
+    ///
+    /// A conjunct of the margin arm and not an arm of its own: the evidence table (§S3 note §4.2)
+    /// measured a standalone re-search arm at ten false confirmed joins over the development
+    /// runs, every one of them a wrong-pose join of `pot_H`, because a wrong pose that is a stable
+    /// local optimum is stable on every draw.
     #[serde(default)]
     pub min_research: u32,
     /// Task S3: how many independent re-searches a run performs per accepted pair. `0` runs none,
-    /// and the arm above then has nothing to read.
+    /// and the conjunct above then has nothing to read.
     ///
     /// Separate from [`Thresholds::min_research`] on purpose: a measuring run sets this and leaves
-    /// the arm off, which is how the evidence table was built without the rule moving under it.
+    /// the rule alone, which is how the evidence table was built without the rule moving under it.
     /// Capped at [`RESAMPLE_OFFSETS`]`.len()`, whose collections the re-search borrows.
     #[serde(default)]
     pub research_seeds: u32,
-    /// Task S3: a margin the re-search arm must clear as well before it confirms; `None` lets the
-    /// agreement stand alone.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub research_min_margin: Option<f64>,
     /// Degrees; off by default (see the type's own note).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_determined_deg: Option<f64>,
@@ -411,26 +428,55 @@ pub struct Thresholds {
     pub min_resample_accept: Option<u32>,
 }
 
+/// [`SAME_PLACEMENT_T`] as a serde default, for a tier set written before task S3.
+fn default_rival_t() -> f64 {
+    SAME_PLACEMENT_T
+}
+
 impl Default for Thresholds {
-    /// M1 §3's chosen tier, value for value.
+    /// Task S3's chosen tier: M1 §3's strict half, value for value, with the second arm the
+    /// evidence table chose (§S3 note §5).
     fn default() -> Self {
-        Self {
-            min_tight: 0.35,
-            max_gap_t: 0.015,
-            min_seam: 5.0,
-            min_cont_n: 0.90,
-            max_pen: 0.0,
-            max_slide_t: SLIDE_BACK_T,
-            min_margin: 2.0,
-            min_support: 1,
-            margin_rival: RivalKind::Kept,
-            min_research: 0,
-            research_seeds: 0,
-            research_min_margin: None,
-            max_determined_deg: None,
-            min_resample_accept: None,
-        }
+        Self::S3
     }
+}
+
+impl Thresholds {
+    /// M1 §3's chosen tier, value for value — the rule every run made before task S3, and what
+    /// `--tier-rule m1` restores.
+    ///
+    /// Its margin arm is the one every false confirmed join this project has ever produced came
+    /// out of: ten on `mixed_all`, all with support 0 (task A1 §4, task C §3).
+    pub const M1: Self = Self {
+        min_tight: 0.35,
+        max_gap_t: 0.015,
+        min_seam: 5.0,
+        min_cont_n: 0.90,
+        max_pen: 0.0,
+        max_slide_t: SLIDE_BACK_T,
+        min_margin: 2.0,
+        min_support: 1,
+        margin_rival: RivalKind::Kept,
+        min_rival_t: SAME_PLACEMENT_T,
+        min_research: 0,
+        research_seeds: 0,
+        max_determined_deg: None,
+        min_resample_accept: None,
+    };
+
+    /// Task S3's chosen tier: the strict half unmoved, and a margin arm that reads a **wide**
+    /// second placement, refuses one closer than [`RIVAL_FAR_T`], and wants an independent
+    /// re-search of the pair to land on the placement as well.
+    ///
+    /// Chosen off the evidence table on all 45 development runs (§S3 note §5): zero false
+    /// confirmed joins, and more correct confirmed joins than M1's rule on **every** set.
+    pub const S3: Self = Self {
+        margin_rival: RivalKind::Wide,
+        min_rival_t: RIVAL_FAR_T,
+        min_research: 1,
+        research_seeds: 2,
+        ..Self::M1
+    };
 }
 
 impl Thresholds {
@@ -499,7 +545,16 @@ impl Thresholds {
         }
     }
 
-    /// Which of the distinguishing arms confirms this candidate, or `None` when none does.
+    /// How far the second placement that margin is read against puts the sherd, in `t`.
+    #[must_use]
+    pub fn rival_moved_of(&self, probes: &Probes) -> Option<f64> {
+        match self.margin_rival {
+            RivalKind::Kept => probes.rival_moved_t,
+            RivalKind::Wide => probes.wide_rival.map(|w| w.moved_t),
+        }
+    }
+
+    /// Which of the two distinguishing arms confirms this candidate, or `None` when neither does.
     ///
     /// The order is the order the note argues them and it is what `report.md` prints beside a
     /// confirmed join: a conservator asking *why is this one confirmed* is answered with the
@@ -509,34 +564,40 @@ impl Thresholds {
         if probes.support >= self.min_support {
             return Some("support");
         }
-        let margin = self.margin_of(probes);
-        if margin.is_some_and(|m| m >= self.min_margin) {
-            return Some("margin");
-        }
-        if self.min_research > 0
-            && probes.research_agree() >= self.min_research
-            && self.research_min_margin.is_none_or(|least| margin.is_some_and(|m| m >= least))
-        {
-            return Some("research");
-        }
-        None
+        self.by_margin(probes).then_some("margin")
     }
 
-    /// The one line a candidate no arm reaches gets in `evidence.failed`, naming every arm that
-    /// was tried and the number it fell short on.
+    /// The margin arm, with the two conditions task S3 measured onto it: the second placement has
+    /// to be a genuinely different fit ([`Thresholds::min_rival_t`]) and an independent re-search
+    /// of the pair has to land on this placement ([`Thresholds::min_research`]).
+    ///
+    /// Both are conjuncts and neither is an arm of its own, because the table says so: a
+    /// standalone re-search arm confirms ten wrong-pose joins of `pot_H` over the development
+    /// runs, and a margin over a rival two walls away confirms six (§S3 note §4.2).
+    fn by_margin(&self, probes: &Probes) -> bool {
+        self.margin_of(probes).is_some_and(|m| m >= self.min_margin)
+            && self.rival_moved_of(probes).is_some_and(|d| d >= self.min_rival_t)
+            && probes.research_agree() >= self.min_research
+    }
+
+    /// The one line a candidate neither arm reaches gets in `evidence.failed`, naming every test
+    /// that was tried and the number it fell short on.
     fn arms_failed(&self, probes: &Probes) -> String {
         let mut parts = vec![format!("support {} < {}", probes.support, self.min_support)];
-        parts.push(match self.margin_of(probes) {
-            Some(m) => format!("margin {m:.2} < {}", self.min_margin),
-            None => "no second placement to beat".to_owned(),
-        });
-        if self.min_research > 0 {
-            parts.push(format!(
+        match (self.margin_of(probes), self.rival_moved_of(probes)) {
+            (Some(m), Some(d)) if m < self.min_margin => {
+                parts.push(format!("margin {m:.2} < {}", self.min_margin));
+                let _ = d;
+            }
+            (Some(_), Some(d)) if d < self.min_rival_t => parts
+                .push(format!("the second placement is {d:.2} t away, under {}", self.min_rival_t)),
+            (None, _) | (_, None) => parts.push("no second placement to beat".to_owned()),
+            _ => parts.push(format!(
                 "re-search agreed {}/{} < {}",
                 probes.research_agree(),
                 probes.research.len(),
                 self.min_research
-            ));
+            )),
         }
         format!("no arm: {}", parts.join(" and "))
     }
@@ -817,6 +878,20 @@ pub fn probe(
     candidates: &[Candidate],
     params: &Params,
 ) -> Vec<Option<Probes>> {
+    // Task S3: a rule whose margin arm wants a re-search, on a run that performs none, is the
+    // support arm alone -- every candidate without an independent join beside it stays probable.
+    // That is a legitimate thing to ask for and a surprising thing to get by accident, so it says
+    // so once per run.
+    if let Some(th) = params.tiers.as_ref()
+        && th.min_research > 0
+        && th.research_seeds == 0
+    {
+        tracing::warn!(
+            min_research = th.min_research,
+            "the margin arm wants a re-search and `--resample-seeds` is 0, so only the support \
+             arm can confirm a join; `--tier-rule m1` is the rule that needs no re-search"
+        );
+    }
     // The pair's whole returned list, in R §5.7's order, keyed by the pair.
     let mut by_pair: BTreeMap<(FragId, FragId), Vec<usize>> = BTreeMap::new();
     for (i, c) in candidates.iter().enumerate() {
@@ -1487,8 +1562,8 @@ pub fn joins(candidates: &[Candidate], names: &[String]) -> Vec<TierJoin> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ColourAgreement, Evidence, PROBABLE_TOP, Probes, RESEARCH_DEG, RESEARCH_T, Research,
-        RivalKind, SAME_PLACEMENT_T, SLIDE_BACK_T, SLIDE_T, ScoreRow, Thresholds, Tier,
+        ColourAgreement, Evidence, PROBABLE_TOP, Probes, RESEARCH_DEG, RESEARCH_T, RIVAL_FAR_T,
+        Research, RivalKind, SAME_PLACEMENT_T, SLIDE_BACK_T, SLIDE_T, ScoreRow, Thresholds, Tier,
         principal_axis, probable_shown,
     };
     use crate::fragment::features::{ColourStats, Features};
@@ -1606,26 +1681,43 @@ mod tests {
         assert_eq!(th.min_support, 1);
         assert_eq!(th.max_determined_deg, None, "M1 §5.4: a ranking, not a gate");
         assert_eq!(th.min_resample_accept, None, "M1 §5.8: 136 confirmed become 130, no false one");
-        // The two retired arms are skipped on the way out, and so is task S3's optional margin on
-        // the re-search arm, so a report carries the numbers that are in force and no nulls.
+        // Task S3's three, chosen on the evidence table of all 45 development runs (§S3 note §5).
+        assert_eq!(th.margin_rival, RivalKind::Wide, "the pair's best second placement");
+        assert_relative_eq!(th.min_rival_t, RIVAL_FAR_T);
+        assert_eq!(th.min_research, 1, "one independent re-search has to land on the placement");
+        assert_eq!(th.research_seeds, 2, "and two are performed");
+        assert_eq!(th, Thresholds::S3, "the default *is* the preset the note names");
+        // The strict half is M1's, value for value: task S3 moved the second arm and nothing else.
+        let m1 = Thresholds::M1;
+        assert_eq!(
+            Thresholds {
+                margin_rival: m1.margin_rival,
+                min_rival_t: m1.min_rival_t,
+                min_research: m1.min_research,
+                research_seeds: m1.research_seeds,
+                ..th
+            },
+            m1,
+            "the two rules differ in the four fields the flags expose and in nothing else"
+        );
+        // The two retired arms are skipped on the way out, so the tier set a report carries is
+        // the numbers that are in force and no nulls.
         let json = serde_json::to_value(th).expect("Thresholds serialises");
-        assert_eq!(json.as_object().expect("an object").len(), 11);
+        assert_eq!(json.as_object().expect("an object").len(), 12);
         assert_eq!(serde_json::from_value::<Thresholds>(json).expect("round trip"), th);
         // A tier set written before task S3 has none of the new keys, and reading it back has to
-        // give every arm task S3 added its *off* position rather than fail.
+        // give M1's rule, which is what that file described.
         let old: Thresholds = serde_json::from_str(
             r#"{"min_tight":0.35,"max_gap_t":0.015,"min_seam":5.0,"min_cont_n":0.9,
                 "max_pen":0.0,"max_slide_t":0.1,"min_margin":2.0,"min_support":1}"#,
         )
         .expect("S2's own tier set still reads");
-        assert_eq!(old.margin_rival, RivalKind::Kept, "M1's own margin, off the kept list");
-        assert_eq!(old.min_research, 0, "the re-search arm is silent");
-        assert_eq!(old.research_seeds, 0, "and no re-search is performed");
-        assert_eq!(old.research_min_margin, None);
-        assert_relative_eq!(old.min_margin, 2.0);
+        assert_eq!(old, Thresholds::M1, "an S2 report describes M1's rule, field for field");
     }
 
-    /// A scores/probe pair that clears every test of the default set.
+    /// A scores/probe pair that clears every test of the default set — task S3's rule, which
+    /// means a wide second placement far enough away and a re-search that agrees, and M1's too,
+    /// which means a kept one.
     fn confirmable() -> (Scores, Probes) {
         let scores = Scores {
             tight: 0.72,
@@ -1641,16 +1733,35 @@ mod tests {
             rival_score: Some(4.0),
             rival_moved_t: Some(8.2),
             margin: Some(8.15),
-            wide_rival: None,
-            wide_margin: None,
+            wide_rival: Some(WideRival {
+                score: 4.0,
+                moved_t: 8.2,
+                source: RivalSource::Stage2,
+                accepted: false,
+            }),
+            wide_margin: Some(8.15),
             determined_deg: Some(1.1e-13),
             determined_t: Some(7.0e-14),
             slide_t: Some(5.3e-14),
             resamples: vec![row(0.71, 0.0072, true), row(0.70, 0.0075, true)],
             support: 0,
-            research: Vec::new(),
+            research: vec![research(true), research(true)],
         };
         (scores, probes)
+    }
+
+    /// The same probes with **no** second placement at all, on either reading — the ordinary case
+    /// for a pair whose search made one placement, and the one both rules read as a failed test.
+    fn no_rival(probes: &Probes) -> Probes {
+        Probes {
+            margin: None,
+            rival_score: None,
+            rival_moved_t: None,
+            wide_margin: None,
+            wide_rival: None,
+            placements: 1,
+            ..probes.clone()
+        }
     }
 
     fn row(tight: f64, gap: f64, accepted: bool) -> ScoreRow {
@@ -1690,8 +1801,21 @@ mod tests {
             ),
             (scores, Probes { slide_t: Some(0.11), ..probes.clone() }, "slide"),
             (scores, Probes { slide_t: None, ..probes.clone() }, "slide: no shared seam"),
-            (scores, Probes { margin: None, rival_score: None, ..probes.clone() }, "no arm"),
-            (scores, Probes { margin: Some(1.99), ..probes.clone() }, "no arm"),
+            (scores, no_rival(&probes), "no arm"),
+            (
+                scores,
+                Probes { margin: Some(1.99), wide_margin: Some(1.99), ..probes.clone() },
+                "no arm",
+            ),
+            (
+                scores,
+                Probes {
+                    wide_rival: probes.wide_rival.map(|w| WideRival { moved_t: 2.0, ..w }),
+                    ..probes.clone()
+                },
+                "no arm",
+            ),
+            (scores, Probes { research: vec![research(false); 2], ..probes.clone() }, "no arm"),
         ];
         for (s, p, want) in cases {
             let failed = th.refusals(&s, &p);
@@ -1737,16 +1861,16 @@ mod tests {
     fn the_support_count_and_the_margin_are_two_arms_of_one_test() {
         let th = Thresholds::default();
         let (scores, probes) = confirmable();
-        let no_rival = Probes { margin: None, rival_score: None, ..probes.clone() };
-        assert_eq!(th.refusals(&scores, &no_rival).len(), 1, "no rival and no support refuses");
-        let supported = Probes { support: 1, ..no_rival.clone() };
+        let lonely = no_rival(&probes);
+        assert_eq!(th.refusals(&scores, &lonely).len(), 1, "no rival and no support refuses");
+        let supported = Probes { support: 1, ..lonely.clone() };
         assert!(th.refusals(&scores, &supported).is_empty(), "one agreeing path confirms it");
         assert!(th.refusals(&scores, &probes).is_empty(), "a margin of 8.15 confirms it");
         // This is the whole reason audit §D.2's support count had to move from step 10 into
         // step 8: the pot_H and pot_A wrong-pose family has a single placement, so the margin can
         // never speak for it, and every other quantity R §6 measures calls it a true join.
         let family = Scores { tight: 0.77, gap: 0.0091, seam: 20.0, cont_n: 0.995, ..scores };
-        let alone = Probes { support: 0, margin: None, rival_score: None, ..probes };
+        let alone = Probes { support: 0, ..no_rival(&probes) };
         assert_eq!(th.refusals(&family, &alone).len(), 1);
         assert!(th.refusals(&family, &alone)[0].starts_with("no arm"));
     }
@@ -1763,10 +1887,6 @@ mod tests {
         let (_, probes) = confirmable();
         let one_placement = Probes {
             support: 0,
-            margin: None,
-            rival_score: None,
-            rival_moved_t: None,
-            placements: 1,
             wide_rival: Some(WideRival {
                 score: 3.0,
                 moved_t: 7.4,
@@ -1774,14 +1894,14 @@ mod tests {
                 accepted: false,
             }),
             wide_margin: Some(4.0),
-            ..probes
+            ..no_rival(&probes)
         };
-        let kept = Thresholds::default();
+        let kept = Thresholds::M1;
         assert_eq!(kept.margin_of(&one_placement), None, "the kept list holds no second placement");
         assert_eq!(kept.arm(&one_placement), None, "so under M1's rule no arm confirms it");
         assert_eq!(kept.refusals(&scores, &one_placement).len(), 1);
 
-        let wide = Thresholds { margin_rival: RivalKind::Wide, ..kept };
+        let wide = Thresholds::default();
         assert_relative_eq!(wide.margin_of(&one_placement).expect("a wide margin"), 4.0);
         assert_eq!(wide.arm(&one_placement), Some("margin"));
         assert!(wide.refusals(&scores, &one_placement).is_empty(), "the wide margin confirms it");
@@ -1803,57 +1923,79 @@ mod tests {
         assert_eq!(wide.arm(&mute), None);
     }
 
-    /// Task S3's re-search arm: it counts agreements, it can be made to want a margin as well, and
-    /// the line a candidate no arm reaches gets names every arm that was tried.
+    /// Task S3's margin arm and the two conjuncts the evidence table put on it: the second
+    /// placement has to be a different fit, and a re-search has to land on this one.
+    ///
+    /// Neither is an arm of its own, and the table is why: a standalone re-search arm confirms ten
+    /// wrong-pose joins of `pot_H` over the 45 development runs, and a margin over a rival two
+    /// walls away confirms six. Both are the same failure -- a sherd slid along a straight break
+    /// is a stable optimum on every draw and outscores every other pose of that pair.
     #[test]
-    fn the_re_search_arm_counts_agreements_and_names_itself() {
+    fn the_margin_arm_wants_a_far_rival_and_an_independent_re_search() {
         let (scores, probes) = confirmable();
-        let alone = Probes {
+        // A `pot_H`-shaped candidate: no support, no kept rival, a wide rival it beats by 6 --
+        // and that rival is the same break slid three walls along itself.
+        let slid = Probes {
             support: 0,
             margin: None,
             rival_score: None,
             rival_moved_t: None,
-            wide_margin: Some(1.4),
+            wide_margin: Some(6.0),
             wide_rival: Some(WideRival {
-                score: 20.0,
+                score: 5.0,
                 moved_t: 3.1,
                 source: RivalSource::Stage1,
                 accepted: true,
             }),
-            research: vec![research(true), research(false)],
+            research: vec![research(true), research(true)],
             ..probes.clone()
         };
-        assert_eq!(alone.research_agree(), 1);
-
-        let off = Thresholds { margin_rival: RivalKind::Wide, ..Thresholds::default() };
-        assert_eq!(off.arm(&alone), None, "with `min_research` 0 the arm is silent");
-        let one = Thresholds { min_research: 1, ..off };
-        assert_eq!(one.arm(&alone), Some("research"));
-        let both = Thresholds { min_research: 2, ..off };
-        assert_eq!(both.arm(&alone), None, "one of two draws is not two");
-
-        // The conjunction: an agreement that also has to be ahead of the second placement.
-        let strict = Thresholds { research_min_margin: Some(1.5), ..one };
-        assert_eq!(strict.arm(&alone), None, "1.40 is under 1.5");
-        let loose = Thresholds { research_min_margin: Some(1.2), ..one };
-        assert_eq!(loose.arm(&alone), Some("research"));
-
-        // The order the arms are argued in is the word the report prints.
-        let supported = Probes { support: 1, ..alone.clone() };
-        assert_eq!(one.arm(&supported), Some("support"));
-
-        // And the refusal line names all three.
-        let refusals = both.refusals(&scores, &alone);
-        assert_eq!(refusals.len(), 1, "{refusals:?}");
+        assert_eq!(slid.research_agree(), 2);
+        let th = Thresholds::default();
+        assert_eq!(th.arm(&slid), None, "3.1 t is under the five walls the note chose");
         assert_eq!(
-            refusals[0],
-            "no arm: support 0 < 1 and margin 1.40 < 2 and re-search agreed 1/2 < 2"
+            th.refusals(&scores, &slid),
+            ["no arm: support 0 < 1 and the second placement is 3.10 t away, under 5".to_owned()]
         );
-        let e = Evidence::of(&scores, &alone, &both, None);
-        assert_eq!(e.research, Some([1, 2]), "reported as agreed-of-run");
-        assert_eq!(e.arm, None);
-        // A run that performed none says nothing rather than `0/0`.
-        assert_eq!(Evidence::of(&scores, &probes, &both, None).research, None);
+        // Move the rival out to a genuinely different fit and the same candidate confirms.
+        let far = Probes {
+            wide_rival: Some(WideRival { moved_t: 12.0, ..slid.wide_rival.expect("a rival") }),
+            ..slid.clone()
+        };
+        assert_eq!(th.arm(&far), Some("margin"));
+        assert!(th.refusals(&scores, &far).is_empty());
+
+        // The other conjunct: a far rival, a big margin, and no re-search that agrees.
+        let unstable = Probes { research: vec![research(false), research(false)], ..far.clone() };
+        assert_eq!(th.arm(&unstable), None, "no draw put the sherd here");
+        assert_eq!(
+            th.refusals(&scores, &unstable),
+            ["no arm: support 0 < 1 and re-search agreed 0/2 < 1".to_owned()]
+        );
+        // The support arm is untouched by either, and it is the word the report prints.
+        let supported = Probes { support: 1, ..unstable.clone() };
+        assert_eq!(th.arm(&supported), Some("support"));
+        assert!(th.refusals(&scores, &supported).is_empty());
+
+        // M1's rule reads the same probes the way it always did: the kept list, any distance, no
+        // re-search. This candidate has no kept rival, so M1 refuses it too -- and says so in the
+        // words M1's own report used.
+        let m1 = Thresholds::M1;
+        assert_eq!(m1.arm(&far), None);
+        assert_eq!(
+            m1.refusals(&scores, &far),
+            ["no arm: support 0 < 1 and no second placement to beat".to_owned()]
+        );
+        let kept =
+            Probes { margin: Some(4.0), rival_score: Some(5.0), rival_moved_t: Some(2.0), ..far };
+        assert_eq!(m1.arm(&kept), Some("margin"), "M1 asks nothing about how far the rival is");
+
+        let e = Evidence::of(&scores, &kept, &th, None);
+        assert_eq!(e.research, Some([2, 2]), "reported as agreed-of-run");
+        assert_eq!(e.arm.as_deref(), Some("margin"));
+        // A run that performed no re-search says nothing rather than `0/0`.
+        let none_run = Probes { research: Vec::new(), ..probes };
+        assert_eq!(Evidence::of(&scores, &none_run, &th, None).research, None);
     }
 
     /// [`research_agrees`] is a conjunction of two `<=`, both at the constants the note chose.

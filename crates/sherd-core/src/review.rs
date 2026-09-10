@@ -370,15 +370,21 @@ fn caption(
     } else {
         "REFUSED".to_owned()
     };
-    let margin =
-        evidence.and_then(|e| e.margin).map_or_else(|| "NONE".to_owned(), |m| format!("{m:.2}"));
+    // Task S3: the wide second placement is the one a margin can always be read against, so it is
+    // the one the caption prints where it exists; `margin` falls back to R §5.7's own.
+    let margin = evidence
+        .and_then(|e| e.wide_margin.or(e.margin))
+        .map_or_else(|| "NONE".to_owned(), |m| format!("{m:.2}"));
     let support = evidence.map_or_else(|| "-".to_owned(), |e| e.support.to_string());
+    // And the arm that answered for a confirmed join, which is what a conservator holding the
+    // image wants to know about the word in the band field.
+    let arm = evidence.and_then(|e| e.arm.as_deref()).unwrap_or("-").to_uppercase();
     let slide =
         evidence.and_then(|e| e.slide_t).map_or_else(|| "-".to_owned(), |x| format!("{x:.2E}"));
     let mut lines = vec![
         format!(
-            "A={a_name} GREY | B={b_name} ORANGE | {band} | MARGIN {margin} | SUPPORT {support} | \
-             SEED {}",
+            "A={a_name} GREY | B={b_name} ORANGE | {band} | ARM {arm} | MARGIN {margin} | \
+             SUPPORT {support} | SEED {}",
             params.seed
         ),
         format!(

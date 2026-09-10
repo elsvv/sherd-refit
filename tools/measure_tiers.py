@@ -1401,12 +1401,29 @@ def s3_colour_speaks(r):
     return (d is not None and d > 1e-6) or (h is not None and h > 1e-9)
 
 
-def s3_rules(margins, researches):
+def s3_rules(margins, researches, moveds):
     """Every rule the table compares, as (name, note, predicate on a derived row).
 
     The strict half is M1's and never moves; what varies is the **second arm**, which is the only
     thing task M1 left undecided and the only thing task S3 measured new evidence for.
+
+    Three dimensions, and each one is a question the measurement asked:
+
+      * *which rival* -- R §5.7's kept list, or task S3's wide second placement;
+      * *how far that rival has to be* (``moveds``, in ``t``) -- because a rival two walls away is
+        the same break slid along itself, and beating a slide says nothing about which offset is
+        right;
+      * *whether a re-search has to agree* (``researches``) -- the pair's own search on another
+        draw, landing on the same placement.
+
+    And two shapes: a rule that **keeps** M1's disjunction whole and adds to it (recall can only
+    rise; the arm every false confirmed join this project has came out of stays open), and one
+    that **replaces** M1's margin arm with the harder reading (precision rises, and the table says
+    what that costs).
     """
+    def far(r, d):
+        return d <= 1.0 or (r["wide_moved"] is not None and r["wide_moved"] >= d)
+
     rules = [
         ("shipped", "support >= 1 OR margin(kept) >= 2",
          lambda r: r["support"] >= 1 or r["m_kept"] >= 2.0),
@@ -1421,34 +1438,34 @@ def s3_rules(margins, researches):
     for k in researches:
         rules.append(("research>=%d" % k, "re-search agreed on %d of 2 draws" % k,
                       lambda r, k=k: r["res_agree"] >= k))
-    for k in researches:
-        for m in margins:
-            rules.append(("research>=%d & margin-wide>=%g" % (k, m),
-                          "re-search %d AND margin(wide) >= %g" % (k, m),
-                          lambda r, k=k, m=m: r["res_agree"] >= k and r["m_wide"] >= m))
-    for k in researches:
-        for m in margins:
-            rules.append(("support | (research>=%d & margin-wide>=%g)" % (k, m),
-                          "support >= 1 OR (re-search %d AND margin(wide) >= %g)" % (k, m),
-                          lambda r, k=k, m=m: r["support"] >= 1
-                          or (r["res_agree"] >= k and r["m_wide"] >= m)))
-    for k in researches:
-        rules.append(("support | research>=%d" % k, "support >= 1 OR re-search %d" % k,
-                      lambda r, k=k: r["support"] >= 1 or r["res_agree"] >= k))
-    for m in margins:
-        rules.append(("support | margin-wide>=%g" % m, "support >= 1 OR margin(wide) >= %g" % m,
-                      lambda r, m=m: r["support"] >= 1 or r["m_wide"] >= m))
+    # The two shapes, over the whole grid.
+    for keep in (False, True):
+        for k in [0] + list(researches):
+            for m in margins:
+                for d in moveds:
+                    arm = "margin(wide) >= %g" % m
+                    if d > 1.0:
+                        arm += " over a rival >= %g t away" % d
+                    if k:
+                        arm += " AND re-search %d" % k
+                    name = "%s | (%s)" % ("shipped" if keep else "support", arm)
+                    rules.append((name,
+                                  ("support >= 1 OR margin(kept) >= 2 OR " if keep
+                                   else "support >= 1 OR ") + arm,
+                                  lambda r, k=k, m=m, d=d, keep=keep:
+                                  r["support"] >= 1
+                                  or (keep and r["m_kept"] >= 2.0)
+                                  or (r["res_agree"] >= k and r["m_wide"] >= m and far(r, d))))
     # Task S3 item 3's last row: the same rules with colour as an **extra requirement**, read as a
     # veto with the third state S2 §10 asks for (`s3_colour_ok`).  Colour can only ever remove
     # confirmed joins here -- the nine development sets produce no false ones for it to remove --
     # so what these rows measure is a price, and the table is where that price is stated.
-    base = list(rules)
+    base = [t for t in rules if t[0] in ("shipped", "support-only") or "re-search 1" in t[1]]
     for dE in (5.0, 7.5):
         for rname, note, arm in base:
-            if rname in ("shipped", "support-only") or rname.startswith("support | (research"):
-                rules.append(("%s & colour<=%g" % (rname, dE),
-                              "%s AND the clay bodies agree within %g dE" % (note, dE),
-                              lambda r, arm=arm, dE=dE: arm(r) and s3_colour_ok(r, dE)))
+            rules.append(("%s & colour<=%g" % (rname, dE),
+                          "%s AND the clay bodies agree within %g dE" % (note, dE),
+                          lambda r, arm=arm, dE=dE: arm(r) and s3_colour_ok(r, dE)))
     return rules
 
 
@@ -1493,27 +1510,43 @@ def stage_rules(a, out):
     if not runs:
         raise SystemExit("no dumps under %s/rules -- run --stage rule-runs first" % out)
 
-    margins = [1.05, 1.1, 1.2, 1.5, 2.0, 3.0, 5.0]
+    margins = [1.2, 2.0, 3.0, 5.0]
     researches = [1, 2]
-    rules = s3_rules(margins, researches)
+    moveds = [1.0, 3.0, 5.0, 8.0]
+    rules = s3_rules(margins, researches, moveds)
+    # The shipped rule's own confirmed-correct set, run by run, so that every other rule can be
+    # reported as what it *gains* and what it *loses* against it and not only as a net figure --
+    # the brief's "the correct joins gained or lost per set".
+    shipped_arm = next(a for n, _t, a in rules if n == "shipped")
+    ship_pairs = {(run["set"], run["seed"]): {k for k, r in s3_pairs(run["rows"], shipped_arm).items()
+                                              if r["verdict"] == "correct"}
+                  for run in runs}
     table = []
     for rname, note, arm in rules:
-        per_set, correct, false, bad = {}, 0, 0, []
+        per_set, correct, false, bad, lost_list = {}, 0, 0, [], []
         for run in runs:
             conf = s3_pairs(run["rows"], arm)
-            ok = sum(1 for r in conf.values() if r["verdict"] == "correct")
+            mine = {k for k, r in conf.items() if r["verdict"] == "correct"}
+            theirs = ship_pairs[(run["set"], run["seed"])]
+            ok = len(mine)
             no = sum(1 for r in conf.values() if r["verdict"] in FALSE_S3)
-            row = per_set.setdefault(run["set"], dict(correct=0, false=0, gt=0, runs=0))
+            row = per_set.setdefault(run["set"],
+                                     dict(correct=0, false=0, gt=0, runs=0, lost=0, gained=0))
             row["correct"] += ok
             row["false"] += no
             row["gt"] += run["gt_pairs"]
             row["runs"] += 1
+            row["lost"] += len(theirs - mine)
+            lost_list += [(run["set"], run["seed"]) + k for k in sorted(theirs - mine)]
+            row["gained"] += len(mine - theirs)
             correct += ok
             false += no
             bad += [(run["set"], run["seed"], r["a"], r["b"], r["verdict"])
                     for r in conf.values() if r["verdict"] in FALSE_S3]
         table.append(dict(rule=rname, note=note, correct=correct, false=false,
-                          per_set=per_set, bad=bad))
+                          lost=sum(d["lost"] for d in per_set.values()),
+                          gained=sum(d["gained"] for d in per_set.values()),
+                          lost_list=lost_list, per_set=per_set, bad=bad))
     result = dict(runs=[dict(set=r["set"], seed=r["seed"], rows=len(r["rows"]),
                              gt_pairs=r["gt_pairs"], timings=r["timings"]) for r in runs],
                   table=table,
@@ -1536,6 +1569,10 @@ def s3_evidence(runs):
         out[label] = dict(
             n=len(pool), correct=len(pos), false=len(neg),
             kept_rival=sum(1 for r in pool if r["has_kept"]),
+            # A pair can have a second placement whose score is zero, and then there is a rival but
+            # no ratio to be ahead of it by -- the reading `Probes::margin` itself has.  Both
+            # counts are printed, because the difference is the honest one.
+            wide_any=sum(1 for r in pool if r["wide_src"] is not None),
             wide_rival=sum(1 for r in pool if r["has_wide"]),
             wide_from_stage2=sum(1 for r in pool if r["wide_src"] == "stage2"),
             wide_from_stage1=sum(1 for r in pool if r["wide_src"] == "stage1"),
@@ -1548,6 +1585,13 @@ def s3_evidence(runs):
             q_wide_false=quantiles([r["m_wide"] for r in neg]),
             q_kept_correct=quantiles([r["m_kept"] for r in pos]),
             q_kept_false=quantiles([r["m_kept"] for r in neg]),
+            q_moved_correct=quantiles([r["wide_moved"] for r in pos
+                                       if r["wide_moved"] is not None]),
+            q_moved_false=quantiles([r["wide_moved"] for r in neg
+                                     if r["wide_moved"] is not None]),
+            auc_moved=auc([r["wide_moved"] for r in pos if r["wide_moved"] is not None],
+                          [r["wide_moved"] for r in neg if r["wide_moved"] is not None]),
+            auc_seam=auc([r["seam"] for r in pos], [r["seam"] for r in neg]),
             research_agree_correct=sum(1 for r in pos if r["res_agree"] >= 1),
             research_agree_false=sum(1 for r in neg if r["res_agree"] >= 1),
             research_both_correct=sum(1 for r in pos if r["res_agree"] >= 2),
@@ -1567,26 +1611,28 @@ def render_rules(res, runs, sets):
          "rule -- `sherd_core::tiers::representatives`, in Python.", "",
          "## 1. What the new evidence is, before a rule reads it", ""]
     e = res["evidence"]
-    L += ["| population | rows | correct | false | kept rival | wide rival | of those stage-2 | "
-          "stage-1 | **rivals gained** |",
-          "|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    L += ["| population | rows | correct | false | kept margin | wide rival | of those stage-2 | "
+          "stage-1 | wide margin | **margins gained** |",
+          "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for label in ("accepted", "clears the strict set"):
         d = e[label]
-        L.append("| %s | %d | %d | %d | %d | %d | %d | %d | **%d** |"
-                 % (label, d["n"], d["correct"], d["false"], d["kept_rival"], d["wide_rival"],
-                    d["wide_from_stage2"], d["wide_from_stage1"], d["gained"]))
-    L += ["", "*kept rival* is how many candidates have a second placement in R §5.7's returned "
-          "list, which is the only rival that existed before this step; *wide rival* is how many "
-          "have one once the full R §5.6 list and the stage-1 fallback are read; *rivals gained* "
-          "is the difference -- the candidates whose margin arm could not fire at all and now "
-          "can.", ""]
-    L += ["| population | AUC margin(kept) | AUC margin(wide) | AUC re-search | AUC support |",
-          "|---|---:|---:|---:|---:|"]
+        L.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d | **%d** |"
+                 % (label, d["n"], d["correct"], d["false"], d["kept_rival"], d["wide_any"],
+                    d["wide_from_stage2"], d["wide_from_stage1"], d["wide_rival"], d["gained"]))
+    L += ["", "*kept margin* is how many candidates have a second placement in R §5.7's returned "
+          "list **that scores**, which is the only margin that existed before this step; *wide "
+          "rival* is how many have a second placement at all once the full R §5.6 list and the "
+          "stage-1 fallback are read, and *wide margin* how many of those score, so that there is "
+          "a ratio to be ahead by; *margins gained* is what the step is for -- the candidates "
+          "whose margin arm could not fire at all and now can.", ""]
+    L += ["| population | AUC margin(kept) | AUC margin(wide) | AUC rival distance | "
+          "AUC re-search | AUC support | AUC seam |",
+          "|---|---:|---:|---:|---:|---:|---:|"]
     for label in ("accepted", "clears the strict set"):
         d = e[label]
-        L.append("| %s | %s | %s | %s | %s |"
-                 % (label, fmt(d["auc_kept"]), fmt(d["auc_wide"]),
-                    fmt(d["auc_research"]), fmt(d["auc_support"])))
+        L.append("| %s | %s | %s | %s | %s | %s | %s |"
+                 % (label, fmt(d["auc_kept"]), fmt(d["auc_wide"]), fmt(d["auc_moved"]),
+                    fmt(d["auc_research"]), fmt(d["auc_support"]), fmt(d["auc_seam"])))
     L += ["", "| population | margin(wide) correct min/5%/med/95%/max | margin(wide) false |",
           "|---|---|---|"]
     for label in ("accepted", "clears the strict set"):
@@ -1594,6 +1640,15 @@ def render_rules(res, runs, sets):
         L.append("| %s | %s | %s |"
                  % (label, "/".join(fmt(x, "%.2f") for x in d["q_wide_correct"]),
                     "/".join(fmt(x, "%.2f") for x in d["q_wide_false"])))
+    L += ["", "How far that second placement is, in `t` -- the quantity `--tier-rival-moved` "
+          "reads, and the one that tells a different fit from the same break slid along itself.",
+          "", "| population | rival distance correct min/5%/med/95%/max | rival distance false |",
+          "|---|---|---|"]
+    for label in ("accepted", "clears the strict set"):
+        d = e[label]
+        L.append("| %s | %s | %s |"
+                 % (label, "/".join(fmt(x, "%.2f") for x in d["q_moved_correct"]),
+                    "/".join(fmt(x, "%.2f") for x in d["q_moved_false"])))
     L += ["", "| population | re-search agreed >= 1 (correct/false) | agreed on both (correct/false) |",
           "|---|---|---|"]
     for label in ("accepted", "clears the strict set"):
@@ -1632,8 +1687,8 @@ def render_rules(res, runs, sets):
           "the brief asks for." % gt_total, ""]
     clean = sorted([t for t in res["table"] if t["false"] == 0],
                    key=lambda t: -t["correct"])
-    L += ["| rank | rule | correct | recall | vs shipped | " + " | ".join(names) + " |",
-          "|---:|---|---:|---:|---:|" + "---:|" * len(names)]
+    L += ["| rank | rule | correct | recall | gained | **lost** | " + " | ".join(names) + " |",
+          "|---:|---|---:|---:|---:|---:|" + "---:|" * len(names)]
     for i, t in enumerate(clean, 1):
         cells = []
         for n in names:
@@ -1642,11 +1697,27 @@ def render_rules(res, runs, sets):
                 cells.append("-")
                 continue
             delta = d["correct"] - (s0["correct"] if s0 else 0)
-            cells.append("%d (%+d)" % (d["correct"], delta) if delta else str(d["correct"]))
+            cell = "%d (%+d)" % (d["correct"], delta) if delta else str(d["correct"])
+            if d["lost"]:
+                cell += " **-%d**" % d["lost"]
+            cells.append(cell)
         recall = "%.1f%%" % (100.0 * t["correct"] / gt_total) if gt_total else "-"
-        L.append("| %d | `%s` | %d | %s | %+d | %s |"
-                 % (i, t["rule"], t["correct"], recall,
-                    t["correct"] - ship["correct"], " | ".join(cells)))
+        L.append("| %d | `%s` | %d | %s | +%d | %s | %s |"
+                 % (i, t["rule"], t["correct"], recall, t["gained"],
+                    "**%d**" % t["lost"] if t["lost"] else "0", " | ".join(cells)))
+    L += ["", "### The correct joins the ten best clean rules lose", "",
+          "A rule that drops an arm cannot only gain. These are the pairs the shipped rule "
+          "confirms and the candidate does not, named so that the trade is a list and not a "
+          "number.", "",
+          "| rule | lost | which |", "|---|---:|---|"]
+    for t in clean[:10]:
+        if not t["lost"]:
+            continue
+        L.append("| `%s` | %d | %s |" % (t["rule"], t["lost"], "; ".join(
+            "%s s%d %s-%s" % b for b in t["lost_list"][:10])
+            + (" ..." if len(t["lost_list"]) > 10 else "")))
+    if all(not t["lost"] for t in clean[:10]):
+        L.append("| - | 0 | not one of the ten loses a join the shipped rule confirms |")
     L += ["", "## 4. Where every rule that fails does so", ""]
     L += ["| rule | false confirmed joins |", "|---|---|"]
     for t in res["table"]:

@@ -1014,6 +1014,47 @@ fn demotion_tables(report: &ObjectReport) -> Vec<String> {
 /// own "Best candidate per pair" — which this report still writes in full — is where the rest are.
 const REJECTED_LISTED: usize = 25;
 
+/// The half of the confirmed paragraph that names the distinguishing arms in force, built from the
+/// tier set itself so that a run with another `--tier-*` flag describes the rule it actually used.
+///
+/// The order is [`Thresholds::arm`]'s, which is the order the `arm` column's words come in.
+fn arms_sentence(th: &crate::tiers::Thresholds) -> String {
+    use std::fmt::Write as _;
+    let support = format!(
+        "at least {} independent join{} of the collection agree{} with where it puts the sherd",
+        th.min_support,
+        if th.min_support == 1 { "" } else { "s" },
+        if th.min_support == 1 { "s" } else { "" },
+    );
+    let mut margin = format!(
+        "it beats the pair's {} second placement by a factor of {}",
+        match th.margin_rival {
+            crate::tiers::RivalKind::Kept => "returned",
+            crate::tiers::RivalKind::Wide => "best",
+        },
+        th.min_margin,
+    );
+    if th.min_rival_t > crate::tiers::SAME_PLACEMENT_T {
+        let _ = write!(
+            margin,
+            ", that placement being a different fit and not the same break slid along itself (at \
+             least {} wall thicknesses away)",
+            th.min_rival_t
+        );
+    }
+    if th.min_research > 0 {
+        let _ = write!(
+            margin,
+            ", and {} independent re-search{} of the pair, drawn afresh, land{} on the same \
+             placement",
+            th.min_research,
+            if th.min_research == 1 { "" } else { "es" },
+            if th.min_research == 1 { "s" } else { "" },
+        );
+    }
+    format!("either {support} or {margin}")
+}
+
 /// Roadmap item 3's three sections and the per-fragment index (audit §D.1), or nothing at all when
 /// the run had the tier pass off.
 ///
@@ -1055,15 +1096,22 @@ fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
     // what keeps a colour-less collection's `report.md` the bytes it was: no evidence, no column.
     let coloured =
         representatives.iter().any(|&i| evidence_of(i).is_some_and(|e| e.colour.is_some()));
+    // Task S3's two, on the same rule: a column exists where the run measured the thing. The wide
+    // second placement is measured on every run with the tier pass on; the re-search only when
+    // `--resample-seeds` asked for one.
+    let widened =
+        representatives.iter().any(|&i| evidence_of(i).is_some_and(|e| e.wide_margin.is_some()));
+    let researched =
+        representatives.iter().any(|&i| evidence_of(i).is_some_and(|e| e.research.is_some()));
     // One row of the evidence table, shared by the confirmed and the probable list.
     let row = |i: usize| -> String {
+        use std::fmt::Write as _;
         let candidate = &outcome.candidates[i];
         let (a, b) = pair_name(i);
         let s = &candidate.scores;
         let e = evidence_of(i);
         let mut line = format!(
-            "| {a} | {b} | {:.2} | {:.1} | {:.2} | {:.4} | {:.3} | {:.4} | {} | {} | {} | {} | \
-             {} | {} |",
+            "| {a} | {b} | {:.2} | {:.1} | {:.2} | {:.4} | {:.3} | {:.4} | {} | {} |",
             candidate.score(),
             s.seam,
             s.tight,
@@ -1072,13 +1120,27 @@ fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
             s.pen,
             optional(e.and_then(|e| e.slide_t), exp),
             optional(e.and_then(|e| e.margin), two),
+        );
+        if widened {
+            let _ = write!(line, " {} |", optional(e.and_then(|e| e.wide_margin), two));
+        }
+        let _ = write!(
+            line,
+            " {} | {} | {} | {} |",
             e.map_or_else(|| "—".to_owned(), |e| e.support.to_string()),
             e.map_or_else(|| "—".to_owned(), |e| e.placements.to_string()),
             e.map_or_else(|| "—".to_owned(), |e| format!("{}/3", e.resample_accept)),
             optional(e.and_then(|e| e.determined_deg), exp),
         );
+        if researched {
+            let _ = write!(
+                line,
+                " {} |",
+                e.and_then(|e| e.research)
+                    .map_or_else(|| "—".to_owned(), |[agreed, of]| format!("{agreed}/{of}")),
+            );
+        }
         if coloured {
-            use std::fmt::Write as _;
             let colour = e.and_then(|e| e.colour.as_ref());
             let _ = write!(
                 line,
@@ -1089,18 +1151,25 @@ fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
         }
         line
     };
-    let head = if coloured {
-        "| A | B | score | seam (t) | tight | gap (t) | normal agr. | penetration | slide (t) | \
-         margin | support | placements | redraws | determined (deg) | fracture dE | shell hist |"
-    } else {
-        "| A | B | score | seam (t) | tight | gap (t) | normal agr. | penetration | slide (t) | \
-         margin | support | placements | redraws | determined (deg) |"
-    };
-    let rule = if coloured {
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
-    } else {
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
-    };
+    let mut head = "| A | B | score | seam (t) | tight | gap (t) | normal agr. | penetration | \
+                    slide (t) | margin |"
+        .to_owned();
+    let mut rule = "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|".to_owned();
+    if widened {
+        head.push_str(" margin (wide) |");
+        rule.push_str("---:|");
+    }
+    head.push_str(" support | placements | redraws | determined (deg) |");
+    rule.push_str("---:|---:|---:|---:|");
+    if researched {
+        head.push_str(" re-search |");
+        rule.push_str("---:|");
+    }
+    if coloured {
+        head.push_str(" fracture dE | shell hist |");
+        rule.push_str("---:|---:|");
+    }
+    let (head, rule) = (head, rule);
 
     let confirmed = of_tier(Tier::Confirmed);
     lines.push(String::new());
@@ -1109,20 +1178,16 @@ fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
     lines.push(format!(
         "A **confirmed** join clears R §6.5 and then a stricter set on top of it: tight ≥ {}, gap \
          ≤ {} t, seam ≥ {} t, normal agreement ≥ {}, penetration ≤ {}, the pose returns to within \
-         {} t after being pushed half a wall along the seam, and either at least {} independent \
-         join{} of the collection agree{} with where it puts the sherd or it beats the pair's \
-         second placement by a factor of {}. The assembly above is built from these and from \
-         nothing else.",
+         {} t after being pushed half a wall along the seam, and {}. The assembly above is built \
+         from these and from nothing else. The last column names the arm that answered for each \
+         join.",
         th.min_tight,
         th.max_gap_t,
         th.min_seam,
         th.min_cont_n,
         th.max_pen,
         th.max_slide_t,
-        th.min_support,
-        if th.min_support == 1 { "" } else { "s" },
-        if th.min_support == 1 { "s" } else { "" },
-        th.min_margin,
+        arms_sentence(th),
     ));
     if coloured {
         lines.push(String::new());
@@ -1146,9 +1211,17 @@ fn tier_sections(outcome: &Outcome<'_>, params: &Params) -> Vec<String> {
                 .to_owned(),
         );
     } else {
-        lines.push(head.to_owned());
-        lines.push(rule.to_owned());
-        lines.extend(confirmed.iter().map(|&i| row(i)));
+        // Task S3: the confirmed list, and only it, ends in the arm that confirmed each join.
+        // *Why is this one confirmed* is the question a conservator asks of the band, and "one of
+        // the arms held" is not an answer to it.
+        lines.push(format!("{head} arm |"));
+        lines.push(format!("{rule}---|"));
+        lines.extend(confirmed.iter().map(|&i| {
+            let arm = evidence_of(i)
+                .and_then(|e| e.arm.as_deref())
+                .map_or_else(|| "—".to_owned(), str::to_owned);
+            format!("{} {arm} |", row(i))
+        }));
     }
 
     let (probable, probable_total) =
@@ -1952,7 +2025,15 @@ mod tests {
             .and_then(|t| t.lines().find(|l| l.starts_with("| one | two |")))
             .expect("the confirmed row");
         assert!(confirmed.starts_with("| one | two | 10.00 | 20.0 | 0.50 |"), "{confirmed}");
-        assert!(confirmed.contains("| 1.90e-15 | 4.50 | 1 | 2 | 3/3 | 2.70e-14 |"), "{confirmed}");
+        // Task S3: the wide second placement is a column of its own, and the confirmed list ends
+        // in the arm that answered for the join.
+        assert!(
+            confirmed.contains("| 1.90e-15 | 4.50 | 4.50 | 1 | 2 | 3/3 | 2.70e-14 |"),
+            "{confirmed}"
+        );
+        assert!(confirmed.trim_end().ends_with("| support |"), "{confirmed}");
+        assert!(with.contains("| margin (wide) |"), "the wide margin has a column: {with}");
+        assert!(!with.contains("| re-search |"), "no re-search was run, so no column: {with}");
         assert!(with.contains("tight 0.2500 < 0.35 |"), "the probable row names its refusal");
         assert!(with.contains("1 pair produced a candidate R §6.5 refused"), "{with}");
         // The per-fragment index shows a pair once under each of its two fragments, and never a

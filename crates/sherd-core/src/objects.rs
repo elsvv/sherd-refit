@@ -816,8 +816,8 @@ mod tests {
         assert!(p.merge, "the one arm that needs no threshold and can only add a join is on");
         assert!(
             !p.disagreement,
-            "O1 §2: the arm removes no false join -- there are none -- and costs nine of \
-             mixed_ABG seed 0's eleven"
+            "the arm removes no false join -- there are none -- and costs 27 of mixed_ABG's 38 \
+             confirmed joins over seeds 0-4 (task C's re-measurement)"
         );
         assert_eq!(p.min_members, MIN_CONSENSUS_MEMBERS);
 

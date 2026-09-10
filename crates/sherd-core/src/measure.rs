@@ -60,7 +60,10 @@ use crate::tiers::{self, Probes};
 use crate::types::FragId;
 
 pub use crate::matching::pair::{RivalSource, WideRival};
-pub use crate::tiers::{RESAMPLE_OFFSETS, SAME_PLACEMENT_T, SLIDE_BACK_T, SLIDE_T, ScoreRow};
+pub use crate::tiers::{
+    RESAMPLE_OFFSETS, RESEARCH_DEG, RESEARCH_T, Research, SAME_PLACEMENT_T, SLIDE_BACK_T, SLIDE_T,
+    ScoreRow,
+};
 
 /// One accepted candidate, with everything a tier could read about it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -122,6 +125,11 @@ pub struct CandidateMeasure {
     pub resamples: Vec<ScoreRow>,
     /// Independent accepted joins that agree with this placement.
     pub support: u32,
+    /// Task S3: one entry per independent re-search of this pair — that pair's whole R §5–§6
+    /// search on another draw, and whether its best accepted candidate is this placement. Empty
+    /// on a run that performed none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub research: Vec<Research>,
     /// Whether R §8's assembly took this candidate as a join.
     pub used: bool,
     /// Whether this is the candidate R §8 would consider for the pair (its best accepted one).
@@ -214,6 +222,7 @@ pub fn measure(
                 slide_t: p.slide_t,
                 resamples: p.resamples.clone(),
                 support: p.support,
+                research: p.research.clone(),
                 used: used_set.contains(&i),
                 best_of_pair: best.get(&(c.a, c.b)) == Some(&i),
             })

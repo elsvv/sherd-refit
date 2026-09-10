@@ -346,6 +346,23 @@ struct RunArgs {
     /// pair's own returned candidates are the same either way.
     #[arg(long, default_value_t = Rival::default(), value_name = "kept|wide")]
     tier_margin_rival: Rival,
+    /// Independent re-searches of the pair that must land on the placement, when the re-search is
+    /// the arm that confirms it; 0 switches that arm off (task S3).
+    #[arg(long, default_value_t = Thresholds::default().min_research, value_name = "N")]
+    tier_research: u32,
+    /// How many independent re-searches a run performs for each accepted pair (task S3).
+    ///
+    /// A re-search is that pair's whole R §5–§6 search run again on a collection whose R §3.5
+    /// samples and R §5.2 coarse probe are drawn at another seed — the frozen arithmetic, other
+    /// draws — and what is recorded is whether its best accepted candidate puts the sherd where
+    /// this one does. The cost is one pair match per accepted pair per seed; at most 2, whose
+    /// redrawn collections the stability probe has already built.
+    #[arg(long, default_value_t = Thresholds::default().research_seeds, value_name = "N")]
+    resample_seeds: u32,
+    /// Margin a confirmed join must also clear before the re-search arm confirms it; off by
+    /// default, which lets the agreement stand alone (task S3).
+    #[arg(long, value_name = "X")]
+    tier_research_margin: Option<f64>,
     /// Degrees; worst rotation over the pose's twelve one-ULP neighbours a confirmed join may
     /// show. Off by default: M1 measured the whole range at 1.6e-14 to 4.1e-7 degrees, so there is
     /// no threshold in it and the number is reported instead.
@@ -498,6 +515,9 @@ impl RunArgs {
                     min_margin: self.tier_margin,
                     min_support: self.tier_support,
                     margin_rival: self.tier_margin_rival.into(),
+                    min_research: self.tier_research,
+                    research_seeds: self.resample_seeds,
+                    research_min_margin: self.tier_research_margin,
                     max_determined_deg: self.tier_max_determined_deg,
                     min_resample_accept: self.tier_resample_accept,
                 }),

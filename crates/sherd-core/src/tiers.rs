@@ -112,6 +112,21 @@ pub const SAME_PLACEMENT_T: f64 = 1.0;
 /// sweep, and fixed so that a tier is reproducible.
 pub const RESAMPLE_OFFSETS: [u64; 2] = [1_000_000, 2_000_000];
 
+/// How close a re-search's own best accepted placement must come to a candidate's, in `t`, for
+/// the two to be **the same placement** (task S3).
+///
+/// R §8's own translation tolerance, read at B's fracture centroid — the same number
+/// [`agrees`] uses for a support path, because the two probes ask one question of two different
+/// witnesses: *does an independent opinion put the sherd here?*
+pub const RESEARCH_T: f64 = 0.5;
+
+/// The rotation half of that, in degrees (task S3).
+///
+/// Tighter than [`agrees`]'s ten degrees. A support path is a product of two poses and inherits
+/// both their errors; a re-search is the *same pair's* own search on another draw, and on the
+/// development sets an agreeing re-search lands within hundredths of a degree (§S3 note §3.2).
+pub const RESEARCH_DEG: f64 = 2.0;
+
 /// How far the slide probe pushes the placed sherd along the seam before restarting, in `t`
 /// (audit §D.1: "restart the last fracture rung from ±0.5 t along the breakline tangent").
 pub const SLIDE_T: f64 = 0.5;
@@ -234,6 +249,47 @@ pub struct Probes {
     pub resamples: Vec<ScoreRow>,
     /// Independent accepted joins that agree with this placement (see [`support_count`]).
     pub support: u32,
+    /// Task S3: one entry per independent re-search of this pair, empty when none was run.
+    pub research: Vec<Research>,
+}
+
+impl Probes {
+    /// How many of this candidate's re-searches landed on this placement.
+    #[must_use]
+    pub fn research_agree(&self) -> u32 {
+        u32::try_from(self.research.iter().filter(|r| r.agrees).count()).unwrap_or(u32::MAX)
+    }
+}
+
+/// Task S3: what one independent re-search of a pair said about one candidate's placement.
+///
+/// The pair's whole R §5–§6 search is run again on a collection whose R §3.5 samples were redrawn
+/// at another seed and whose R §5.2 coarse probe is drawn at that seed too — the frozen
+/// arithmetic, different draws — and the question asked of the answer is the narrow one: *does its
+/// best accepted candidate put the sherd where this one does?*
+///
+/// It is the second half of what [`Probes::support`] does with a third fragment, asked of the pair
+/// itself: a wrong-pose join is a slide along a flat seam, and which point of that slide a search
+/// stops at is a function of the draw.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Research {
+    /// What this draw added to the run's own seed.
+    pub offset: u64,
+    /// Whether the re-search accepted anything at all for this pair. A `false` here is a
+    /// disagreement of the strongest kind and is never counted as an agreement.
+    pub accepted_any: bool,
+    /// Whether its best accepted candidate is **this** placement, inside [`RESEARCH_T`] and
+    /// [`RESEARCH_DEG`].
+    pub agrees: bool,
+    /// How far it puts B from this candidate, in `t`, read at B's fracture centroid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moved_t: Option<f64>,
+    /// The rotation between the two poses, in degrees.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub angle_deg: Option<f64>,
+    /// `seam · tight` of the re-search's best accepted candidate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
 }
 
 /// A candidate's confidence band (audit §D.1).
@@ -331,6 +387,22 @@ pub struct Thresholds {
     /// Task S3: which second placement [`Thresholds::min_margin`] is read against.
     #[serde(default)]
     pub margin_rival: RivalKind,
+    /// Task S3: how many independent re-searches must land on the placement before the re-search
+    /// arm confirms. `0` switches that arm off.
+    #[serde(default)]
+    pub min_research: u32,
+    /// Task S3: how many independent re-searches a run performs per accepted pair. `0` runs none,
+    /// and the arm above then has nothing to read.
+    ///
+    /// Separate from [`Thresholds::min_research`] on purpose: a measuring run sets this and leaves
+    /// the arm off, which is how the evidence table was built without the rule moving under it.
+    /// Capped at [`RESAMPLE_OFFSETS`]`.len()`, whose collections the re-search borrows.
+    #[serde(default)]
+    pub research_seeds: u32,
+    /// Task S3: a margin the re-search arm must clear as well before it confirms; `None` lets the
+    /// agreement stand alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research_min_margin: Option<f64>,
     /// Degrees; off by default (see the type's own note).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_determined_deg: Option<f64>,
@@ -352,6 +424,9 @@ impl Default for Thresholds {
             min_margin: 2.0,
             min_support: 1,
             margin_rival: RivalKind::Kept,
+            min_research: 0,
+            research_seeds: 0,
+            research_min_margin: None,
             max_determined_deg: None,
             min_resample_accept: None,
         }
@@ -438,6 +513,12 @@ impl Thresholds {
         if margin.is_some_and(|m| m >= self.min_margin) {
             return Some("margin");
         }
+        if self.min_research > 0
+            && probes.research_agree() >= self.min_research
+            && self.research_min_margin.is_none_or(|least| margin.is_some_and(|m| m >= least))
+        {
+            return Some("research");
+        }
         None
     }
 
@@ -449,6 +530,14 @@ impl Thresholds {
             Some(m) => format!("margin {m:.2} < {}", self.min_margin),
             None => "no second placement to beat".to_owned(),
         });
+        if self.min_research > 0 {
+            parts.push(format!(
+                "re-search agreed {}/{} < {}",
+                probes.research_agree(),
+                probes.research.len(),
+                self.min_research
+            ));
+        }
         format!("no arm: {}", parts.join(" and "))
     }
 }
@@ -570,6 +659,10 @@ pub struct Evidence {
     /// [`Thresholds::arm`] argues them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arm: Option<String>,
+    /// Task S3: how many of this candidate's re-searches landed on its placement, and how many
+    /// were run — `None` on a run that performed none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research: Option<[u32; 2]>,
     /// Task S2's colour agreement across the seam — reported, never gated, absent on a collection
     /// whose files carry no colours.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -604,6 +697,9 @@ impl Evidence {
             support: probes.support,
             failed,
             arm: th.arm(probes).map(ToOwned::to_owned),
+            research: (!probes.research.is_empty()).then(|| {
+                [probes.research_agree(), u32::try_from(probes.research.len()).unwrap_or(u32::MAX)]
+            }),
             colour,
         }
     }
@@ -829,6 +925,7 @@ fn one_pair(
     let slide = slide_probe(&rungs, &surfaces, &poses, &sc, &centre);
     let resamples = resampled_scores(engine, all.redraws, key, &poses, params);
     let placements = distinct_placements(b, candidates, list, sc.t);
+    let research = research_pair(engine, all.redraws, key, &poses, &sc, &centre, params);
 
     taken
         .iter()
@@ -853,6 +950,7 @@ fn one_pair(
                     slide_t: slide[k],
                     resamples: resamples.iter().map(|row| row[k]).collect(),
                     support: support_count(all, key, c, sc.t, &centre),
+                    research: research.iter().map(|row| row[k]).collect(),
                 },
             )
         })
@@ -1136,6 +1234,93 @@ fn resampled_scores(
         .collect()
 }
 
+/// Task S3: the pair's own R §5–§6 search, run again on each redrawn collection, asked whether it
+/// lands on each of these poses.
+///
+/// # Which draw, and why not a fresh one
+///
+/// The re-search borrows the **stability redraw's** collections rather than making its own. Those
+/// fragments already have R §3.5's three sampled arrays redrawn at `seed + `[`RESAMPLE_OFFSETS`]`[k]`,
+/// which is the independence the probe needs, and the search is handed that same seed so that
+/// R §5.2's coarse probe is drawn independently too. A third redraw would cost R §3.5 over the
+/// whole collection again and buy nothing: the two probes read the same draw for different
+/// questions — the stability rows hold the pose still and move the samples, this moves both.
+///
+/// # Cost
+///
+/// One whole [`Pair::match_pair`] per accepted pair per seed, which is the honest price of the
+/// question and the reason `research_seeds` is a knob. It is bounded to the pairs R §6.5 accepted
+/// — a few dozen on a development collection against the hundreds the matcher visited — and §S3
+/// note §3.3 measures the share of the matching time it adds.
+fn research_pair(
+    engine: Engine<'_>,
+    redraws: &[Vec<Fragment>],
+    key: (FragId, FragId),
+    poses: &[Matrix4<f64>],
+    sc: &Scales,
+    centre: &[f64; 3],
+    params: &Params,
+) -> Vec<Vec<Research>> {
+    let seeds = params.tiers.map_or(0, |t| t.research_seeds as usize).min(redraws.len());
+    (0..seeds)
+        .map(|k| {
+            let offset = RESAMPLE_OFFSETS[k];
+            let collection = &redraws[k];
+            let at_offset = Params { seed: params.seed.wrapping_add(offset), ..*params };
+            let (a, b) = (&collection[key.0 as usize], &collection[key.1 as usize]);
+            let found = crate::matching::pair::match_pair_with(
+                engine,
+                a,
+                b,
+                &at_offset,
+                crate::pipeline::KEEP_PER_PAIR,
+            );
+            // R §8's own view of a pair: its best accepted candidate and no other.
+            let best = found
+                .iter()
+                .filter(|c| c.accepted)
+                .fold(None::<&Candidate>, |best, c| match best {
+                    Some(b) if b.score() >= c.score() => Some(b),
+                    _ => Some(c),
+                })
+                .copied();
+            poses
+                .iter()
+                .map(|pose| match best {
+                    None => Research {
+                        offset,
+                        accepted_any: false,
+                        agrees: false,
+                        moved_t: None,
+                        angle_deg: None,
+                        score: None,
+                    },
+                    Some(found) => {
+                        let angle = rotation_angle_deg(&(pose_inverse(&found.transform) * pose));
+                        let moved = pose_gap::cloud_t(&found.transform, pose, centre, sc.t);
+                        Research {
+                            offset,
+                            accepted_any: true,
+                            agrees: research_agrees(angle, moved),
+                            moved_t: Some(moved),
+                            angle_deg: Some(angle),
+                            score: Some(found.score()),
+                        }
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Whether a re-search's own best accepted pose **is** this placement (task S3).
+///
+/// Both halves have to hold, and both are read as `<=` so that a probe that moved the sherd by
+/// exactly the tolerance still agrees — the same reading [`agrees`] gives a support path.
+fn research_agrees(angle_deg: f64, moved_t: f64) -> bool {
+    angle_deg <= RESEARCH_DEG && moved_t <= RESEARCH_T
+}
+
 /// How many independent accepted joins agree with this placement.
 ///
 /// A *path* rather than a group: for every third fragment `x` the collection also accepted a join
@@ -1302,8 +1487,9 @@ pub fn joins(candidates: &[Candidate], names: &[String]) -> Vec<TierJoin> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ColourAgreement, Evidence, PROBABLE_TOP, Probes, RivalKind, SAME_PLACEMENT_T, SLIDE_BACK_T,
-        SLIDE_T, ScoreRow, Thresholds, Tier, principal_axis, probable_shown,
+        ColourAgreement, Evidence, PROBABLE_TOP, Probes, RESEARCH_DEG, RESEARCH_T, Research,
+        RivalKind, SAME_PLACEMENT_T, SLIDE_BACK_T, SLIDE_T, ScoreRow, Thresholds, Tier,
+        principal_axis, probable_shown,
     };
     use crate::fragment::features::{ColourStats, Features};
     use crate::matching::pair::{Candidate, RivalSource, WideRival};
@@ -1420,10 +1606,10 @@ mod tests {
         assert_eq!(th.min_support, 1);
         assert_eq!(th.max_determined_deg, None, "M1 §5.4: a ranking, not a gate");
         assert_eq!(th.min_resample_accept, None, "M1 §5.8: 136 confirmed become 130, no false one");
-        // The two retired arms are skipped on the way out, so the tier set a report carries is
-        // the numbers the note prints and not eleven with two nulls.
+        // The two retired arms are skipped on the way out, and so is task S3's optional margin on
+        // the re-search arm, so a report carries the numbers that are in force and no nulls.
         let json = serde_json::to_value(th).expect("Thresholds serialises");
-        assert_eq!(json.as_object().expect("an object").len(), 9);
+        assert_eq!(json.as_object().expect("an object").len(), 11);
         assert_eq!(serde_json::from_value::<Thresholds>(json).expect("round trip"), th);
         // A tier set written before task S3 has none of the new keys, and reading it back has to
         // give every arm task S3 added its *off* position rather than fail.
@@ -1433,6 +1619,9 @@ mod tests {
         )
         .expect("S2's own tier set still reads");
         assert_eq!(old.margin_rival, RivalKind::Kept, "M1's own margin, off the kept list");
+        assert_eq!(old.min_research, 0, "the re-search arm is silent");
+        assert_eq!(old.research_seeds, 0, "and no re-search is performed");
+        assert_eq!(old.research_min_margin, None);
         assert_relative_eq!(old.min_margin, 2.0);
     }
 
@@ -1459,6 +1648,7 @@ mod tests {
             slide_t: Some(5.3e-14),
             resamples: vec![row(0.71, 0.0072, true), row(0.70, 0.0075, true)],
             support: 0,
+            research: Vec::new(),
         };
         (scores, probes)
     }
@@ -1611,6 +1801,79 @@ mod tests {
         // way; a `None` margin fails the test.
         let mute = Probes { wide_margin: None, ..one_placement };
         assert_eq!(wide.arm(&mute), None);
+    }
+
+    /// Task S3's re-search arm: it counts agreements, it can be made to want a margin as well, and
+    /// the line a candidate no arm reaches gets names every arm that was tried.
+    #[test]
+    fn the_re_search_arm_counts_agreements_and_names_itself() {
+        let (scores, probes) = confirmable();
+        let alone = Probes {
+            support: 0,
+            margin: None,
+            rival_score: None,
+            rival_moved_t: None,
+            wide_margin: Some(1.4),
+            wide_rival: Some(WideRival {
+                score: 20.0,
+                moved_t: 3.1,
+                source: RivalSource::Stage1,
+                accepted: true,
+            }),
+            research: vec![research(true), research(false)],
+            ..probes.clone()
+        };
+        assert_eq!(alone.research_agree(), 1);
+
+        let off = Thresholds { margin_rival: RivalKind::Wide, ..Thresholds::default() };
+        assert_eq!(off.arm(&alone), None, "with `min_research` 0 the arm is silent");
+        let one = Thresholds { min_research: 1, ..off };
+        assert_eq!(one.arm(&alone), Some("research"));
+        let both = Thresholds { min_research: 2, ..off };
+        assert_eq!(both.arm(&alone), None, "one of two draws is not two");
+
+        // The conjunction: an agreement that also has to be ahead of the second placement.
+        let strict = Thresholds { research_min_margin: Some(1.5), ..one };
+        assert_eq!(strict.arm(&alone), None, "1.40 is under 1.5");
+        let loose = Thresholds { research_min_margin: Some(1.2), ..one };
+        assert_eq!(loose.arm(&alone), Some("research"));
+
+        // The order the arms are argued in is the word the report prints.
+        let supported = Probes { support: 1, ..alone.clone() };
+        assert_eq!(one.arm(&supported), Some("support"));
+
+        // And the refusal line names all three.
+        let refusals = both.refusals(&scores, &alone);
+        assert_eq!(refusals.len(), 1, "{refusals:?}");
+        assert_eq!(
+            refusals[0],
+            "no arm: support 0 < 1 and margin 1.40 < 2 and re-search agreed 1/2 < 2"
+        );
+        let e = Evidence::of(&scores, &alone, &both, None);
+        assert_eq!(e.research, Some([1, 2]), "reported as agreed-of-run");
+        assert_eq!(e.arm, None);
+        // A run that performed none says nothing rather than `0/0`.
+        assert_eq!(Evidence::of(&scores, &probes, &both, None).research, None);
+    }
+
+    /// [`research_agrees`] is a conjunction of two `<=`, both at the constants the note chose.
+    #[test]
+    fn a_re_search_agrees_only_within_both_tolerances() {
+        assert!(super::research_agrees(RESEARCH_DEG, RESEARCH_T), "the boundary agrees");
+        assert!(!super::research_agrees(RESEARCH_DEG * 1.001, RESEARCH_T), "rotated too far");
+        assert!(!super::research_agrees(0.0, RESEARCH_T * 1.001), "slid too far");
+        assert!(super::research_agrees(0.01, 0.02), "the ordinary agreeing draw");
+    }
+
+    fn research(agrees: bool) -> Research {
+        Research {
+            offset: 1_000_000,
+            accepted_any: true,
+            agrees,
+            moved_t: Some(if agrees { 0.02 } else { 6.4 }),
+            angle_deg: Some(if agrees { 0.01 } else { 41.0 }),
+            score: Some(30.0),
+        }
     }
 
     /// The two retired arms do work when they are switched on, and are silent when they are not.

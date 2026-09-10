@@ -1893,6 +1893,7 @@ mod tests {
             support: 1,
             failed,
             arm: Some("support".to_owned()),
+            research: None,
         };
         let report = TierReport {
             thresholds: Thresholds::default(),
@@ -1995,6 +1996,7 @@ mod tests {
             support: 0,
             failed: vec!["tight 0.5000 < 0.35".to_owned()],
             arm: None,
+            research: None,
         };
         let report = TierReport {
             thresholds: Thresholds::default(),

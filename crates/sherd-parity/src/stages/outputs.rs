@@ -410,6 +410,7 @@ fn markdown_row(
             scores: c.scores,
             accepted: c.accepted,
             tier: sherd_core::tiers::Tier::of_accept(c.accepted),
+            wide: None,
         });
     }
     // The reference's `used` and `rejected` hold the very objects its `cands` holds, so each one

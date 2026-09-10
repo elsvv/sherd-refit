@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use nalgebra::Matrix4;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+use serde::{Deserialize, Serialize};
 
 use crate::executor::Engine;
 use crate::fragment::Fragment;
@@ -38,7 +39,7 @@ use crate::matching::nms;
 use crate::matching::scales::Scales;
 use crate::matching::verify::{self, Scores, Surfaces};
 use crate::params::Params;
-use crate::tiers::Tier;
+use crate::tiers::{SAME_PLACEMENT_T, Tier, placement_gap};
 use crate::types::FragId;
 
 /// R §5.3's cap on the hypotheses the coarse NMS walks.
@@ -49,6 +50,53 @@ use crate::types::FragId;
 pub const COARSE_ORDER_LIMIT: usize = 5000;
 /// R §5.3's floor under the coarse score.
 pub const COARSE_FLOOR: f64 = 0.1;
+
+/// Task S3: how many stage-1 poses the wide rival falls back on when R §5.6's own list makes one
+/// placement.
+///
+/// Four, because the fallback is the *best* second placement and not all of them: the stage-1
+/// poses are read in R §5.4's own score order, so the first one that is a second placement is
+/// already the pair's best-supported alternative, and the three behind it are there for the case
+/// where R §5.6's ladder pulls the leader back onto the winner (§S3 note §2.2 measures how often
+/// it does). Each try costs one four-rung climb and one R §6 verification, batched, and the
+/// fallback runs only on a pair that has an accepted candidate at all.
+pub const WIDE_STAGE1_TRIES: usize = 4;
+
+/// Where a pair's second placement was found (task S3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RivalSource {
+    /// One of R §5.6's own verified candidates, taken from the pair's **full** list — the one that
+    /// exists before R §5.7's `keep` truncates it to five. Free: the pose was climbed and scored
+    /// by the run itself and then thrown away.
+    Stage2,
+    /// A stage-1 pose R §5.5 did not keep, refined through R §5.6's four rungs and scored by R §6
+    /// here, so that its `seam · tight` is the same quantity the winner's is.
+    Stage1,
+}
+
+/// Task S3's second placement of a pair: what the margin is read against when nothing in R §5.7's
+/// kept list moved the sherd.
+///
+/// The kept list is five candidates and they routinely converge on one fit — 270 of M1's 342
+/// correct joins make a single placement there — so the margin arm cannot fire for them and the
+/// tier falls back on the support count alone. This is the same question asked of a wider
+/// population, and it is asked **beside** R §5.7's answer and never instead of it: the pair still
+/// returns the five candidates it returned, in the order it returned them.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WideRival {
+    /// `seam · tight` of that placement, measured by R §6 exactly as the winner's is.
+    pub score: f64,
+    /// How far it places B from the pair's **best** candidate, in `t`
+    /// ([`placement_gap`](crate::tiers::placement_gap)); always above
+    /// [`SAME_PLACEMENT_T`](crate::tiers::SAME_PLACEMENT_T).
+    pub moved_t: f64,
+    /// Whether it came out of R §5.6's own list or out of the stage-1 fallback.
+    pub source: RivalSource,
+    /// Whether R §6.5 would accept the rival itself — a second placement the pipeline would have
+    /// been willing to believe is a stronger objection than one it would refuse.
+    pub accepted: bool,
+}
 
 /// Two fragments and everything R §5 measures them with.
 ///
@@ -309,6 +357,28 @@ impl<'a> Pair<'a> {
     /// fracture sample or no breakline, a pair with no hypothesis, and a pair whose coarse
     /// suppression kept nothing.
     pub fn match_pair(&self, engine: Engine<'_>, p: &Params, keep: usize) -> Vec<Candidate> {
+        self.match_pair_wide(engine, p, keep, false)
+    }
+
+    /// [`Pair::match_pair`], and with `wide` task S3's second placement stamped on every candidate
+    /// it returns.
+    ///
+    /// **Additive by construction.** The returned list — which poses, in which order, with which
+    /// scores and which verdicts — is the one [`Pair::match_pair`] returns, whatever `wide` says;
+    /// the flag adds a reading of the list R §5.7 was about to throw away and, where that reading
+    /// is empty, a few stage-1 poses climbed and scored on the side. Nothing it computes is fed
+    /// back into the search, and none of it draws a random number, so a run with `wide` on and a
+    /// run with it off produce the same candidates in the same order.
+    ///
+    /// It runs only on a pair that has an **accepted** candidate, which is the population the tier
+    /// reads (§S3 note §2.3 measures what that bound costs in time).
+    pub fn match_pair_wide(
+        &self,
+        engine: Engine<'_>,
+        p: &Params,
+        keep: usize,
+        wide: bool,
+    ) -> Vec<Candidate> {
         if !self.matchable() {
             return Vec::new();
         }
@@ -361,8 +431,110 @@ impl<'a> Pair<'a> {
         for candidate in &mut candidates {
             candidate.scores.brk_best = best1;
         }
+        // Task S3, and the one line of this function that is not R §5.7's: the second placement is
+        // read **here**, off the full sorted list, because the next line is where the information
+        // is lost.
+        let rival = (wide && candidates.iter().any(|c| c.accepted))
+            .then(|| self.wide_rival(engine, &ladder, &surfaces, &candidates, &stage1, &kept2, p))
+            .flatten();
         candidates.truncate(keep);
+        if rival.is_some() {
+            for candidate in &mut candidates {
+                candidate.wide = rival;
+            }
+        }
         candidates
+    }
+
+    /// Task S3's second placement of this pair: the best-scoring pose more than one wall from the
+    /// pair's best, looked for in two places in order.
+    ///
+    /// 1. **R §5.6's own full list**, before R §5.7's `keep` truncated it. This costs nothing at
+    ///    all — every one of those poses was climbed and verified by the run — and it is the half
+    ///    that makes the margin *exist* where the kept five agreed with each other.
+    /// 2. **The stage-1 poses R §5.5 did not keep**, at most [`WIDE_STAGE1_TRIES`] of them, in
+    ///    R §5.4's own score order, refined through R §5.6's four rungs and scored by R §6 so that
+    ///    the number the margin divides by is the same quantity as its numerator. A pose is only a
+    ///    rival if it is *still* more than one wall away after the ladder: the ordinary reason a
+    ///    pair makes one placement is that every start converges on it, and a fallback that
+    ///    reported the pre-refinement distance would invent a rival out of that convergence.
+    ///
+    /// `None` when neither place holds a second placement, which is the honest answer and the one
+    /// the margin test reads as a failure ([`Thresholds::refusals`](crate::tiers::Thresholds)).
+    #[allow(clippy::too_many_arguments, reason = "the pair's whole stage-2 state, borrowed")]
+    fn wide_rival(
+        &self,
+        engine: Engine<'_>,
+        ladder: &SurfaceLadder,
+        surfaces: &(Surfaces<'_>, Surfaces<'_>),
+        candidates: &[Candidate],
+        stage1: &[Stage1Candidate],
+        kept2: &[u32],
+        p: &Params,
+    ) -> Option<WideRival> {
+        let best = candidates.first()?;
+        let t = self.scales.t;
+        if !(t.is_finite() && t > 0.0) {
+            return None;
+        }
+        let b = self.b.fragment;
+        let mut found: Option<WideRival> = None;
+        let offer = |c: &Candidate, source: RivalSource, found: &mut Option<WideRival>| {
+            let moved = placement_gap(b, &best.transform, &c.transform) / t;
+            if moved <= SAME_PLACEMENT_T || !moved.is_finite() {
+                return;
+            }
+            if found.is_none_or(|w| c.score() > w.score) {
+                *found = Some(WideRival {
+                    score: c.score(),
+                    moved_t: moved,
+                    source,
+                    accepted: c.accepted,
+                });
+            }
+        };
+        for c in candidates.iter().skip(1) {
+            offer(c, RivalSource::Stage2, &mut found);
+        }
+        if found.is_some() {
+            return found;
+        }
+
+        // The fallback. `kept2` is skipped because those poses *are* the candidates above.
+        let taken: Vec<bool> = {
+            let mut flags = vec![false; stage1.len()];
+            for &k in kept2 {
+                if let Some(flag) = flags.get_mut(k as usize) {
+                    *flag = true;
+                }
+            }
+            flags
+        };
+        let scores: Vec<f64> = stage1.iter().map(|c| c.score).collect();
+        let mut inits: Vec<Matrix4<f64>> = Vec::new();
+        let mut brk: Vec<f64> = Vec::new();
+        for k in ladder::stage1_order(&scores) {
+            if inits.len() >= WIDE_STAGE1_TRIES {
+                break;
+            }
+            let k = k as usize;
+            if taken.get(k).copied().unwrap_or(true) {
+                continue;
+            }
+            let moved = placement_gap(b, &best.transform, &stage1[k].transform) / t;
+            if moved <= SAME_PLACEMENT_T || !moved.is_finite() {
+                continue;
+            }
+            inits.push(stage1[k].transform);
+            brk.push(stage1[k].score);
+        }
+        if inits.is_empty() {
+            return None;
+        }
+        for c in &self.stage2_batch(engine, ladder, surfaces, &inits, &brk, p) {
+            offer(c, RivalSource::Stage1, &mut found);
+        }
+        found
     }
 
     /// One candidate of this pair, with the two fragment ids R §11.1 writes it under.
@@ -374,6 +546,7 @@ impl<'a> Pair<'a> {
             scores,
             accepted,
             tier: Tier::of_accept(accepted),
+            wide: None,
         }
     }
 
@@ -458,6 +631,13 @@ pub struct Candidate {
     /// Roadmap item 3's confidence band (audit §D.1), [`Tier::of_accept`] until the tier pass has
     /// spoken.
     pub tier: Tier,
+    /// Task S3's second placement of this candidate's **pair**, or `None` — the default, and what
+    /// every candidate of a run with the tier pass off carries.
+    ///
+    /// The same value on every candidate of a pair: it is a property of the pair's search and not
+    /// of one pose, and the distance in it is measured from the pair's best candidate
+    /// ([`Pair::match_pair_wide`]).
+    pub wide: Option<WideRival>,
 }
 
 impl Candidate {
@@ -510,10 +690,25 @@ pub fn match_pair_with(
     p: &Params,
     keep: usize,
 ) -> Vec<Candidate> {
+    match_pair_wide_with(engine, a, b, p, keep, false)
+}
+
+/// [`match_pair_with`], with task S3's second placement recorded when `wide` is set.
+///
+/// The pipeline passes `params.tiers.is_some()`: the rival is evidence the tier reads, so a run
+/// with the tier pass off does not pay for it and does not carry it.
+pub fn match_pair_wide_with(
+    engine: Engine<'_>,
+    a: &Fragment,
+    b: &Fragment,
+    p: &Params,
+    keep: usize,
+    wide: bool,
+) -> Vec<Candidate> {
     if Pair::skipped(a, b, p) {
         return Vec::new();
     }
-    Pair::build(a, b, p).match_pair(engine, p, keep)
+    Pair::build(a, b, p).match_pair_wide(engine, p, keep, wide)
 }
 
 /// One pose surviving R §5.4, with the hypothesis it came from and its re-score.

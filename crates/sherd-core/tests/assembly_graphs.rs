@@ -35,7 +35,7 @@ fn join(a: FragId, b: FragId, tau: [f64; 3], score: f64) -> Candidate {
 /// A join at an arbitrary pose.
 fn pose_join(a: FragId, b: FragId, transform: Matrix4<f64>, score: f64) -> Candidate {
     let scores = Scores { seam: score, tight: 1.0, ..Scores::default() };
-    Candidate { a, b, transform, scores, accepted: true, tier: Tier::Probable }
+    Candidate { a, b, transform, scores, accepted: true, tier: Tier::Probable, wide: None }
 }
 
 fn translation(tau: [f64; 3]) -> Matrix4<f64> {

@@ -92,7 +92,7 @@ use crate::fragment::Fragment;
 use crate::fragment::features::Features;
 use crate::matching::icp::{self, pose_gap};
 use crate::matching::ladder;
-use crate::matching::pair::{Candidate, Pair, SurfaceLadder};
+use crate::matching::pair::{Candidate, Pair, RivalSource, SurfaceLadder, WideRival};
 use crate::matching::scales::Scales;
 use crate::matching::verify::{self, Scores, Surfaces, over, pose_inverse, under};
 use crate::params::Params;
@@ -209,6 +209,18 @@ pub struct Probes {
     /// adding a loose `margin ≥ 2` to the rest of the tier removes neither a correct join nor a
     /// false one.
     pub margin: Option<f64>,
+    /// Task S3's **wide** second placement of the pair: the best-scoring pose more than one wall
+    /// from the pair's best, looked for in R §5.6's full list before R §5.7's `keep` truncated it
+    /// and, failing that, among the stage-1 poses R §5.5 did not keep
+    /// ([`Pair::match_pair_wide`](crate::matching::pair::Pair::match_pair_wide)).
+    ///
+    /// `None` on a run whose pair search did not look for one, and on a pair that really has one
+    /// placement — the two are told apart by [`Params::tiers`](crate::params::Params::tiers),
+    /// which is what switches the search on.
+    pub wide_rival: Option<WideRival>,
+    /// `score / wide_rival.score`, on exactly the terms [`Probes::margin`] is: `None` when there
+    /// is no second placement or when it scores zero.
+    pub wide_margin: Option<f64>,
     /// Worst rotation, in degrees, over the twelve one-ULP neighbours of this pose re-climbed
     /// through R §5.6's last two rungs.
     pub determined_deg: Option<f64>,
@@ -260,6 +272,21 @@ impl Tier {
     }
 }
 
+/// Which second placement the margin arm divides by (task S3).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RivalKind {
+    /// R §5.7's **kept** list — M1's own margin, and the only one that existed before task S3.
+    ///
+    /// The list is five candidates and they routinely converge on one fit, so on most pairs there
+    /// is nothing here to be ahead of and the margin arm cannot fire at all.
+    #[default]
+    Kept,
+    /// Task S3's [`WideRival`]: R §5.6's full list before `keep` truncated it, and failing that
+    /// the best stage-1 pose that is a second placement, refined and verified.
+    Wide,
+}
+
 /// The strict threshold set a [`Tier::Confirmed`] join has to clear, chosen on M1's table.
 ///
 /// Every value is the one the note chose and every one is a flag on `run`. Two of the arms audit
@@ -299,8 +326,11 @@ pub struct Thresholds {
     /// 128 — 2 sits on a plateau rather than on a cliff.
     pub min_margin: f64,
     /// Independent agreeing paths, when the support count is the arm that confirms. `0` makes
-    /// that arm always true, which disables the disjunction.
+    /// that arm always true, which disables the disjunction; [`u32::MAX`] switches the arm off.
     pub min_support: u32,
+    /// Task S3: which second placement [`Thresholds::min_margin`] is read against.
+    #[serde(default)]
+    pub margin_rival: RivalKind,
     /// Degrees; off by default (see the type's own note).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_determined_deg: Option<f64>,
@@ -321,6 +351,7 @@ impl Default for Thresholds {
             max_slide_t: SLIDE_BACK_T,
             min_margin: 2.0,
             min_support: 1,
+            margin_rival: RivalKind::Kept,
             max_determined_deg: None,
             min_resample_accept: None,
         }
@@ -378,21 +409,47 @@ impl Thresholds {
                 failed.push(format!("redraws accepted {accepted} < {least}"));
             }
         }
-        let by_support = probes.support >= self.min_support;
-        let by_margin = probes.margin.is_some_and(|m| m >= self.min_margin);
-        if !(by_support || by_margin) {
-            failed.push(match probes.margin {
-                Some(m) => format!(
-                    "neither arm: support {} < {} and margin {m:.2} < {}",
-                    probes.support, self.min_support, self.min_margin
-                ),
-                None => format!(
-                    "neither arm: support {} < {} and no second placement to beat",
-                    probes.support, self.min_support
-                ),
-            });
+        if self.arm(probes).is_none() {
+            failed.push(self.arms_failed(probes));
         }
         failed
+    }
+
+    /// The margin this set reads: R §5.7's kept list, or task S3's wide second placement.
+    #[must_use]
+    pub fn margin_of(&self, probes: &Probes) -> Option<f64> {
+        match self.margin_rival {
+            RivalKind::Kept => probes.margin,
+            RivalKind::Wide => probes.wide_margin,
+        }
+    }
+
+    /// Which of the distinguishing arms confirms this candidate, or `None` when none does.
+    ///
+    /// The order is the order the note argues them and it is what `report.md` prints beside a
+    /// confirmed join: a conservator asking *why is this one confirmed* is answered with the
+    /// evidence that did it, not with the list of everything that was tried.
+    #[must_use]
+    pub fn arm(&self, probes: &Probes) -> Option<&'static str> {
+        if probes.support >= self.min_support {
+            return Some("support");
+        }
+        let margin = self.margin_of(probes);
+        if margin.is_some_and(|m| m >= self.min_margin) {
+            return Some("margin");
+        }
+        None
+    }
+
+    /// The one line a candidate no arm reaches gets in `evidence.failed`, naming every arm that
+    /// was tried and the number it fell short on.
+    fn arms_failed(&self, probes: &Probes) -> String {
+        let mut parts = vec![format!("support {} < {}", probes.support, self.min_support)];
+        parts.push(match self.margin_of(probes) {
+            Some(m) => format!("margin {m:.2} < {}", self.min_margin),
+            None => "no second placement to beat".to_owned(),
+        });
+        format!("no arm: {}", parts.join(" and "))
     }
 }
 
@@ -469,6 +526,19 @@ pub struct Evidence {
     /// How far that second placement puts the sherd, in `t`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rival_moved_t: Option<f64>,
+    /// Task S3: the same ratio over the **wide** second placement (R §5.6's full list, then the
+    /// stage-1 fallback). Absent where the pair has no second placement even there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wide_margin: Option<f64>,
+    /// How far the wide second placement puts the sherd, in `t`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wide_rival_moved_t: Option<f64>,
+    /// Where the wide second placement came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wide_rival_source: Option<RivalSource>,
+    /// Whether R §6.5 would accept that second placement itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wide_rival_accepted: Option<bool>,
     /// Distinct placements the pair's kept list makes.
     pub placements: usize,
     /// Worst rotation over the twelve one-ULP neighbours, in degrees — reported, never gated.
@@ -491,6 +561,15 @@ pub struct Evidence {
     /// The tier's tests this candidate failed; empty on a confirmed join.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub failed: Vec<String>,
+    /// Task S3: which distinguishing arm confirmed this candidate — `support`, `margin` or
+    /// `research` — or `None` when no arm did.
+    ///
+    /// A confirmed join in `report.md` prints this word, because *why is this one confirmed* is
+    /// the question a conservator asks of the band and "one of the three arms held" is not an
+    /// answer to it. A candidate can hold more than one arm; the word is the first in the order
+    /// [`Thresholds::arm`] argues them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arm: Option<String>,
     /// Task S2's colour agreement across the seam — reported, never gated, absent on a collection
     /// whose files carry no colours.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -511,6 +590,10 @@ impl Evidence {
         Self {
             margin: probes.margin,
             rival_moved_t: probes.rival_moved_t,
+            wide_margin: probes.wide_margin,
+            wide_rival_moved_t: probes.wide_rival.map(|w| w.moved_t),
+            wide_rival_source: probes.wide_rival.map(|w| w.source),
+            wide_rival_accepted: probes.wide_rival.map(|w| w.accepted),
             placements: probes.placements,
             determined_deg: probes.determined_deg,
             determined_t: probes.determined_t,
@@ -520,6 +603,7 @@ impl Evidence {
             resample_accept: resample_accept(probes),
             support: probes.support,
             failed,
+            arm: th.arm(probes).map(ToOwned::to_owned),
             colour,
         }
     }
@@ -752,6 +836,7 @@ fn one_pair(
         .map(|(k, &i)| {
             let c = &candidates[i];
             let (rival_score, rival_moved_t) = rival(b, candidates, list, i, sc.t);
+            let wide_rival = c.wide;
             (
                 i,
                 Probes {
@@ -760,6 +845,9 @@ fn one_pair(
                     margin: rival_score.and_then(|r| (r > 0.0).then(|| c.score() / r)),
                     rival_score,
                     rival_moved_t,
+                    wide_rival,
+                    wide_margin: wide_rival
+                        .and_then(|w| (w.score > 0.0).then(|| c.score() / w.score)),
                     determined_deg: determined.get(k).map(|d| d.0),
                     determined_t: determined.get(k).map(|d| d.1),
                     slide_t: slide[k],
@@ -824,7 +912,11 @@ fn distinct_placements(b: &Fragment, candidates: &[Candidate], list: &[usize], t
 
 /// The worst distance between two placements of one fragment, over every twentieth vertex of its
 /// working mesh.
-fn placement_gap(fragment: &Fragment, ours: &Matrix4<f64>, theirs: &Matrix4<f64>) -> f64 {
+pub(crate) fn placement_gap(
+    fragment: &Fragment,
+    ours: &Matrix4<f64>,
+    theirs: &Matrix4<f64>,
+) -> f64 {
     let mut worst = 0.0_f64;
     for vertex in fragment.mesh.v.iter().step_by(20) {
         let point = vertex.to_f64();
@@ -1210,11 +1302,11 @@ pub fn joins(candidates: &[Candidate], names: &[String]) -> Vec<TierJoin> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ColourAgreement, Evidence, PROBABLE_TOP, Probes, SAME_PLACEMENT_T, SLIDE_BACK_T, SLIDE_T,
-        ScoreRow, Thresholds, Tier, principal_axis, probable_shown,
+        ColourAgreement, Evidence, PROBABLE_TOP, Probes, RivalKind, SAME_PLACEMENT_T, SLIDE_BACK_T,
+        SLIDE_T, ScoreRow, Thresholds, Tier, principal_axis, probable_shown,
     };
     use crate::fragment::features::{ColourStats, Features};
-    use crate::matching::pair::Candidate;
+    use crate::matching::pair::{Candidate, RivalSource, WideRival};
     use crate::matching::verify::Scores;
     use approx::assert_relative_eq;
 
@@ -1267,6 +1359,7 @@ mod tests {
             scores: Scores { seam, tight: 0.5, ..Scores::default() },
             accepted: tier != Tier::Rejected,
             tier,
+            wide: None,
         };
         let candidates = [
             candidate(0, 1, 10.0, Tier::Probable),
@@ -1327,11 +1420,20 @@ mod tests {
         assert_eq!(th.min_support, 1);
         assert_eq!(th.max_determined_deg, None, "M1 §5.4: a ranking, not a gate");
         assert_eq!(th.min_resample_accept, None, "M1 §5.8: 136 confirmed become 130, no false one");
-        // The two retired arms are skipped on the way out, so the tier set a report carries is the
-        // eight numbers the note prints and not ten with two nulls.
+        // The two retired arms are skipped on the way out, so the tier set a report carries is
+        // the numbers the note prints and not eleven with two nulls.
         let json = serde_json::to_value(th).expect("Thresholds serialises");
-        assert_eq!(json.as_object().expect("an object").len(), 8);
+        assert_eq!(json.as_object().expect("an object").len(), 9);
         assert_eq!(serde_json::from_value::<Thresholds>(json).expect("round trip"), th);
+        // A tier set written before task S3 has none of the new keys, and reading it back has to
+        // give every arm task S3 added its *off* position rather than fail.
+        let old: Thresholds = serde_json::from_str(
+            r#"{"min_tight":0.35,"max_gap_t":0.015,"min_seam":5.0,"min_cont_n":0.9,
+                "max_pen":0.0,"max_slide_t":0.1,"min_margin":2.0,"min_support":1}"#,
+        )
+        .expect("S2's own tier set still reads");
+        assert_eq!(old.margin_rival, RivalKind::Kept, "M1's own margin, off the kept list");
+        assert_relative_eq!(old.min_margin, 2.0);
     }
 
     /// A scores/probe pair that clears every test of the default set.
@@ -1350,6 +1452,8 @@ mod tests {
             rival_score: Some(4.0),
             rival_moved_t: Some(8.2),
             margin: Some(8.15),
+            wide_rival: None,
+            wide_margin: None,
             determined_deg: Some(1.1e-13),
             determined_t: Some(7.0e-14),
             slide_t: Some(5.3e-14),
@@ -1396,8 +1500,8 @@ mod tests {
             ),
             (scores, Probes { slide_t: Some(0.11), ..probes.clone() }, "slide"),
             (scores, Probes { slide_t: None, ..probes.clone() }, "slide: no shared seam"),
-            (scores, Probes { margin: None, rival_score: None, ..probes.clone() }, "neither arm"),
-            (scores, Probes { margin: Some(1.99), ..probes.clone() }, "neither arm"),
+            (scores, Probes { margin: None, rival_score: None, ..probes.clone() }, "no arm"),
+            (scores, Probes { margin: Some(1.99), ..probes.clone() }, "no arm"),
         ];
         for (s, p, want) in cases {
             let failed = th.refusals(&s, &p);
@@ -1454,7 +1558,59 @@ mod tests {
         let family = Scores { tight: 0.77, gap: 0.0091, seam: 20.0, cont_n: 0.995, ..scores };
         let alone = Probes { support: 0, margin: None, rival_score: None, ..probes };
         assert_eq!(th.refusals(&family, &alone).len(), 1);
-        assert!(th.refusals(&family, &alone)[0].starts_with("neither arm"));
+        assert!(th.refusals(&family, &alone)[0].starts_with("no arm"));
+    }
+
+    /// Task S3's second placement: the margin arm is told which rival to divide by, and a pair
+    /// whose kept list makes one placement can be spoken for by the wide one.
+    ///
+    /// This is the whole point of the step. R §5.7 returns five candidates that routinely converge
+    /// on one fit, so `margin` is `None` for most accepted pairs and the arm cannot fire; the wide
+    /// rival is the same question asked of the list R §5.7 was about to throw away.
+    #[test]
+    fn the_margin_arm_reads_the_rival_it_is_pointed_at() {
+        let (scores, _) = confirmable();
+        let (_, probes) = confirmable();
+        let one_placement = Probes {
+            support: 0,
+            margin: None,
+            rival_score: None,
+            rival_moved_t: None,
+            placements: 1,
+            wide_rival: Some(WideRival {
+                score: 3.0,
+                moved_t: 7.4,
+                source: RivalSource::Stage2,
+                accepted: false,
+            }),
+            wide_margin: Some(4.0),
+            ..probes
+        };
+        let kept = Thresholds::default();
+        assert_eq!(kept.margin_of(&one_placement), None, "the kept list holds no second placement");
+        assert_eq!(kept.arm(&one_placement), None, "so under M1's rule no arm confirms it");
+        assert_eq!(kept.refusals(&scores, &one_placement).len(), 1);
+
+        let wide = Thresholds { margin_rival: RivalKind::Wide, ..kept };
+        assert_relative_eq!(wide.margin_of(&one_placement).expect("a wide margin"), 4.0);
+        assert_eq!(wide.arm(&one_placement), Some("margin"));
+        assert!(wide.refusals(&scores, &one_placement).is_empty(), "the wide margin confirms it");
+
+        // Both rivals are reported whichever one the rule reads: the report says what was measured,
+        // not only what was gated on.
+        let e = Evidence::of(&scores, &one_placement, &wide, None);
+        assert_eq!(e.margin, None);
+        assert_relative_eq!(e.wide_margin.expect("reported"), 4.0);
+        assert_relative_eq!(e.wide_rival_moved_t.expect("reported"), 7.4);
+        assert_eq!(e.wide_rival_source, Some(RivalSource::Stage2));
+        assert_eq!(e.wide_rival_accepted, Some(false));
+        assert_eq!(e.arm.as_deref(), Some("margin"));
+
+        // A wide rival that scores zero is "nothing to be ahead of" and not an unbounded margin —
+        // the reading `Probes::margin` itself has, and `one_pair` computes `wide_margin` the same
+        // way; a `None` margin fails the test.
+        let mute = Probes { wide_margin: None, ..one_placement };
+        assert_eq!(wide.arm(&mute), None);
     }
 
     /// The two retired arms do work when they are switched on, and are silent when they are not.

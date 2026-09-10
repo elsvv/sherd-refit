@@ -21,7 +21,7 @@ use clap::{Args, Parser, Subcommand};
 use sherd_core::fragment::cache;
 use sherd_core::memory::Budget;
 use sherd_core::objects::ObjectParams;
-use sherd_core::tiers::Thresholds;
+use sherd_core::tiers::{RivalKind, Thresholds};
 use sherd_core::{
     ALGO_REF, Backend, CACHE_VERSION, CORE_VERSION, GIT_COMMIT, Params, collection, pipeline,
 };
@@ -336,6 +336,16 @@ struct RunArgs {
     /// confirms it; 0 makes that arm always true, which disables the disjunction.
     #[arg(long, default_value_t = Thresholds::default().min_support)]
     tier_support: u32,
+    /// Which second placement `--tier-margin` divides by: `kept` — R §5.7's returned list, the
+    /// margin as M1 measured it — or `wide` (task S3).
+    ///
+    /// R §5.7 returns five candidates and they routinely converge on one fit, so on most pairs the
+    /// kept list holds no second placement and the margin arm cannot fire at all. `wide` reads the
+    /// full R §5.6 list the run computed and then threw away, and where that too makes one
+    /// placement it refines the best stage-1 pose that is a second one and scores it by R §6. The
+    /// pair's own returned candidates are the same either way.
+    #[arg(long, default_value_t = Rival::default(), value_name = "kept|wide")]
+    tier_margin_rival: Rival,
     /// Degrees; worst rotation over the pose's twelve one-ULP neighbours a confirmed join may
     /// show. Off by default: M1 measured the whole range at 1.6e-14 to 4.1e-7 degrees, so there is
     /// no threshold in it and the number is reported instead.
@@ -487,6 +497,7 @@ impl RunArgs {
                     max_slide_t: self.tier_max_slide,
                     min_margin: self.tier_margin,
                     min_support: self.tier_support,
+                    margin_rival: self.tier_margin_rival.into(),
                     max_determined_deg: self.tier_max_determined_deg,
                     min_resample_accept: self.tier_resample_accept,
                 }),
@@ -527,6 +538,37 @@ impl RunArgs {
                 })
             })
             .collect()
+    }
+}
+
+/// Which second placement `--tier-margin` is read against, by name (task S3).
+///
+/// A mirror of [`RivalKind`] rather than a `ValueEnum` on it, for the reason [`Switch`] is one:
+/// `sherd-core` carries no dependency on the argument parser.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+enum Rival {
+    /// R §5.7's kept list -- the margin M1 measured.
+    #[default]
+    Kept,
+    /// Task S3's wide second placement.
+    Wide,
+}
+
+impl From<Rival> for RivalKind {
+    fn from(r: Rival) -> Self {
+        match r {
+            Rival::Kept => Self::Kept,
+            Rival::Wide => Self::Wide,
+        }
+    }
+}
+
+impl std::fmt::Display for Rival {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Kept => "kept",
+            Self::Wide => "wide",
+        })
     }
 }
 

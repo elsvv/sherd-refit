@@ -1578,6 +1578,7 @@ mod tests {
             scores,
             accepted,
             tier: Tier::of_accept(accepted),
+            wide: None,
         }
     }
 
@@ -1878,6 +1879,10 @@ mod tests {
             colour: None,
             margin: Some(4.5),
             rival_moved_t: Some(9.0),
+            wide_margin: Some(4.5),
+            wide_rival_moved_t: Some(9.0),
+            wide_rival_source: None,
+            wide_rival_accepted: None,
             placements: 2,
             determined_deg: Some(2.7e-14),
             determined_t: Some(1.8e-15),
@@ -1887,6 +1892,7 @@ mod tests {
             resample_accept: 3,
             support: 1,
             failed,
+            arm: Some("support".to_owned()),
         };
         let report = TierReport {
             thresholds: Thresholds::default(),
@@ -1975,6 +1981,10 @@ mod tests {
             colour: None,
             margin: None,
             rival_moved_t: None,
+            wide_margin: None,
+            wide_rival_moved_t: None,
+            wide_rival_source: None,
+            wide_rival_accepted: None,
             placements: 1,
             determined_deg: None,
             determined_t: None,
@@ -1984,6 +1994,7 @@ mod tests {
             resample_accept: 3,
             support: 0,
             failed: vec!["tight 0.5000 < 0.35".to_owned()],
+            arm: None,
         };
         let report = TierReport {
             thresholds: Thresholds::default(),

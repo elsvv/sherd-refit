@@ -985,6 +985,7 @@ fn pinned_candidate(
                 scores,
                 accepted: true,
                 tier: crate::tiers::Tier::Confirmed,
+                wide: None,
             }
         }
         None => Candidate {
@@ -994,6 +995,7 @@ fn pinned_candidate(
             scores: Scores::partial(&sc, 0.0),
             accepted: false,
             tier: crate::tiers::Tier::Rejected,
+            wide: None,
         },
     }
 }
@@ -1250,12 +1252,15 @@ fn match_all(
                         watch.check()?;
                         let (a, b) = pairs[k];
                         let started = Instant::now();
-                        let cs = pair::match_pair_with(
+                        let cs = pair::match_pair_wide_with(
                             engine,
                             &fragments[a],
                             &fragments[b],
                             params,
                             keep,
+                            // Task S3: the second placement is evidence the tier reads, so a run
+                            // with the tier pass off neither pays for it nor carries it.
+                            params.tiers.is_some(),
                         );
                         tracing::info!(
                             pair = %format!("{}__{}", fragments[a].name, fragments[b].name),
@@ -1743,6 +1748,7 @@ mod tests {
         let pairs = all_pairs(4);
         let candidate = |a: FragId, b: FragId, brk_best: f64| Candidate {
             tier: crate::tiers::Tier::of_accept(true),
+            wide: None,
             a,
             b,
             transform: Matrix4::identity(),

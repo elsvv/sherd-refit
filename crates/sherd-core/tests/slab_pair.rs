@@ -302,3 +302,50 @@ fn the_slab_pair_is_accepted_at_the_true_pose() {
         distance / a.thick
     );
 }
+
+/// Task S3's second placement, on the same pair: it is **additive**, and it finds a rival where
+/// R §5.7's kept list does.
+///
+/// Two claims, and the first is the one the parity freeze rests on. *Additive*: `wide` changes
+/// nothing about the list `match_pair` returns — the same poses, in the same order, with the same
+/// scores and the same verdicts — so a run with the tier pass on and a run with it off search
+/// identically and R §8 sees the same joins. *Found*: the slab is a curved wall that fits itself
+/// 88° away as well as at the seam (see the test above), so this pair genuinely has a second
+/// placement, and the probe has to report it with a distance above one wall and a score below the
+/// winner's.
+#[test]
+fn the_wide_rival_is_additive_and_names_a_second_placement() {
+    let params = Params::default();
+    let (a, b) = slab_fragments();
+    let plain = sherd_core::matching::pair::match_pair(a, b, &params, 5);
+    let wide =
+        sherd_core::matching::pair::match_pair_wide_with(Engine::REFERENCE, a, b, &params, 5, true);
+
+    assert_eq!(plain.len(), wide.len(), "`wide` changed how many candidates came back");
+    for (i, (p, w)) in plain.iter().zip(&wide).enumerate() {
+        assert_eq!(p.transform, w.transform, "candidate {i}: the pose moved");
+        assert_eq!(p.scores, w.scores, "candidate {i}: the scores moved");
+        assert_eq!(p.accepted, w.accepted, "candidate {i}: R §6.5's verdict moved");
+        assert_eq!(p.wide, None, "the plain call records no rival");
+    }
+
+    let rival = wide[0].wide.expect("the curved slab has a second placement");
+    assert!(
+        rival.moved_t > sherd_core::tiers::SAME_PLACEMENT_T,
+        "a rival is more than one wall away, not {:.2} t",
+        rival.moved_t
+    );
+    assert!(
+        rival.score < wide[0].score(),
+        "the rival {:.2} outscores the winner {:.2}",
+        rival.score,
+        wide[0].score()
+    );
+    // The whole pair carries one rival: it is a property of the search, not of one pose.
+    for c in &wide {
+        assert_eq!(c.wide, Some(rival), "every candidate of the pair carries the same rival");
+    }
+    // And it is the *best* second placement, so the margin it makes is the tightest honest one.
+    let margin = wide[0].score() / rival.score;
+    assert!(margin > 1.0, "the winner is ahead of its rival: {margin:.2}");
+}

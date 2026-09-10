@@ -675,6 +675,7 @@ mod tests {
             scores: Scores { seam: 1.0, tight: 1.0, ..Scores::default() },
             accepted: true,
             tier,
+            wide: None,
         }
     }
 

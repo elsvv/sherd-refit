@@ -59,6 +59,7 @@ use crate::params::Params;
 use crate::tiers::{self, Probes};
 use crate::types::FragId;
 
+pub use crate::matching::pair::{RivalSource, WideRival};
 pub use crate::tiers::{RESAMPLE_OFFSETS, SAME_PLACEMENT_T, SLIDE_BACK_T, SLIDE_T, ScoreRow};
 
 /// One accepted candidate, with everything a tier could read about it.
@@ -100,6 +101,15 @@ pub struct CandidateMeasure {
     /// `score / rival_score`; `None` when there is no rival, or when the rival scores zero — both
     /// of which mean "no second placement to be ahead of" and are read as an unbounded margin.
     pub margin: Option<f64>,
+    /// Task S3's **wide** second placement of the pair: R §5.6's full list before R §5.7's `keep`
+    /// truncated it, and failing that the best stage-1 pose that is a second placement, refined
+    /// and scored by R §6 ([`WideRival`]). `None` when the pair has one placement even there, and
+    /// on a run whose search did not look.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wide_rival: Option<WideRival>,
+    /// `score / wide_rival.score`, on the same strict terms [`CandidateMeasure::margin`] is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wide_margin: Option<f64>,
     /// Worst rotation, in degrees, over the twelve one-ULP neighbours of this pose re-climbed
     /// through R §5.6's last two rungs.
     pub determined_deg: Option<f64>,
@@ -197,6 +207,8 @@ pub fn measure(
                 rival_score: p.rival_score,
                 rival_moved_t: p.rival_moved_t,
                 margin: p.margin,
+                wide_rival: p.wide_rival,
+                wide_margin: p.wide_margin,
                 determined_deg: p.determined_deg,
                 determined_t: p.determined_t,
                 slide_t: p.slide_t,

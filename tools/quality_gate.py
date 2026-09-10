@@ -14,7 +14,7 @@ what it does to a Python dump.  The gate is therefore ``tools/evaluate.py`` over
 the sets that have ground truth, at seeds 0-4, because R §13's own rows are
 bands over a seed sweep and a single draw cannot be compared with them.
 
-For each of the eight development sets and each seed it runs
+For each of the nine development sets and each seed it runs
 
     sherd-refit-rs run <input> --out <work> --backend cpu \
         --no-preview --no-meshes --seed <s>
@@ -59,8 +59,8 @@ the *tier itself*: every confirmed pair of the run, classified by
 ``evaluate.py``'s own rule applied to that candidate's **own** pose rather than
 to the assembly's, so a confirmed join R §8 refused for penetration or for
 merging two groups is still scored.  ``zero false joins in the confirmed tier``
-is a prohibition on that set and it is gated on all eight collections,
-``mixed_ABG`` included.
+is a prohibition on that set and it is gated on all nine collections, the two
+mixed ones included.
 
 Audit §E's two roadmap rows, stated on the tier they are about
 ---------------------------------------------------------------
@@ -90,7 +90,7 @@ comparing the two would report a difference the tier was built to make.
 
 Sets and their ground truth
 ---------------------------
-Seven of the eight sets carry a ``ground_truth.json`` beside their meshes and are
+Eight of the nine sets carry a ``ground_truth.json`` beside their meshes and are
 scored by ``evaluate.py``.  The terracotta (``input/test_fragments_1``) has none
 -- the museum's assembly was never staged as poses -- so its R §13 row is a set
 of *decisions*, and this script checks those decisions directly from
@@ -112,9 +112,9 @@ the caches they came from.
 Scoring a run this script did not make (``--score-only``)
 ---------------------------------------------------------
 D §12's small-set rule matches nothing above 27 fragments before audit §E's step
-12, so the three acceptance collections -- ``synthetic_60``, ``synthetic_170``
-and ``mixed_all`` -- are **not** in ``SETS`` and no ordinary run of this file can
-reach them.  ``--score-only NAME RUNDIR`` takes a run directory that already
+12, so the four acceptance collections -- ``synthetic_60``, ``synthetic_170``,
+``mixed_all`` and ``synthetic_mix3_60`` -- are **not** in ``SETS`` and no
+ordinary run of this file can reach them.  ``--score-only NAME RUNDIR`` takes a run directory that already
 exists and scores it with the same :func:`score`, so the acceptance table and the
 development table come from one scorer; the seed, the wall clock and the
 ``--tiers``/``--objects`` switches of the row are read from that run's own
@@ -149,6 +149,7 @@ SETS = [
     ("pot_H", "input/sfspp/pot_H", "input/sfspp/pot_H"),
     ("synthetic_20", "input/synthetic_pingsdorf_20/fragments", "input/synthetic_pingsdorf_20"),
     ("mixed_ABG", "input/sfspp/mixed_ABG", "input/sfspp/mixed_ABG"),
+    ("synthetic_mix3_24", "input/synthetic_mix3_24/fragments", "input/synthetic_mix3_24"),
 ]
 
 # R §13's rows, split into the two things they are.
@@ -191,6 +192,23 @@ BANDS = {
     #                   tier unimprovable.
     "mixed_ABG": dict(acc=None, prec=None, pure=False, pure_tiers=True, recall_floor=12,
                       note="roadmap item 4's baseline (D §10.3), not a gate"),
+    # Task S1's coloured mixed set: three decorated vessels, 8 fragments each, every fragment
+    # carrying its scan's own photograph on the shell and its vessel's clay body on the fracture
+    # faces (`tools/make_mix3.sh`, notes/2026-09-11-s1-coloured-sets.md).  It is here for the same
+    # reason `mixed_ABG` is -- it is a collection with object ids, and separating objects is what
+    # must never regress -- so it carries the same prohibition and no more:
+    #
+    #   pure_tiers -- cross-object joins 0 and group purity 1.000 in the confirmed tier, gated at
+    #                 every seed, beside :func:`tier_verdict`'s zero-false-joins rule.
+    #   no recall_floor -- recall is *reported* per seed and never gated.  Audit §E's step-10
+    #                 floor of 12 is a number measured on `mixed_ABG` before the tier existed;
+    #                 this set has no such measurement behind it, and inventing one out of what
+    #                 the tree happens to reach today would make it unimprovable (V8-D3's
+    #                 argument, applied to a new set instead of to the terracotta).
+    #
+    # R §13 never saw this collection, so there is no accuracy or precision band to compare with.
+    "synthetic_mix3_24": dict(acc=None, prec=None, pure=False, pure_tiers=True,
+                              note="task S1's coloured mixed set; recall reported, not gated"),
 }
 
 EPS = 5e-3  # the bands above are quoted to three digits
@@ -218,7 +236,7 @@ TERRACOTTA_JOINS = {("021", "094"), ("094", "104")}
 TERRACOTTA_CONFIRMED_SLOTS = 2 * 5
 
 
-# Audit §E step 12 / D §10.3's three acceptance rows.  These collections are matched **exactly
+# Audit §E step 12 / D §10.3's acceptance rows, and task S1's coloured 60.  These collections are matched **exactly
 # once**, at the final acceptance (D §12's small-set rule: nothing above 27 fragments is matched
 # before step 12), so they are deliberately **not** in `SETS` and no ordinary run of this script
 # can reach them.  What is here is the scoring half only, reached by `--score-only`, which reads a
@@ -232,6 +250,10 @@ ACCEPTANCE = {
     "synthetic_60": "input/synthetic_pingsdorf_60",
     "synthetic_170": "input/synthetic_pingsdorf_170",
     "mixed_all": "input/sfspp/mixed_all",
+    # task S1: the 60-fragment twin of `synthetic_mix3_24`, three decorated vessels at 20
+    # fragments each.  Above D §12's 27-fragment rule like the other three, so it is scored here
+    # and never run by this script.
+    "synthetic_mix3_60": "input/synthetic_mix3_60",
 }
 
 BANDS.update({
@@ -451,7 +473,7 @@ def score(name, gt_dir, work, cen_cache, tiers=False):
 
 
 def tier_verdict(name, rows):
-    """The confirmed tier's own prohibition, on all eight sets: zero false joins in it.
+    """The confirmed tier's own prohibition, on all nine sets: zero false joins in it.
 
     Plus, for the terracotta, audit §E's step-8 gate as task G restated it: the two joins are at
     least probable at every seed, nothing else is ever confirmed, and all ten of the (seed, join)
@@ -702,7 +724,7 @@ def markdown(meta, rows, verdicts):
              "failure of one exits non-zero.%s **Band** compares the port's five draws of fragment "
              "accuracy and precision with the *reference's* five draws, which is a comparison and "
              "not a bound (task H4's note)%s."
-             % (" Under `--tiers on` audit §D.1's own prohibition joins them on all eight sets "
+             % (" Under `--tiers on` audit §D.1's own prohibition joins them on all nine sets "
                 "(**zero wrong-pose, non-adjacent and cross-object joins in the confirmed tier**), "
                 "and audit §E's two roadmap rows join them where they apply: `mixed_ABG`'s "
                 "cross-object 0 and purity 1.000 in the confirmed tier with a floor of 12 correct "
@@ -725,7 +747,7 @@ def main(argv=None):
     ap.add_argument("--out", default=os.path.join("output", "quality"))
     ap.add_argument("--backend", default="cpu")
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
-    ap.add_argument("--sets", nargs="+", default=None, help="a subset of the eight names")
+    ap.add_argument("--sets", nargs="+", default=None, help="a subset of the nine names")
     ap.add_argument("--tiers", choices=("on", "off"), default="on",
                     help="roadmap item 3's confidence tier (default on): `on` also scores the "
                          "confirmed tier and gates it at zero false joins; `off` runs the binary "
@@ -747,7 +769,7 @@ def main(argv=None):
                     help="score a run directory that already exists instead of running the "
                          "binary, and write the same table for it. NAME is one of "
                          "%s (audit §E step 12's acceptance collections, which D §12's "
-                         "small-set rule matches exactly once) or one of the eight development "
+                         "small-set rule matches exactly once) or one of the nine development "
                          "sets; DIR holds that run's transforms.json and report.json. The seed "
                          "and the wall clock are read from the run's own report.json, so a row "
                          "reports what the run did and not what this script did. Repeatable."

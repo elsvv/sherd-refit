@@ -22,6 +22,28 @@
 //! `--object-demote shell_radius` is one flag away, and the note that turns it on will have to
 //! carry the table that justifies it.
 //!
+//! # What task S2 changed, and what it did not
+//!
+//! The collection M1 was waiting for arrived: `synthetic_mix3_24` carries three photographed
+//! vessels with object ids, and on it the **clay body** — the mean Lab of the faces R §3.4 labels
+//! fracture ([`FeatureKey::FracLabA`]) — separates same-object from different-object pairs with
+//! **AUC 0.985** (0.990 on `synthetic_mix3_60`), the first feature of this project above audit
+//! §D.2's own bar. Two things follow, and they are not the same thing.
+//!
+//! * **The colours join the consensus.** [`FeatureKey::ALL`] gained the six split-colour channels
+//!   and [`FeatureKey::REPORTED`] the three of the clay body, so `## Objects` now prints what
+//!   colour each assembled vessel is and which of its members do not match it. A collection with
+//!   no colour prints no such row.
+//! * **They still do not veto.** `--object-demote frac_lab_a` was measured on the tree that added
+//!   it (`notes/2026-09-11-s2-colour.md` §4): on `synthetic_mix3_24` seed 0 it demotes **four
+//!   correct joins**, 11 confirmed down to 7, and removes **no** false one — because a group of
+//!   one vessel agrees on its clay body to a MAD of 0.025 Lab units and a `k·MAD` rule divides by
+//!   that. [`COLOUR_MAD_FLOOR`] is the fix, measured on the three single-object controls, and with
+//!   it the same flag costs nothing; but a rule that costs nothing and removes nothing is not a
+//!   rule a default should carry, so [`ObjectParams::demote`] ships empty for the second time and
+//!   for a different reason. The rule that uses colour is task S3's, chosen on the whole evidence
+//!   table, and [`Evidence::colour`](crate::tiers::Evidence::colour) is the column it will read.
+//!
 //! A `k·MAD` rule is also the wrong shape for these quantities and M1 measured that too: on
 //! `mixed_ABG` a 2·MAD gate on `thick` removes 48 % of the pairs and **43 % of the adjacent ones**,
 //! because that set's three pots are the twins `notes/2026-09-06-scale-pairs.md` §4.3 already
@@ -59,6 +81,18 @@ use crate::matching::verify::pose_inverse;
 use crate::mesh::geometry::median;
 use crate::tiers::Tier;
 use crate::types::FragId;
+
+/// Fewest Lab units a colour consensus is allowed to call a spread ([`FeatureKey::mad_floor`]).
+///
+/// **3.0, on the controls and not on a preference.** The number has to clear the widest spread a
+/// collection that is *one vessel* shows, because everything above it is read as a second vessel.
+/// Task S2 §3 measured that spread on the three single-object controls: the four real museum scans
+/// of `input/test_fragments_1` agree on their clay body's `a` to **0.39** Lab units,
+/// `synthetic_pingsdorf_20` to **3.32** and `synthetic_pingsdorf_60` to **6.61** — the last two
+/// being the generator's own per-fragment tint, which a real vessel does not have. With `k_mad` at
+/// its default 3 the effective limit is `3 x 3 = 9` Lab units, above every one of them; below it
+/// no monochrome collection is touched, and `V049`'s clay body is 11.4 units from `V012`'s.
+pub const COLOUR_MAD_FLOOR: f64 = 3.0;
 
 /// Fewest members the consensus a fragment is measured **against** must have.
 ///
@@ -99,11 +133,23 @@ pub enum FeatureKey {
     LabA,
     /// The blue–yellow opponent axis.
     LabB,
+    /// Lightness of R §3.4's **shell** faces alone (task S2).
+    ShellLabL,
+    /// The green–red axis of the same.
+    ShellLabA,
+    /// The blue–yellow axis of the same.
+    ShellLabB,
+    /// Lightness of R §3.4's **fracture** faces alone — the clay body.
+    FracLabL,
+    /// The green–red axis of the same.
+    FracLabA,
+    /// The blue–yellow axis of the same.
+    FracLabB,
 }
 
 impl FeatureKey {
     /// Every feature a consensus is taken over, in the order an object's row prints them.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 15] = [
         Self::Thick,
         Self::ThickMode,
         Self::ShellRadius,
@@ -113,6 +159,12 @@ impl FeatureKey {
         Self::LabL,
         Self::LabA,
         Self::LabB,
+        Self::ShellLabL,
+        Self::ShellLabA,
+        Self::ShellLabB,
+        Self::FracLabL,
+        Self::FracLabA,
+        Self::FracLabB,
     ];
 
     /// The features an object's row reports a member's deviation on whether or not anything may
@@ -120,9 +172,26 @@ impl FeatureKey {
     ///
     /// M1 §5.7's own list — `shell_radius`, the best AUC on the development test (0.740), and
     /// `thick`, the best on the acceptance set (0.663) — plus the two audit §D.2 names in the same
-    /// sentence as those: the fracture roughness ("temper and fabric") and the rim diameter.
-    pub const REPORTED: [Self; 4] =
-        [Self::Thick, Self::ShellRadius, Self::FracRough, Self::RimDiameter];
+    /// sentence as those: the fracture roughness ("temper and fabric") and the rim diameter. Task
+    /// S2 added the **clay body**: the mean Lab of the faces R §3.4 labels fracture, which is the
+    /// one colour statement a break makes and the only object feature this project has measured
+    /// above audit §D.2's own AUC of 0.800 (0.985 on `synthetic_mix3_24`, 0.990 on
+    /// `synthetic_mix3_60` for `frac_lab_a`). It **reports**: what it would cost to let it veto is
+    /// in `notes/2026-09-11-s2-colour.md` §4, and the answer is four correct joins for no false
+    /// one.
+    ///
+    /// A collection whose files carry no colour has no consensus on these three and prints no row
+    /// for them, which is what keeps every SfS++ collection's `## Objects` section the bytes it
+    /// was.
+    pub const REPORTED: [Self; 7] = [
+        Self::Thick,
+        Self::ShellRadius,
+        Self::FracRough,
+        Self::RimDiameter,
+        Self::FracLabL,
+        Self::FracLabA,
+        Self::FracLabB,
+    ];
 
     /// The name the CLI, `report.md` and `report.json` spell this feature with.
     #[must_use]
@@ -137,6 +206,43 @@ impl FeatureKey {
             Self::LabL => "lab_L",
             Self::LabA => "lab_a",
             Self::LabB => "lab_b",
+            Self::ShellLabL => "shell_lab_L",
+            Self::ShellLabA => "shell_lab_a",
+            Self::ShellLabB => "shell_lab_b",
+            Self::FracLabL => "frac_lab_L",
+            Self::FracLabA => "frac_lab_a",
+            Self::FracLabB => "frac_lab_b",
+        }
+    }
+
+    /// The smallest spread a consensus over this feature may be measured against.
+    ///
+    /// Zero for every geometric feature, which leaves [`Consensus::mads`] exactly the test it was:
+    /// a wall thickness is in the collection's own units and nothing outside the collection knows
+    /// how large one is, so its only scale is the one its members give it.
+    ///
+    /// [`COLOUR_MAD_FLOOR`] for every Lab channel, and that is a measurement rather than a taste.
+    /// A `k·MAD` rule divides by the spread, so a group whose members agree closely has *no*
+    /// scale: task S2 measured `V012`'s eight sherds agreeing on their clay body to a MAD of
+    /// **0.025** Lab units, which turned a difference of 0.29 — invisible to an eye, a quarter of
+    /// one just-noticeable difference — into **11.8 MAD** and demoted four correct joins on
+    /// `synthetic_mix3_24` seed 0 while removing no false one. A Lab channel, unlike a wall, comes
+    /// with an absolute scale: one unit is about the smallest difference a person sees. Below the
+    /// floor the group is one colour, and the eye's scale is used instead of a spread that is not
+    /// there.
+    #[must_use]
+    pub const fn mad_floor(self) -> f64 {
+        match self {
+            Self::LabL
+            | Self::LabA
+            | Self::LabB
+            | Self::ShellLabL
+            | Self::ShellLabA
+            | Self::ShellLabB
+            | Self::FracLabL
+            | Self::FracLabA
+            | Self::FracLabB => COLOUR_MAD_FLOOR,
+            _ => 0.0,
         }
     }
 
@@ -159,6 +265,12 @@ impl FeatureKey {
             Self::LabL => f.lab_mean.map(|l| l[0]),
             Self::LabA => f.lab_mean.map(|l| l[1]),
             Self::LabB => f.lab_mean.map(|l| l[2]),
+            Self::ShellLabL => f.shell_colour.as_ref().map(|c| c.lab_mean[0]),
+            Self::ShellLabA => f.shell_colour.as_ref().map(|c| c.lab_mean[1]),
+            Self::ShellLabB => f.shell_colour.as_ref().map(|c| c.lab_mean[2]),
+            Self::FracLabL => f.frac_colour.as_ref().map(|c| c.lab_mean[0]),
+            Self::FracLabA => f.frac_colour.as_ref().map(|c| c.lab_mean[1]),
+            Self::FracLabB => f.frac_colour.as_ref().map(|c| c.lab_mean[2]),
         }
     }
 }
@@ -166,7 +278,7 @@ impl FeatureKey {
 /// A set of [`FeatureKey`]s, as one word.
 ///
 /// A bitmask and not a `Vec` because [`Params`](crate::params::Params) is `Copy` and every stage
-/// of the pipeline passes it by value; a set of nine flags does not need an allocation to make
+/// of the pipeline passes it by value; a set of fifteen flags does not need an allocation to make
 /// that stop being true. It serialises as the list of names `report.json` prints and
 /// `--object-demote` accepts, so the wire form is the readable one either way.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -320,9 +432,15 @@ impl Consensus {
     /// group of identical values gives and what M1 §4 measured for `lab_a` and `lab_b` on every
     /// SfS++ collection (one flat grey per file). A zero MAD would make every deviation infinite
     /// and every member an outlier, so the honest answer is that this feature cannot say.
+    ///
+    /// The scale is the MAD or [`FeatureKey::mad_floor`], whichever is larger. That floor is zero
+    /// for every geometric feature — this is the test it always was for them — and
+    /// [`COLOUR_MAD_FLOOR`] for a Lab channel, where a group can agree so closely that its spread
+    /// stops being a scale at all.
     #[must_use]
     pub fn mads(&self, value: f64) -> Option<f64> {
-        (self.mad > 0.0 && self.mad.is_finite()).then(|| (value - self.median).abs() / self.mad)
+        let scale = self.mad.max(self.feature.mad_floor());
+        (scale > 0.0 && scale.is_finite()).then(|| (value - self.median).abs() / scale)
     }
 }
 
@@ -797,14 +915,52 @@ pub fn operator_view(
 #[cfg(test)]
 mod tests {
     use super::{
-        Consensus, FeatureKey, FeatureSet, GroupFeatures, MIN_CONSENSUS_MEMBERS, ObjectParams,
-        exceeded,
+        COLOUR_MAD_FLOOR, Consensus, FeatureKey, FeatureSet, GroupFeatures, MIN_CONSENSUS_MEMBERS,
+        ObjectParams, exceeded,
     };
-    use crate::fragment::features::Features;
+    use crate::fragment::features::{ColourStats, Features};
     use approx::assert_relative_eq;
 
     fn feature(thick: f64, radius: Option<f64>) -> Features {
         Features { thick, thick_mode: thick, shell_radius: radius, ..Features::default() }
+    }
+
+    fn body(a: f64) -> Features {
+        Features {
+            frac_colour: Some(ColourStats {
+                lab_mean: [40.0, a, 15.0],
+                lab_mad: [1.0, 1.0, 1.0],
+                hist: vec![0; 64],
+                points: 1_000,
+            }),
+            ..Features::default()
+        }
+    }
+
+    /// Task S2: a group that agrees on its colour has no spread to divide by, and the floor is
+    /// what stops a quarter of a just-noticeable difference from reading as eleven MADs.
+    ///
+    /// The four values below are `V012`'s own clay body on `synthetic_mix3_24` rounded to two
+    /// places; without the floor the odd one out is 11.8 MAD from the other three and every
+    /// confirmed join it touches is demoted, which is what the note measured and what the
+    /// shortlist is empty because of.
+    #[test]
+    fn a_colour_consensus_is_never_measured_against_a_spread_it_does_not_have() {
+        let group = GroupFeatures::of([&body(3.62), &body(3.65), &body(3.39)]);
+        let c = group.get(FeatureKey::FracLabA).expect("three members carry a clay body");
+        assert!(c.mad < 0.1, "the group agrees to a MAD of {:.3} Lab units", c.mad);
+        let mads = c.mads(3.33).expect("the floor is a scale");
+        assert_relative_eq!(mads, (3.62 - 3.33) / COLOUR_MAD_FLOOR, epsilon = 1e-12);
+        assert!(mads < ObjectParams::default().k_mad, "0.29 Lab units refuses nothing");
+        // A second vessel's clay body is another matter: `V049` sits at 15.1.
+        assert!(
+            c.mads(15.13).expect("the floor is a scale") > ObjectParams::default().k_mad,
+            "11.5 Lab units is a different pot"
+        );
+        // Every geometric feature keeps the test it always had: its own spread, or nothing.
+        assert_relative_eq!(FeatureKey::Thick.mad_floor(), 0.0);
+        let flat = Consensus { feature: FeatureKey::Thick, median: 3.0, mad: 0.0, n: 4 };
+        assert!(flat.mads(9.0).is_none(), "a zero MAD on a wall is still a refusal to answer");
     }
 
     /// M1 §4's verdict is the shipped default, and it is the one thing about this module a later
@@ -850,12 +1006,26 @@ mod tests {
     }
 
     /// A consensus with no spread cannot say how far anything is from it, and says so rather than
-    /// calling every member an outlier — which is M1 §4's `lab_a` on every SfS++ collection.
+    /// calling every member an outlier — on every feature whose units only the collection knows.
+    ///
+    /// Task S2 split that sentence in two. A wall thickness with a zero MAD still refuses. A Lab
+    /// channel does not have to: its units are the eye's, so [`COLOUR_MAD_FLOOR`] answers instead
+    /// — which on M1 §4's flat-grey SfS++ collections is still *no deviation at all*, because
+    /// every member is the same grey, and on a real outlier is a real number.
     #[test]
     fn a_zero_mad_refuses_the_question_instead_of_answering_infinity() {
-        let flat = Consensus { feature: FeatureKey::LabA, median: 0.0, mad: 0.0, n: 7 };
-        assert_eq!(flat.mads(0.0), None);
-        assert_eq!(flat.mads(50.0), None);
+        let flat_wall = Consensus { feature: FeatureKey::Thick, median: 3.0, mad: 0.0, n: 7 };
+        assert_eq!(flat_wall.mads(3.0), None);
+        assert_eq!(flat_wall.mads(50.0), None, "a wall has no scale outside its collection");
+
+        let flat_grey = Consensus { feature: FeatureKey::LabA, median: 0.0, mad: 0.0, n: 7 };
+        assert_relative_eq!(flat_grey.mads(0.0).expect("the eye's scale"), 0.0);
+        assert_relative_eq!(
+            flat_grey.mads(50.0).expect("the eye's scale"),
+            50.0 / COLOUR_MAD_FLOOR,
+            epsilon = 1e-12
+        );
+
         let real = Consensus { feature: FeatureKey::Thick, median: 3.5, mad: 0.25, n: 7 };
         assert_relative_eq!(real.mads(4.0).expect("a scale"), 2.0, epsilon = 1e-12);
     }

@@ -388,11 +388,16 @@ struct RunArgs {
     objects: Switch,
     /// Features whose deviation from an object's consensus demotes a join to probable, comma
     /// separated (`thick`, `thick_mode`, `shell_radius`, `frac_rough`, `axis_diameter`,
-    /// `rim_diameter`, `lab_L`, `lab_a`, `lab_b`).
+    /// `rim_diameter`, `lab_L`, `lab_a`, `lab_b`, `shell_lab_L`, `shell_lab_a`, `shell_lab_b`,
+    /// `frac_lab_L`, `frac_lab_a`, `frac_lab_b`).
     ///
-    /// **Empty by default, on the measurement**: M1 §4 found no feature reaching audit §D.2's own
-    /// AUC of 0.800 on any collection with real object ids. Turning one on without a table that
-    /// justifies it is exactly what the audit's quality principles forbid.
+    /// **Empty by default, on the measurement**: M1 §4 found no geometric feature reaching audit
+    /// §D.2's own AUC of 0.800 on any collection with real object ids, and task S2 found the clay
+    /// body above it (0.985) but measured the demotion costing four correct joins on
+    /// `synthetic_mix3_24` seed 0 for no false one. Turning one on without a table that justifies
+    /// it is exactly what the audit's quality principles forbid; `frac_lab_a` is the one with a
+    /// table behind it, and `objects::COLOUR_MAD_FLOOR` is what makes it safe on a collection
+    /// that is one vessel.
     #[arg(long, value_name = "LIST", value_delimiter = ',')]
     object_demote: Vec<String>,
     /// How many MADs from its object's median a fragment may sit before the consensus rejects it.

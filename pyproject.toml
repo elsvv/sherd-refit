@@ -12,6 +12,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# `tools/make_synthetic.py` only. trimesh loads the source scans (and, since task S1, hands back
+# their glTF texture coordinates in the frame the solid is built in); pygltflib reads the
+# base-colour photograph straight out of the GLB's buffer, because trimesh converts a
+# specular-glossiness diffuse map on the way in and the fragments are meant to carry the
+# scanner's own bytes. Neither is needed to run the pipeline.
+synth = ["trimesh>=4", "pygltflib>=1.16", "scikit-image>=0.22"]
 
 [project.scripts]
 sherd-refit = "sherd_refit.cli:main"

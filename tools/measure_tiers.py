@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Measure everything a confidence tier could be built on, before any threshold is chosen.
 
-    python tools/measure_tiers.py [--stage runs|tiers|features|all]
+    python tools/measure_tiers.py [--stage runs|tiers|features|colour|all]
                                   [--bin target/release/sherd-refit-rs]
                                   [--seeds 0 1 2 3 4] [--out output/measure]
 
-This is roadmap step 7 (audit §D.1 and §D.2, D §12 row 7).  It has two halves
-and they answer two different questions.
+This is roadmap step 7 (audit §D.1 and §D.2, D §12 row 7).  It has three halves
+-- two of them from step 7 itself and one added by task S2 -- and they answer
+three different questions.
 
 **The tier table** (``--stage runs`` then ``tiers``).  The eight development
 sets are run at seeds 0-4 -- the same forty runs ``tools/quality_gate.py``
@@ -23,11 +24,25 @@ joins over all forty runs** with the most correct joins left.
 
 **The feature table** (``--stage features``).  ``segment --features`` computes
 audit §D.2's per-fragment object features on pots A-H, ``mixed_ABG``,
-``synthetic_20`` and -- the audit's one stated exception to the 27-fragment
-rule, because preprocessing is linear in the fragment count and matches nothing
--- ``synthetic_170`` and ``mixed_all``.  Per feature it reports the AUC of
+``synthetic_20``, the two coloured ``synthetic_mix3`` collections and -- the
+audit's one stated exception to the 27-fragment rule, because preprocessing is
+linear in the fragment count and matches nothing -- ``synthetic_60``,
+``synthetic_170`` and ``mixed_all``.  Per feature it reports the AUC of
 same-object against different-object pairs, the share of pairs a ``k*MAD`` veto
-would remove at k = 2 and 3, and how many true adjacent pairs that costs.
+would remove at k = 2 and 3, and how many true adjacent pairs that costs.  Task
+S2 added the six split-colour channels to that list and, beside it, the
+pair-level colour distances with an absolute sweep, because a Lab distance has a
+scale of its own and ``k*MAD`` is not it.
+
+**The colour table** (``--stage colour``, task S2).  The feature table above is
+the *object* question -- over every fragment pair, whether two sherds are one
+vessel.  This is the *join* question: it runs the development sets that carry
+both colour and object ids at seeds 0-4 and reads the candidates R §6.5
+accepted, counting how many of them cross an object and asking whether the
+colour recorded on each -- ``evidence.colour``, the clay bodies' CIE76 distance
+and the skins' histogram distance -- separates those from the rest.  That is the
+population a confirmation rule would be chosen on.  ``--object-demote`` is
+passed through, so what a shortlist costs is measured here rather than argued.
 
 Nothing here decides anything.  The thresholds this script *proposes* are the
 argmax of a search it prints in full; the note is where they are chosen.
@@ -77,19 +92,49 @@ FEATURE_SETS = [
     ("terracotta", "input/test_fragments_1/fragments"),
     ("mixed_ABG", "input/sfspp/mixed_ABG"),
     ("synthetic_20", "input/synthetic_pingsdorf_20/fragments"),
+    ("synthetic_60", "input/synthetic_pingsdorf_60/fragments"),
     ("synthetic_170", "input/synthetic_pingsdorf_170/fragments"),
     ("mixed_all", "input/sfspp/mixed_all"),
+    # Task S2: the two coloured collections task S1 built, which are the only sets in the
+    # benchmark that carry real photographic colour **and** object ids at the same time.
+    ("synthetic_mix3_24", "input/synthetic_mix3_24/fragments"),
+    ("synthetic_mix3_60", "input/synthetic_mix3_60/fragments"),
 ]
 # Where each of those keeps its ground_truth.json (object ids and adjacency).
 FEATURE_GT = {
     "synthetic_20": "input/synthetic_pingsdorf_20",
+    "synthetic_60": "input/synthetic_pingsdorf_60",
     "synthetic_170": "input/synthetic_pingsdorf_170",
+    "synthetic_mix3_24": "input/synthetic_mix3_24",
+    "synthetic_mix3_60": "input/synthetic_mix3_60",
 }
 
 # The per-fragment features whose AUC is measured, and whether the fit that made
 # them can refuse (a `None` row is dropped from that feature's table, not zeroed).
+#
+# The `shell_*` and `frac_*` rows are task S2's: the file's own vertex colours split by R §3.4's
+# labels, so that the fabric a break shows is measured apart from the photograph a skin carries.
 FEATURES = ["thick", "thick_mode", "shell_radius", "frac_rough", "axis_diameter",
-            "axis_residual", "shell_rms", "axis_rms", "lab_L", "lab_a", "lab_b", "lab_spread_L"]
+            "axis_residual", "shell_rms", "axis_rms", "lab_L", "lab_a", "lab_b", "lab_spread_L",
+            "shell_lab_L", "shell_lab_a", "shell_lab_b", "shell_lab_mad_L",
+            "frac_lab_L", "frac_lab_a", "frac_lab_b", "frac_lab_mad_L"]
+
+# Task S2's PAIR-level colour distances: one number per fragment pair rather than the difference
+# of two per-fragment scalars, which is what a join-level rule would actually read.
+PAIR_DISTANCES = [
+    ("frac_delta_e", "CIE76 between the two fracture faces' mean Lab"),
+    ("shell_delta_e", "CIE76 between the two shell faces' mean Lab"),
+    ("frac_hist", "total variation between the two fracture Lab histograms"),
+    ("shell_hist", "total variation between the two shell Lab histograms"),
+]
+
+# Absolute thresholds the pair distances are swept at, in their own units.
+PAIR_LIMITS = {
+    "frac_delta_e": [1.0, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0],
+    "shell_delta_e": [1.0, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0],
+    "frac_hist": [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+    "shell_hist": [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+}
 
 # scale-pairs §4.3's own gate, to reproduce its numbers with these fits: keep a pair whose
 # thicknesses are within 2x and whose shell radii are within 3x.
@@ -793,13 +838,94 @@ def mad(values):
 
 
 def flatten_colour(rows):
-    """`lab_mean` and `lab_spread` are arrays; the AUC table wants channels."""
+    """`lab_mean`, `lab_spread` and task S2's two `ColourStats` are arrays; the AUC table wants
+    channels."""
     for r in rows:
         mean, spread = r.get("lab_mean"), r.get("lab_spread")
         for i, c in enumerate("Lab"):
             r["lab_%s" % c] = mean[i] if mean else None
             r["lab_spread_%s" % c] = spread[i] if spread else None
+        for side, key in (("shell", "shell_colour"), ("frac", "frac_colour")):
+            block = r.get(key)
+            for i, c in enumerate("Lab"):
+                r["%s_lab_%s" % (side, c)] = block["lab_mean"][i] if block else None
+                r["%s_lab_mad_%s" % (side, c)] = block["lab_mad"][i] if block else None
     return rows
+
+
+def delta_e76(a, b):
+    """CIE76 between two Lab triples."""
+    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+
+
+def hist_tv(a, b):
+    """Total variation between two histograms, normalised by their own counts.
+
+    The same arithmetic `ColourStats::hist_distance` ships, so the table and the binary cannot
+    come to mean two different things by one column name."""
+    na, nb = sum(a), sum(b)
+    if not na or not nb or len(a) != len(b):
+        return None
+    return 0.5 * sum(abs(x / na - y / nb) for x, y in zip(a, b))
+
+
+def pair_distance(key, a, b):
+    """One of PAIR_DISTANCES for one pair of feature rows, or None where it cannot be answered."""
+    side = "frac_colour" if key.startswith("frac") else "shell_colour"
+    x, y = a.get(side), b.get(side)
+    if not x or not y:
+        return None
+    if key.endswith("delta_e"):
+        return delta_e76(x["lab_mean"], y["lab_mean"])
+    return hist_tv(x["hist"], y["hist"])
+
+
+def analyse_pairs(name, rows, object_of, adjacency):
+    """Task S2's pair-level colour distances: AUC, a k*MAD veto and an absolute sweep.
+
+    A collection with no staged object ids (the terracotta, and each single-object pot) is read as
+    **one** object, so it contributes the within-object half of every distribution and no AUC --
+    which is exactly what a control is for."""
+    objects = object_of or {r["name"]: name for r in rows}
+    out = {}
+    for key, _ in PAIR_DISTANCES:
+        have = [r for r in rows if r["name"] in objects]
+        same, diff, all_pairs = [], [], []
+        for i in range(len(have)):
+            for j in range(i + 1, len(have)):
+                a, b = have[i], have[j]
+                d = pair_distance(key, a, b)
+                if d is None:
+                    continue
+                (same if objects[a["name"]] == objects[b["name"]] else diff).append(d)
+                all_pairs.append((tuple(sorted((a["name"], b["name"]))), d))
+        if not all_pairs:
+            out[key] = None
+            continue
+        adj = [p for p in all_pairs if p[0] in adjacency]
+        spread = mad([d for _, d in all_pairs])
+        row = dict(pairs=len(all_pairs), n_same=len(same), n_diff=len(diff),
+                   adjacent=len(adj), mad=spread, auc=auc(diff, same),
+                   same_q=quantiles(same), diff_q=quantiles(diff))
+        for k in (2, 3):
+            limit = k * spread
+            row["k%d" % k] = dict(
+                limit=limit,
+                pairs_removed=sum(1 for _, d in all_pairs if d > limit) / len(all_pairs),
+                adjacent_removed=(sum(1 for _, d in adj if d > limit) / len(adj)) if adj else None,
+                adjacent_total=len(adj))
+        sweep = []
+        for limit in PAIR_LIMITS[key]:
+            cut_diff = sum(1 for d in diff if d > limit)
+            cut_same = sum(1 for d in same if d > limit)
+            cut_adj = sum(1 for _, d in adj if d > limit)
+            sweep.append(dict(limit=limit,
+                              different_removed=(cut_diff / len(diff)) if diff else None,
+                              same_removed=(cut_same / len(same)) if same else None,
+                              adjacent_removed=(cut_adj / len(adj)) if adj else None))
+        row["sweep"] = sweep
+        out[key] = row
+    return out
 
 
 def ratio_gate(rows, object_of, adjacency):
@@ -858,7 +984,7 @@ def analyse_one(rows, object_of, adjacency):
 
 
 def analyse_features(tables):
-    result = dict(collections={}, medians={}, colour={})
+    result = dict(collections={}, medians={}, colour={}, pairs={})
     pooled, pooled_objects = [], {}
     for name, rows in tables.items():
         object_of, adjacency = object_ids(name, flatten_colour(rows))
@@ -866,12 +992,15 @@ def analyse_features(tables):
             ratio_gate=ratio_gate(rows, object_of, adjacency),
             fragments=len(rows), objects=len(set(object_of.get(r["name"], "?") for r in rows)),
             features=analyse_one(rows, object_of, adjacency))
+        result["pairs"][name] = analyse_pairs(name, rows, object_of, adjacency)
         result["medians"][name] = {
             key: (sorted(v)[len(v) // 2] if (v := [r[key] for r in rows
                   if r.get(key) is not None and math.isfinite(r[key])]) else None)
             for key in FEATURES}
         result["colour"][name] = dict(
             with_colour=sum(1 for r in rows if r.get("lab_mean")),
+            with_shell=sum(1 for r in rows if r.get("shell_colour")),
+            with_fracture=sum(1 for r in rows if r.get("frac_colour")),
             distinct=sorted({r.get("colour_distinct", 0) for r in rows}),
             lab_mean=[round(x, 2) for x in rows[0]["lab_mean"]] if rows and rows[0].get("lab_mean") else None)
         result["collections"][name]["rims"] = sum(1 for r in rows if r.get("rim"))
@@ -910,7 +1039,7 @@ def render_features(res):
     for name, c in res["collections"].items():
         for key in FEATURES:
             row = c["features"].get(key)
-            if row is None or row["auc"] is None:
+            if row is None:
                 continue
             cells = []
             for k in (2, 3):
@@ -932,11 +1061,179 @@ def render_features(res):
             name, g["pairs"], fmt(g["kept"]), g["adjacent"], fmt(g["adjacent_kept"]),
             g["same_object_cut"]))
     L += ["", "## Colour", "",
-          "| collection | fragments with vertex colours | distinct RGB triples per fragment |",
-          "|---|---:|---|"]
+          "A collection whose files carry no vertex colours reports **unavailable** and not a "
+          "zero: every SfS++ set but the seven coloured fragments of `mixed_all` is such a set, "
+          "and every colour row of theirs below is absent rather than neutral.", "",
+          "| collection | fragments with vertex colours | with a shell colour | with a fracture "
+          "colour | distinct RGB triples per fragment |",
+          "|---|---:|---:|---:|---|"]
     for name, c in res["colour"].items():
-        L.append("| `%s` | %d | %s |" % (name, c["with_colour"],
-                                         ", ".join(str(d) for d in c["distinct"][:5])))
+        L.append("| `%s` | %s | %s | %s | %s |" % (
+            name,
+            c["with_colour"] or "unavailable",
+            c.get("with_shell") or "unavailable",
+            c.get("with_fracture") or "unavailable",
+            ", ".join(str(d) for d in c["distinct"][:5])))
+    L += ["", "## Task S2: the pair-level colour distances", "",
+          "One number per fragment **pair** rather than the difference of two per-fragment "
+          "scalars: `frac_delta_e` and `shell_delta_e` are CIE76 between the two sides' mean Lab, "
+          "`frac_hist` and `shell_hist` the total variation between their 4x4x4 Lab histograms. "
+          "AUC is `P(a different-object pair's distance > a same-object pair's)`. A collection "
+          "with no staged object ids is read as one object and reports the same-object half "
+          "alone.", "",
+          "| collection | distance | pairs | same / diff | AUC | median same | median diff | "
+          "2·MAD: pairs cut / adjacent cut | 3·MAD: pairs cut / adjacent cut |",
+          "|---|---|---:|---|---:|---:|---:|---|---|"]
+    for name, rows in res.get("pairs", {}).items():
+        for key, _ in PAIR_DISTANCES:
+            row = rows.get(key)
+            if not row:
+                continue
+            cells = []
+            for k in (2, 3):
+                v = row["k%d" % k]
+                cells.append("%s / %s" % (fmt(v["pairs_removed"]), fmt(v["adjacent_removed"])))
+            L.append("| `%s` | `%s` | %d | %d / %d | %s | %s | %s | %s | %s |" % (
+                name, key, row["pairs"], row["n_same"], row["n_diff"], fmt(row["auc"]),
+                fmt(row["same_q"][2] if row["same_q"] else None, "%.4g"),
+                fmt(row["diff_q"][2] if row["diff_q"] else None, "%.4g"),
+                cells[0], cells[1]))
+    L += ["", "### What an absolute threshold on those distances would remove", "",
+          "Per collection and distance: the share of **different-object** pairs a veto at that "
+          "limit removes (its gain), the share of **same-object** pairs it removes and the share "
+          "of the ground truth's **adjacent** pairs it costs.", "",
+          "A collection with no different-object pair (the terracotta, each single pot, the "
+          "pingsdorf sets) is the **control**: its `same cut` is what the same limit would cost "
+          "on a collection that is one vessel and nothing else.", "",
+          "| collection | distance | limit | different cut | same cut | adjacent cut |",
+          "|---|---|---:|---:|---:|---:|"]
+    for name, rows in res.get("pairs", {}).items():
+        for key, _ in PAIR_DISTANCES:
+            row = rows.get(key)
+            if not row:
+                continue
+            for step in row["sweep"]:
+                L.append("| `%s` | `%s` | %.4g | %s | %s | %s |" % (
+                    name, key, step["limit"], fmt(step["different_removed"]),
+                    fmt(step["same_removed"]), fmt(step["adjacent_removed"])))
+    L.append("")
+    return "\n".join(L)
+
+
+# Task S2's colour stage: the development sets whose files carry colour AND object ids.
+COLOUR_SETS = [
+    ("synthetic_mix3_24", "input/synthetic_mix3_24/fragments", "input/synthetic_mix3_24"),
+    ("synthetic_20", "input/synthetic_pingsdorf_20/fragments", "input/synthetic_pingsdorf_20"),
+]
+
+
+def stage_colour(a, out):
+    """What the colour evidence looks like on the candidates R §6.5 actually accepted.
+
+    §2's tables are over *every* fragment pair, which is the object question.  This is the join
+    question: of the candidates the matcher accepted, how many cross an object, and does the colour
+    recorded on each of them separate those from the rest?  It is the population a confirmation
+    rule would be chosen on, and it is measured here so that the rule can be chosen on it."""
+    rows = []
+    for name, indir, gt_dir in COLOUR_SETS:
+        if a.sets is not None and name not in a.sets:
+            continue
+        if not os.path.isdir(os.path.join(ROOT, indir)):
+            print("skip %-18s (no %s)" % (name, indir))
+            continue
+        with open(os.path.join(ROOT, gt_dir, "ground_truth.json")) as f:
+            gt = json.load(f)
+        object_of = gt.get("object_of", {})
+        adjacency = {tuple(sorted(p)) for p in gt.get("adjacency", [])}
+        work = os.path.join(out, "colour", name)
+        for seed in a.seeds:
+            cmd = [os.path.join(ROOT, a.bin), "run", indir, "--out", work,
+                   "--backend", a.backend, "--no-preview", "--no-meshes", "--seed", str(seed)]
+            if a.object_demote:
+                cmd += ["--object-demote", a.object_demote]
+            wall, rc, log = sh(cmd)
+            if rc != 0:
+                print(log)
+                raise SystemExit("run failed: %s seed %d (exit %d)" % (name, seed, rc))
+            with open(os.path.join(work, "report.json")) as f:
+                report = json.load(f)
+            rows.append(colour_row(name, seed, wall, report, object_of, adjacency))
+            print("%-18s seed %d  %6.1f s  accepted %d (%d cross-object), confirmed %d (%d "
+                  "cross-object), demoted %d" % (
+                      name, seed, wall, rows[-1]["accepted"], rows[-1]["accepted_cross"],
+                      rows[-1]["confirmed"], rows[-1]["confirmed_cross"], rows[-1]["demotions"]))
+        if not a.keep_work:
+            shutil.rmtree(work, ignore_errors=True)
+    with open(os.path.join(out, "colour.json"), "w") as f:
+        json.dump(rows, f, indent=1)
+    md = render_colour(rows)
+    with open(os.path.join(out, "colour.md"), "w") as f:
+        f.write(md)
+    print(md)
+
+
+def colour_row(name, seed, wall, report, object_of, adjacency):
+    """One run, read as the join question."""
+    accepted = [c for c in report["candidates"] if c.get("accepted")]
+    row = dict(set=name, seed=seed, wall_s=wall,
+               candidates=len(report["candidates"]), accepted=len(accepted),
+               demotions=len(report.get("objects", {}).get("demotions", [])),
+               merges=report.get("objects", {}).get("merges", 0))
+    pairs = {}
+    for c in accepted:
+        key = tuple(sorted((c["a"], c["b"])))
+        best = pairs.get(key)
+        if best is None or c["score"] > best["score"]:
+            pairs[key] = c
+    cross = [k for k in pairs if object_of.get(k[0]) != object_of.get(k[1])]
+    confirmed = [k for k, c in pairs.items() if c.get("tier") == "confirmed"]
+    row.update(accepted_pairs=len(pairs), accepted_cross=len(cross),
+               confirmed=len(confirmed),
+               confirmed_cross=sum(1 for k in confirmed
+                                   if object_of.get(k[0]) != object_of.get(k[1])))
+    for key in ("frac_delta_e", "shell_hist"):
+        same, diff, adj = [], [], []
+        for k, c in pairs.items():
+            v = (c.get("evidence") or {}).get("colour", {}).get(key)
+            if v is None:
+                continue
+            if object_of.get(k[0]) != object_of.get(k[1]):
+                diff.append(v)
+            else:
+                same.append(v)
+                if k in adjacency:
+                    adj.append(v)
+        row[key] = dict(n_same=len(same), n_cross=len(diff), n_adjacent=len(adj),
+                        auc=auc(diff, same), same_q=quantiles(same), cross_q=quantiles(diff),
+                        adjacent_q=quantiles(adj))
+    return row
+
+
+def render_colour(rows):
+    L = ["# Task S2, part 3 — the colour evidence on the candidates R §6.5 accepted", "",
+         "One row per run. `accepted` counts pairs (the best candidate of each), `cross-object` "
+         "the ones whose two sherds belong to two vessels of the ground truth. AUC is "
+         "`P(a cross-object accepted pair's distance > a same-object one's)` over the accepted "
+         "pairs alone -- the population a confirmation rule would read.", "",
+         "| set | seed | accepted pairs | cross-object | confirmed | cross-object confirmed | "
+         "demoted | merges | frac dE AUC | shell hist AUC |",
+         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    for r in rows:
+        L.append("| `%s` | %d | %d | %d | %d | %d | %d | %d | %s | %s |" % (
+            r["set"], r["seed"], r["accepted_pairs"], r["accepted_cross"], r["confirmed"],
+            r["confirmed_cross"], r["demotions"], r["merges"],
+            fmt(r["frac_delta_e"]["auc"]), fmt(r["shell_hist"]["auc"])))
+    L += ["", "## The two distances over the accepted pairs, by class", "",
+          "Quantiles are 0, 5, 50, 95, 100 %.", "",
+          "| set | seed | distance | same-object (n) | quantiles | cross-object (n) | quantiles |",
+          "|---|---:|---|---:|---|---:|---|"]
+    q = lambda v: "-" if not v else " / ".join("%.3g" % x for x in v)
+    for r in rows:
+        for key in ("frac_delta_e", "shell_hist"):
+            c = r[key]
+            L.append("| `%s` | %d | `%s` | %d | %s | %d | %s |" % (
+                r["set"], r["seed"], key, c["n_same"], q(c["same_q"]),
+                c["n_cross"], q(c["cross_q"])))
     L.append("")
     return "\n".join(L)
 
@@ -944,7 +1241,8 @@ def render_features(res):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--stage", default="all", choices=["runs", "tiers", "features", "all"])
+    ap.add_argument("--stage", default="all",
+                    choices=["runs", "tiers", "features", "colour", "all"])
     ap.add_argument("--bin", default=os.path.join("target", "release", "sherd-refit-rs"))
     ap.add_argument("--out", default=os.path.join("output", "measure"))
     ap.add_argument("--backend", default="cpu")
@@ -955,6 +1253,9 @@ def main(argv=None):
     ap.add_argument("--reuse", action="store_true",
                     help="keep feature tables that are already on disk")
     ap.add_argument("--keep-work", action="store_true")
+    ap.add_argument("--object-demote", default=None,
+                    help="comma-separated feature list passed to `run --object-demote` in the "
+                         "colour stage, to measure what a shortlist costs")
     a = ap.parse_args(argv)
     out = os.path.join(ROOT, a.out)
     os.makedirs(out, exist_ok=True)
@@ -964,6 +1265,8 @@ def main(argv=None):
         stage_tiers(a, out)
     if a.stage in ("features", "all"):
         stage_features(a, out)
+    if a.stage in ("colour", "all"):
+        stage_colour(a, out)
     return 0
 
 

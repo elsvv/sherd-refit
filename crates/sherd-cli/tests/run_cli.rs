@@ -268,9 +268,8 @@ fn the_agreement_mode_only_ever_takes_joins_out_of_the_confirmed_band() {
     for c in twice["candidates"].as_array().expect("candidates") {
         if c["tier"] == "probable"
             && let Some(failed) = c["evidence"]["failed"].as_array()
-            && let Some(line) = failed.iter().filter_map(|f| f.as_str()).find(|f| {
-                f.starts_with("agreement:")
-            })
+            && let Some(line) =
+                failed.iter().filter_map(|f| f.as_str()).find(|f| f.starts_with("agreement:"))
         {
             assert!(line.contains("did not confirm this pair at this placement"), "{line}");
         }

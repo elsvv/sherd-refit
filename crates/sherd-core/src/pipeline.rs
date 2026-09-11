@@ -1119,6 +1119,9 @@ fn with_device_slack<T: Send>(exec: &dyn Executor, body: impl FnOnce() -> T + Se
 /// library default and what `--tiers off` sets: every candidate then keeps
 /// [`Tier::of_accept`](crate::tiers::Tier::of_accept)'s band, R §8's gate is `accepted`, and the
 /// run is byte for byte the run it was before this pass existed.
+/// What one agreement run of [`agree_pass`] confirmed: the placements it put each pair at.
+type Confirmed = BTreeMap<(FragId, FragId), Vec<Matrix4<f64>>>;
+
 /// Task R1's agreement mode ([`Thresholds::agree_seeds`](crate::tiers::Thresholds::agree_seeds)):
 /// the collection is matched and tiered `n` times at `n` different seeds, and a join stays
 /// confirmed only where **every** run confirmed that pair at the same placement.
@@ -1167,13 +1170,10 @@ fn agree_pass(
     let extra = (seeds - 1).min(crate::tiers::AGREE_OFFSETS.len());
     // Which pairs are worth asking about: the ones this run confirmed. Everything else is already
     // out of the confirmed band and no other run can put it in.
-    let asked: BTreeSet<(FragId, FragId)> = candidates
-        .iter()
-        .filter(|c| c.tier == Tier::Confirmed)
-        .map(|c| (c.a, c.b))
-        .collect();
+    let asked: BTreeSet<(FragId, FragId)> =
+        candidates.iter().filter(|c| c.tier == Tier::Confirmed).map(|c| (c.a, c.b)).collect();
     // (pair -> the placements that run confirmed), one map per agreement seed.
-    let mut elsewhere: Vec<BTreeMap<(FragId, FragId), Vec<Matrix4<f64>>>> = Vec::new();
+    let mut elsewhere: Vec<Confirmed> = Vec::new();
     for k in 0..extra {
         let seed = params.seed.wrapping_add(crate::tiers::AGREE_OFFSETS[k]);
         let at_seed = Params { seed, tiers: Some(inner), ..*params };
@@ -1202,7 +1202,7 @@ fn agree_pass(
         for (c, &tier) in theirs.iter_mut().zip(&banded.tiers) {
             c.tier = tier;
         }
-        let mut found: BTreeMap<(FragId, FragId), Vec<Matrix4<f64>>> = BTreeMap::new();
+        let mut found: Confirmed = BTreeMap::new();
         for c in theirs.iter().filter(|c| c.tier == Tier::Confirmed) {
             if asked.contains(&(c.a, c.b)) {
                 found.entry((c.a, c.b)).or_default().push(c.transform);
@@ -1223,17 +1223,12 @@ fn agree_pass(
             continue;
         }
         let b = &fragments[c.b as usize];
-        let t = crate::matching::scales::Scales::for_fragments(
-            params,
-            &fragments[c.a as usize],
-            b,
-        )
-        .t;
+        let t =
+            crate::matching::scales::Scales::for_fragments(params, &fragments[c.a as usize], b).t;
         let disagreed = elsewhere.iter().position(|run| {
-            !run.get(&(c.a, c.b))
-                .is_some_and(|poses| {
-                    poses.iter().any(|there| crate::tiers::same_placement(b, &c.transform, there, t))
-                })
+            !run.get(&(c.a, c.b)).is_some_and(|poses| {
+                poses.iter().any(|there| crate::tiers::same_placement(b, &c.transform, there, t))
+            })
         });
         let Some(which) = disagreed else { continue };
         c.tier = Tier::Probable;

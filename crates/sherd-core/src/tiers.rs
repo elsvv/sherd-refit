@@ -543,12 +543,8 @@ impl Thresholds {
     /// the three changes are booleans over evidence every run since task S3 has computed and
     /// reported, so nothing here is a threshold fitted to the collection that judges it — which is
     /// the trap task A2 §4.1 documented when the rival distance failed to transfer.
-    pub const R1: Self = Self {
-        min_research: 2,
-        rival_refused: true,
-        strict_on_redraws: true,
-        ..Self::S3
-    };
+    pub const R1: Self =
+        Self { min_research: 2, rival_refused: true, strict_on_redraws: true, ..Self::S3 };
 }
 
 impl Thresholds {
@@ -585,7 +581,9 @@ impl Thresholds {
             Some(slide) => ceiling("slide", slide, self.max_slide_t, &mut failed),
             None => failed.push("slide: no shared seam to slide along".to_owned()),
         }
-        if self.strict_on_redraws && let Some(reason) = self.redraw_refusal(probes) {
+        if self.strict_on_redraws
+            && let Some(reason) = self.redraw_refusal(probes)
+        {
             failed.push(reason);
         }
         if let Some(limit) = self.max_determined_deg {
@@ -2008,11 +2006,7 @@ mod tests {
                 Probes { margin: Some(1.99), wide_margin: Some(1.99), ..probes.clone() },
                 "no arm",
             ),
-            (
-                scores,
-                Probes { wide_rival_moved_t: Some(2.0), ..probes.clone() },
-                "no arm",
-            ),
+            (scores, Probes { wide_rival_moved_t: Some(2.0), ..probes.clone() }, "no arm"),
             (scores, Probes { research: vec![research(false); 2], ..probes.clone() }, "no arm"),
         ];
         for (s, p, want) in cases {
@@ -2160,7 +2154,8 @@ mod tests {
         assert_eq!(th.margin_of(&other), th.margin_of(&probes), "the margin is the same ratio");
         assert_eq!(th.arm(&other), None, "1.3 t is under the five walls the rule asks for");
         assert!(
-            th.refusals(&scores, &other)[0].ends_with("the second placement is 1.30 t away, under 5"),
+            th.refusals(&scores, &other)[0]
+                .ends_with("the second placement is 1.30 t away, under 5"),
             "the refusal line names the distance it read: {:?}",
             th.refusals(&scores, &other)
         );
@@ -2225,14 +2220,16 @@ mod tests {
     fn the_margin_arm_wants_a_far_rival_and_an_independent_re_search() {
         let (scores, probes) = confirmable();
         // A `pot_H`-shaped candidate: no support, no kept rival, a wide rival it beats by 6 --
-        // and that rival is the same break slid three walls along itself.
+        // and that rival is the same break slid three walls along itself.  The rival's own verdict
+        // is `false` here so that this test is about the **distance** and the **re-search** alone;
+        // `the_margin_arm_wants_a_refused_rival_and_a_strict_redraw` is where that conjunct lives.
         let slid = Probes {
             support: 0,
             margin: None,
             rival_score: None,
             rival_moved_t: None,
             wide_margin: Some(6.0),
-            wide_rival: Some(wide(5.0, 3.1, RivalSource::Stage1, true)),
+            wide_rival: Some(wide(5.0, 3.1, RivalSource::Stage1, false)),
             wide_rival_moved_t: Some(3.1),
             research: vec![research(true), research(true)],
             ..probes.clone()
@@ -2254,7 +2251,7 @@ mod tests {
         assert_eq!(th.arm(&unstable), None, "no draw put the sherd here");
         assert_eq!(
             th.refusals(&scores, &unstable),
-            ["no arm: support 0 < 1 and re-search agreed 0/2 < 1".to_owned()]
+            ["no arm: support 0 < 1 and re-search agreed 0/2 < 2".to_owned()]
         );
         // The support arm is untouched by either, and it is the word the report prints.
         let supported = Probes { support: 1, ..unstable.clone() };
@@ -2314,7 +2311,10 @@ mod tests {
         assert_eq!(refusals.len(), 1, "1.1e-13 deg is over 1e-14: {refusals:?}");
         assert!(refusals[0].starts_with("determined 1.1e-13 deg"), "{refusals:?}");
         let loose = Thresholds { max_determined_deg: Some(1e-9), ..strict };
-        let one_draw = Probes { resamples: vec![row(0.2, 0.09, false)], ..probes };
+        // A redraw that clears the strict half and that R §6.5 refuses all the same, so that the
+        // only thing left to refuse this candidate is the retired arm this test is about (task R1
+        // put the strict half itself on the redraws, `Thresholds::strict_on_redraws`).
+        let one_draw = Probes { resamples: vec![row(0.5, 0.007, false)], ..probes };
         let refusals = loose.refusals(&scores, &one_draw);
         assert_eq!(refusals, ["redraws accepted 1 < 3"], "the run's own draw and no redraw");
     }

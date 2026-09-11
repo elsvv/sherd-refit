@@ -1674,13 +1674,18 @@ def r1_rules():
 
     def arm(m, d, k, rej, redr):
         def test(r):
+            # The redraws are a **strict** test and not a conjunct of the margin arm: they are read
+            # before the disjunction, so a supported join has to survive them too.  That is where
+            # `Thresholds::strict_on_redraws` sits in `Thresholds::refusals` -- the question is
+            # *would this measurement come back*, and it is asked of the whole claim rather than of
+            # one of the two arms.
+            if redr and not r["redraw_strict"]:
+                return False
             if r["support"] >= 1:
                 return True
             if not (r["m_wide"] >= m and far(r, d) and r["res_agree"] >= k):
                 return False
             if rej and not r["rival_refused"]:
-                return False
-            if redr and not r["redraw_strict"]:
                 return False
             return True
         return test

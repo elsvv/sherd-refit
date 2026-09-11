@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="sherd-refit">
+<title>__SHERD_TITLE__ — сборка</title>
+<style>
+:root{--bg:#1b1c1f;--panel:#232529;--panel2:#2c2f34;--text:#e9e6e1;--muted:#9ba0a8;--line:#3a3e45;--accent:#f2a54a;--ok:#74c98f;--warn:#e3c35e}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:13px/1.45 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+#app{display:flex;height:100%}
+#side{width:330px;min-width:240px;max-width:45vw;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}
+#side header{padding:12px 14px 8px;border-bottom:1px solid var(--line)}
+#side h1{font-size:15px;margin:0 0 3px;font-weight:600;word-break:break-all}
+#summary{color:var(--muted);font-size:12px}
+#search{margin:10px 14px 8px;padding:6px 9px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);color:var(--text);font:inherit}
+#tools{display:flex;flex-wrap:wrap;gap:6px;padding:0 14px 10px;border-bottom:1px solid var(--line)}
+button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:inherit;font-size:12px;cursor:pointer}
+button:hover{border-color:var(--accent)}
+button.on{background:#4b3b27;border-color:var(--accent)}
+#lists{flex:1;overflow:auto;padding:4px 0 10px}
+.group{padding:2px 14px}
+.ghead{display:flex;align-items:center;gap:7px;margin-top:8px}
+.ghead input{margin:0}
+.ghead .gname{flex:1;font-weight:600;cursor:pointer;user-select:none}
+.ghead .gname:hover{color:var(--accent)}
+.ghead button{padding:1px 7px;font-size:11px}
+.frag{padding:2px 6px 2px 24px;border-radius:4px;cursor:pointer;display:flex;gap:7px;align-items:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.frag:hover{background:var(--panel2)}
+.frag.sel{background:#4b3b27}
+.frag.gone{display:none}
+.frag.off{opacity:.45}
+.sw{width:10px;height:10px;border-radius:2px;flex:none;background:transparent}
+#details{border-top:1px solid var(--line);padding:10px 14px;max-height:45%;overflow:auto;display:none}
+#details h2{font-size:17px;margin:0 0 4px;word-break:break-all}
+.muted{color:var(--muted)}
+#details table{border-collapse:collapse;width:100%;margin-top:8px;font-size:12px}
+#details th{color:var(--muted);font-weight:400;text-align:left;padding:2px 4px}
+#details td{padding:3px 4px;border-top:1px solid var(--line);white-space:nowrap}
+#details td.name{max-width:150px;overflow:hidden;text-overflow:ellipsis}
+#details a{color:var(--accent);text-decoration:none;cursor:pointer}
+#details a:hover{text-decoration:underline}
+.band-confirmed{color:var(--ok)}
+.band-probable,.band-accepted{color:var(--warn)}
+#help{padding:8px 14px;border-top:1px solid var(--line);color:var(--muted);font-size:11px}
+#view{flex:1;position:relative;overflow:hidden}
+canvas{width:100%;height:100%;display:block;cursor:grab;touch-action:none;outline:none}
+canvas.drag{cursor:grabbing}
+#tip{position:absolute;pointer-events:none;background:rgba(18,18,20,.94);border:1px solid var(--line);padding:6px 10px;border-radius:7px;display:none;white-space:nowrap;box-shadow:0 4px 14px rgba(0,0,0,.45);z-index:3}
+#tip b{font-size:18px;color:#fff;display:block;letter-spacing:.2px}
+#tip span{color:var(--muted);font-size:12px}
+#labels{position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:2}
+#labels div{position:absolute;transform:translate(-50%,-50%);background:rgba(0,0,0,.66);color:#fff;padding:1px 6px;border-radius:4px;font-size:11px;white-space:nowrap;display:none}
+#labels div.sel{background:var(--accent);color:#111}
+#err{position:absolute;inset:0;display:none;align-items:center;justify-content:center;padding:40px;text-align:center;color:var(--muted);font-size:15px}
+</style>
+</head>
+<body>
+<div id="app">
+<aside id="side">
+  <header><h1>__SHERD_TITLE__</h1><div id="summary"></div></header>
+  <input id="search" type="search" placeholder="Найти фрагмент по номеру…" autocomplete="off" spellcheck="false">
+  <div id="tools">
+    <button id="bAll" title="Показать все группы">Показать всё</button>
+    <button id="bAsm" title="Скрыть или показать несобранные фрагменты">Только собранные</button>
+    <button id="bLabels" title="Подписать все фрагменты (клавиша L)">Номера</button>
+    <button id="bColour" title="Цвета: скан / фрагменты / группы (клавиша C)">Цвет: скан</button>
+    <button id="bFit" title="Вписать всё видимое (клавиша F)">Вписать</button>
+  </div>
+  <div id="lists"></div>
+  <div id="details"></div>
+  <div id="help">Наведите курсор на фрагмент — появится его номер. Щелчок — выбрать, двойной щелчок — приблизить.
+  Левая кнопка — вращать, правая или Shift — сдвигать, колесо — масштаб. Esc — снять выбор.<br><span id="gen"></span></div>
+</aside>
+<main id="view">
+  <canvas id="gl" tabindex="0"></canvas>
+  <div id="labels"></div>
+  <div id="tip"></div>
+  <div id="err"></div>
+</main>
+</div>
+<script id="sherd-meta" type="application/json">__SHERD_META__</script>
+<script id="sherd-glb" type="application/octet-stream">__SHERD_GLB__</script>
+<script>
+"use strict";
+(function () {
+  const META = JSON.parse(document.getElementById("sherd-meta").textContent);
+  const $ = (id) => document.getElementById(id);
+  const canvas = $("gl"), tip = $("tip"), labelsEl = $("labels"), errEl = $("err");
+  const F = META.fragments, N = F.length;
+  const groupMembers = new Map(META.groups.map((g) => [g.index, g.members]));
+  const joinsOf = new Map();
+  for (const j of META.joins) {
+    for (const f of [j.a, j.b]) { if (!joinsOf.has(f)) joinsOf.set(f, []); joinsOf.get(f).push(j); }
+  }
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const plural = (n, one, few, many) => { const a = n % 10, b = n % 100; return a === 1 && b !== 11 ? one : a >= 2 && a <= 4 && (b < 12 || b > 14) ? few : many; };
+  const bandName = { confirmed: "подтверждён", probable: "вероятный", accepted: "принят" };
+  const bandShort = { confirmed: "подтв.", probable: "вероятн.", accepted: "принят" };
+  const fail = (msg) => { errEl.textContent = msg; errEl.style.display = "flex"; };
+
+  // ---------- summary ----------
+  const asmGroups = META.groups.filter((g) => g.assembled);
+  const inGroups = asmGroups.reduce((s, g) => s + g.members.length, 0);
+  $("summary").textContent = `${N} ${plural(N, "фрагмент", "фрагмента", "фрагментов")} · собрано ${asmGroups.length} ${plural(asmGroups.length, "группа", "группы", "групп")} (${inGroups} фр.) · не собрано ${N - inGroups}`;
+  $("gen").textContent = META.generator;
+
+  // ---------- colours (linear RGB) ----------
+  const toLinear = (c) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+  function hsl(h, s, l) {
+    const k = (n) => (n + h / 30) % 12, a = s * Math.min(l, 1 - l);
+    const f = (n) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+    return [f(0), f(8), f(4)];
+  }
+  const paletteSrgb = (i) => hsl((i * 137.508) % 360, 0.62, 0.6);
+  const CLAY = [0.52, 0.33, 0.22], GREY = [0.35, 0.35, 0.35];
+  const fragColour = (i) => paletteSrgb(i).map(toLinear);
+  const groupSrgb = (k) => (groupMembers.get(k) || []).length > 1 ? paletteSrgb(k) : [0.6, 0.6, 0.6];
+  const groupColour = (k) => groupSrgb(k).map(toLinear);
+  const css = (rgb) => `rgb(${rgb.map((x) => Math.round(x * 255)).join(",")})`;
+
+  // ---------- state ----------
+  let colourMode = F.some((f) => f.colours) ? "scan" : "fragments";
+  let hovered = -1, selected = -1, showLabels = false, onlyAssembled = false;
+  const groupVisible = new Map(META.groups.map((g) => [g.index, true]));
+  const rows = new Map();
+  const isVisible = (f) => {
+    const fr = F[f];
+    if (onlyAssembled && !fr.assembled) return false;
+    return fr.group === null || groupVisible.get(fr.group) !== false;
+  };
+
+  // ---------- side panel ----------
+  function buildLists() {
+    const lists = $("lists");
+    for (const g of asmGroups) addGroup(`Группа ${g.index}`, g.members, [g.index], false);
+    const singles = META.groups.filter((g) => !g.assembled);
+    if (singles.length) addGroup("Не собраны", singles.map((g) => g.members[0]), singles.map((g) => g.index), asmGroups.length > 0);
+    function addGroup(title, members, indices, collapsed) {
+      const wrap = document.createElement("div"); wrap.className = "group";
+      const head = document.createElement("div"); head.className = "ghead";
+      const box = document.createElement("input"); box.type = "checkbox"; box.checked = true; box.title = "Показать или скрыть";
+      box.addEventListener("change", () => { for (const k of indices) groupVisible.set(k, box.checked); refreshVisibility(); });
+      box.dataset.groups = indices.join(",");
+      const name = document.createElement("span"); name.className = "gname"; name.textContent = `${title} — ${members.length} фр.`;
+      const show = document.createElement("button"); show.textContent = "Вписать"; show.title = "Показать эту группу крупно";
+      show.addEventListener("click", () => fitTo(members));
+      head.append(box, name, show);
+      const list = document.createElement("div");
+      if (collapsed) list.style.display = "none";
+      name.addEventListener("click", () => { list.style.display = list.style.display === "none" ? "" : "none"; });
+      for (const f of members) {
+        const row = document.createElement("div"); row.className = "frag"; row.title = F[f].source;
+        const sw = document.createElement("span"); sw.className = "sw";
+        row.append(sw, document.createTextNode(F[f].name));
+        row.addEventListener("click", () => select(f, true));
+        row.addEventListener("mouseenter", () => { hovered = f; request(); });
+        row.addEventListener("mouseleave", () => { if (hovered === f) { hovered = -1; request(); } });
+        list.append(row); rows.set(f, { row, sw, list });
+      }
+      wrap.append(head, list); lists.append(wrap);
+    }
+    refreshSwatches();
+  }
+  function refreshSwatches() {
+    for (const [f, r] of rows) {
+      r.sw.style.background = colourMode === "fragments" ? css(paletteSrgb(f)) : colourMode === "groups" ? css(groupSrgb(F[f].group)) : "transparent";
+    }
+    $("bColour").textContent = "Цвет: " + { scan: "скан", fragments: "фрагменты", groups: "группы" }[colourMode];
+  }
+  function refreshVisibility() {
+    for (const [f, r] of rows) r.row.classList.toggle("off", !isVisible(f));
+    request();
+  }
+  function link(f) { return `<a data-frag="${f}">${esc(F[f].name)}</a>`; }
+  function showDetails(f) {
+    const d = $("details");
+    if (f < 0) { d.style.display = "none"; return; }
+    const fr = F[f], js = joinsOf.get(f) || [];
+    let html = `<h2>${esc(fr.name)}</h2><div class="muted">файл: ${esc(fr.source)}</div>`;
+    if (fr.assembled) {
+      const mates = (groupMembers.get(fr.group) || []).filter((x) => x !== f);
+      html += `<div style="margin-top:4px">группа ${fr.group}, вместе с: ${mates.map(link).join(", ")}</div>`;
+    } else {
+      html += `<div style="margin-top:4px" class="muted">не собран: уверенного стыка не нашлось</div>`;
+    }
+    if (js.length) {
+      html += `<table><tr><th>стык с</th><th>уверенность</th><th title="вошёл в сборку">сборка</th><th title="длина шва в толщинах стенки">шов</th><th></th></tr>`;
+      for (const j of js) {
+        const other = j.a === f ? j.b : j.a;
+        const pic = j.review ? `<a href="${encodeURI(j.review)}" target="_blank" rel="noopener" title="картинка стыка">фото</a>` : "";
+        html += `<tr><td class="name" title="${esc(F[other].name)}">${link(other)}</td><td class="band-${j.band}" title="${bandName[j.band] || j.band}">${bandShort[j.band] || j.band}</td><td>${j.in_assembly ? "да" : ""}</td><td>${j.seam.toFixed(1)}</td><td>${pic}</td></tr>`;
+      }
+      html += "</table>";
+    } else {
+      html += `<div class="muted" style="margin-top:6px">Кандидатов в стыки нет.</div>`;
+    }
+    d.innerHTML = html; d.style.display = "block";
+    for (const a of d.querySelectorAll("[data-frag]")) a.addEventListener("click", () => select(+a.dataset.frag, true));
+  }
+  function select(f, focus) {
+    selected = f;
+    for (const [g, r] of rows) r.row.classList.toggle("sel", g === f);
+    if (f >= 0) {
+      const r = rows.get(f);
+      if (r) { r.list.style.display = ""; r.row.scrollIntoView({ block: "nearest" }); }
+      if (!isVisible(f)) { onlyAssembled = false; $("bAsm").classList.remove("on"); groupVisible.set(F[f].group, true); syncBoxes(); refreshVisibility(); }
+      if (focus) focusOn(f);
+    }
+    showDetails(f);
+    try { history.replaceState(null, "", f >= 0 ? "#fragment=" + encodeURIComponent(F[f].name) : location.pathname + location.search); } catch (e) { /* file:// in some browsers */ }
+    request();
+  }
+  function syncBoxes() {
+    for (const box of document.querySelectorAll(".ghead input")) box.checked = box.dataset.groups.split(",").some((k) => groupVisible.get(+k) !== false);
+  }
+
+  buildLists();
+  const search = $("search");
+  search.addEventListener("input", () => {
+    const q = search.value.trim().toLowerCase();
+    for (const [f, r] of rows) {
+      const hit = !q || F[f].name.toLowerCase().includes(q);
+      r.row.classList.toggle("gone", !hit);
+      if (q && hit) r.list.style.display = "";
+    }
+  });
+  search.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      const q = search.value.trim().toLowerCase();
+      const hit = F.findIndex((fr) => fr.name.toLowerCase().includes(q));
+      if (q && hit >= 0) select(hit, true);
+    } else if (e.key === "Escape") { search.value = ""; search.dispatchEvent(new Event("input")); search.blur(); }
+  });
+
+  // ---------- WebGL ----------
+  const gl = canvas.getContext("webgl2", { antialias: true });
+  if (!gl) { fail("Этот браузер не показывает 3D (нет WebGL2). Откройте файл в свежем Chrome, Edge, Firefox или Safari."); return; }
+
+  function decodeBase64(text) {
+    const bin = atob(text.trim());
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  function parseGlb(bytes) {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (dv.getUint32(0, true) !== 0x46546c67) throw new Error("not a GLB");
+    let off = 12, json = null, bin = null;
+    while (off + 8 <= bytes.byteLength) {
+      const len = dv.getUint32(off, true), type = dv.getUint32(off + 4, true);
+      const chunk = bytes.subarray(off + 8, off + 8 + len);
+      if (type === 0x4e4f534a) json = JSON.parse(new TextDecoder().decode(chunk));
+      else if (type === 0x004e4942) bin = chunk;
+      off += 8 + len;
+    }
+    return { json, bin };
+  }
+  const COMP = { 5120: Int8Array, 5121: Uint8Array, 5122: Int16Array, 5123: Uint16Array, 5125: Uint32Array, 5126: Float32Array };
+  const WIDTH = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 };
+
+  // column-major 4x4
+  const ident = () => { const m = new Float64Array(16); m[0] = m[5] = m[10] = m[15] = 1; return m; };
+  function mul(a, b) {
+    const o = new Float64Array(16);
+    for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+      let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s;
+    }
+    return o;
+  }
+  function trs(t, q, s) {
+    const [x, y, z, w] = q, m = new Float64Array(16);
+    m[0] = (1 - 2 * (y * y + z * z)) * s[0]; m[1] = 2 * (x * y + z * w) * s[0]; m[2] = 2 * (x * z - y * w) * s[0];
+    m[4] = 2 * (x * y - z * w) * s[1]; m[5] = (1 - 2 * (x * x + z * z)) * s[1]; m[6] = 2 * (y * z + x * w) * s[1];
+    m[8] = 2 * (x * z + y * w) * s[2]; m[9] = 2 * (y * z - x * w) * s[2]; m[10] = (1 - 2 * (x * x + y * y)) * s[2];
+    m[12] = t[0]; m[13] = t[1]; m[14] = t[2]; m[15] = 1;
+    return m;
+  }
+  const apply = (m, p) => [m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12], m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13], m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]];
+  function perspective(fovy, aspect, n, f) {
+    const t = 1 / Math.tan(fovy / 2), nf = 1 / (n - f);
+    return new Float64Array([t / aspect, 0, 0, 0, 0, t, 0, 0, 0, 0, (f + n) * nf, -1, 0, 0, 2 * f * n * nf, 0]);
+  }
+  function lookAt(e, t, up) {
+    let zx = e[0] - t[0], zy = e[1] - t[1], zz = e[2] - t[2], l = Math.hypot(zx, zy, zz) || 1; zx /= l; zy /= l; zz /= l;
+    let xx = up[1] * zz - up[2] * zy, xy = up[2] * zx - up[0] * zz, xz = up[0] * zy - up[1] * zx; l = Math.hypot(xx, xy, xz) || 1; xx /= l; xy /= l; xz /= l;
+    const yx = zy * xz - zz * xy, yy = zz * xx - zx * xz, yz = zx * xy - zy * xx;
+    return new Float64Array([xx, yx, zx, 0, xy, yy, zy, 0, xz, yz, zz, 0,
+      -(xx * e[0] + xy * e[1] + xz * e[2]), -(yx * e[0] + yy * e[1] + yz * e[2]), -(zx * e[0] + zy * e[1] + zz * e[2]), 1]);
+  }
+
+  function shader(type, src) {
+    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  }
+  function program(vs, fs) {
+    const p = gl.createProgram();
+    gl.attachShader(p, shader(gl.VERTEX_SHADER, vs)); gl.attachShader(p, shader(gl.FRAGMENT_SHADER, fs));
+    gl.bindAttribLocation(p, 0, "aPos"); gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    const u = {}; const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+    for (let i = 0; i < n; i++) { const name = gl.getActiveUniform(p, i).name; u[name] = gl.getUniformLocation(p, name); }
+    return { p, u };
+  }
+  const VS = `#version 300 es
+layout(location=0) in vec3 aPos; layout(location=1) in vec3 aNor; layout(location=2) in vec4 aCol;
+uniform mat4 uModel, uView, uProj;
+out vec3 vNor; out vec3 vCol; out vec3 vPos;
+void main() { vec4 v = uView * uModel * vec4(aPos, 1.0); vPos = v.xyz; vNor = mat3(uView) * mat3(uModel) * aNor; vCol = aCol.rgb; gl_Position = uProj * v; }`;
+  const FS = `#version 300 es
+precision highp float;
+in vec3 vNor; in vec3 vCol; in vec3 vPos;
+uniform int uUseVC; uniform vec3 uBase; uniform float uHi; uniform float uSel;
+out vec4 o;
+void main() {
+  vec3 n = normalize(vNor), v = normalize(-vPos);
+  n = faceforward(n, -v, n);
+  float head = max(dot(n, v), 0.0), key = max(dot(n, normalize(vec3(0.35, 0.75, 0.55))), 0.0);
+  vec3 base = uUseVC == 1 ? vCol : uBase;
+  vec3 c = base * (0.22 + 0.62 * head + 0.28 * key);
+  c = mix(c, vec3(1.0, 0.55, 0.16) * (0.35 + 0.65 * head), uSel * 0.5);
+  c = c * (1.0 + 0.5 * uHi) + uHi * vec3(0.05, 0.035, 0.0);
+  o = vec4(pow(max(c, 0.0), vec3(1.0 / 2.2)), 1.0);
+}`;
+  const PVS = `#version 300 es
+layout(location=0) in vec3 aPos; uniform mat4 uModel, uView, uProj;
+void main() { gl_Position = uProj * uView * uModel * vec4(aPos, 1.0); }`;
+  const PFS = `#version 300 es
+precision highp float; uniform vec3 uId; out vec4 o; void main() { o = vec4(uId, 1.0); }`;
+
+  let main, pick;
+  const draws = [], drawOf = new Map();
+  let sceneRadius = 1;
+  try {
+    main = program(VS, FS); pick = program(PVS, PFS);
+    const bytes = decodeBase64(document.getElementById("sherd-glb").textContent);
+    const G = parseGlb(bytes);
+    const nameIndex = new Map(F.map((f, i) => [f.name, i]));
+    const accessor = (i) => {
+      const a = G.json.accessors[i], bv = G.json.bufferViews[a.bufferView], T = COMP[a.componentType], w = WIDTH[a.type];
+      return { array: new T(G.bin.buffer, G.bin.byteOffset + (bv.byteOffset || 0) + (a.byteOffset || 0), a.count * w), w, type: a.componentType, normalized: !!a.normalized, count: a.count, min: a.min, max: a.max };
+    };
+    const attrib = (loc, acc) => {
+      const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, acc.array, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, acc.w, acc.type, acc.normalized, 0, 0);
+    };
+    const walk = (i, parent) => {
+      const node = G.json.nodes[i];
+      const local = node.matrix ? Float64Array.from(node.matrix) : trs(node.translation || [0, 0, 0], node.rotation || [0, 0, 0, 1], node.scale || [1, 1, 1]);
+      const world = mul(parent, local);
+      if (node.mesh !== undefined) {
+        const idx = node.extras && Number.isInteger(node.extras.index) ? node.extras.index : nameIndex.get(node.name);
+        for (const prim of G.json.meshes[node.mesh].primitives) {
+          const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+          const pos = accessor(prim.attributes.POSITION); attrib(0, pos);
+          if (prim.attributes.NORMAL !== undefined) attrib(1, accessor(prim.attributes.NORMAL)); else gl.vertexAttrib3f(1, 0, 0, 1);
+          const hasColor = prim.attributes.COLOR_0 !== undefined;
+          if (hasColor) attrib(2, accessor(prim.attributes.COLOR_0)); else gl.vertexAttrib4f(2, 1, 1, 1, 1);
+          const ind = accessor(prim.indices);
+          const ib = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ind.array, gl.STATIC_DRAW);
+          gl.bindVertexArray(null);
+          let lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+          for (let c = 0; c < 8; c++) {
+            const p = apply(world, [c & 1 ? pos.max[0] : pos.min[0], c & 2 ? pos.max[1] : pos.min[1], c & 4 ? pos.max[2] : pos.min[2]]);
+            for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], p[k]); }
+          }
+          const d = { idx, world: Float32Array.from(world), vao, count: ind.count, type: ind.type === 5125 ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT, hasColor, lo, hi,
+            centre: [0, 1, 2].map((k) => (lo[k] + hi[k]) / 2), radius: Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2 };
+          drawOf.set(idx, draws.length); draws.push(d);
+        }
+      }
+      for (const c of node.children || []) walk(c, world);
+    };
+    for (const i of G.json.scenes[G.json.scene || 0].nodes) walk(i, ident());
+  } catch (e) {
+    fail("Не удалось показать сцену: " + e.message);
+    return;
+  }
+
+  // ---------- camera ----------
+  const cam = { target: [0, 0, 0], dist: 1, yaw: 0.0, pitch: 0.3, fov: (35 * Math.PI) / 180 };
+  let view = ident(), proj = ident();
+  const box = (list) => {
+    let lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (const d of list) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], d.lo[k]); hi[k] = Math.max(hi[k], d.hi[k]); }
+    return { c: [0, 1, 2].map((k) => (lo[k] + hi[k]) / 2), r: Math.max(Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2, 1e-9) };
+  };
+  function frame(list) {
+    if (!list.length) return;
+    const b = box(list), aspect = canvas.clientWidth / Math.max(1, canvas.clientHeight);
+    const half = Math.min(cam.fov, 2 * Math.atan(Math.tan(cam.fov / 2) * aspect)) / 2;
+    cam.target = b.c; cam.dist = (b.r / Math.sin(half)) * 1.04; request();
+  }
+  const fitAll = () => { const vis = draws.filter((d) => isVisible(d.idx)); frame(vis.length ? vis : draws); };
+  const fitTo = (members) => frame(members.map((f) => draws[drawOf.get(f)]).filter(Boolean));
+  const focusOn = (f) => { const d = draws[drawOf.get(f)]; if (d) { cam.target = d.centre.slice(); cam.dist = Math.max(d.radius * 3.4, sceneRadius * 1e-3); request(); } };
+  sceneRadius = box(draws).r;
+  const eye = () => { const cp = Math.cos(cam.pitch); return [cam.target[0] + cam.dist * cp * Math.sin(cam.yaw), cam.target[1] + cam.dist * Math.sin(cam.pitch), cam.target[2] + cam.dist * cp * Math.cos(cam.yaw)]; };
+
+  // ---------- picking ----------
+  let fbo = null, fboTex = null, fboDepth = null, fboW = 0, fboH = 0;
+  function ensurePickTarget() {
+    if (fbo && fboW === canvas.width && fboH === canvas.height) return;
+    if (fbo) { gl.deleteFramebuffer(fbo); gl.deleteTexture(fboTex); gl.deleteRenderbuffer(fboDepth); }
+    fboW = canvas.width; fboH = canvas.height;
+    fboTex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, fboTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, fboW, fboH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    fboDepth = gl.createRenderbuffer(); gl.bindRenderbuffer(gl.RENDERBUFFER, fboDepth);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, fboW, fboH);
+    fbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, fboTex, 0);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, fboDepth);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+  function pickAt(x, y) {
+    ensurePickTarget();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, fboW, fboH); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST);
+    gl.useProgram(pick.p);
+    gl.uniformMatrix4fv(pick.u.uView, false, Float32Array.from(view));
+    gl.uniformMatrix4fv(pick.u.uProj, false, Float32Array.from(proj));
+    for (let i = 0; i < draws.length; i++) {
+      const d = draws[i]; if (!isVisible(d.idx)) continue;
+      const id = i + 1;
+      gl.uniform3f(pick.u.uId, (id & 255) / 255, ((id >> 8) & 255) / 255, ((id >> 16) & 255) / 255);
+      gl.uniformMatrix4fv(pick.u.uModel, false, d.world);
+      gl.bindVertexArray(d.vao); gl.drawElements(gl.TRIANGLES, d.count, d.type, 0);
+    }
+    const px = new Uint8Array(4), s = canvas.width / Math.max(1, canvas.clientWidth);
+    const X = Math.floor(x * s), Y = Math.floor(canvas.height - y * s - 1);
+    if (X >= 0 && Y >= 0 && X < fboW && Y < fboH) gl.readPixels(X, Y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.bindVertexArray(null);
+    const id = px[0] | (px[1] << 8) | (px[2] << 16);
+    return id > 0 && draws[id - 1] ? draws[id - 1].idx : -1;
+  }
+
+  // ---------- labels ----------
+  const labelDivs = new Map();
+  for (const d of draws) { const el = document.createElement("div"); el.textContent = F[d.idx] ? F[d.idx].name : "?"; labelsEl.append(el); labelDivs.set(d.idx, el); }
+  // Labels go down largest fragment first, and one that would cover a label already drawn is
+  // skipped (zoom in and it appears); the selected fragment's label is always drawn.
+  function placeLabels(vp) {
+    const w = canvas.clientWidth, h = canvas.clientHeight, taken = [], shown = new Set();
+    const order = draws
+      .filter((d) => isVisible(d.idx) && (showLabels || d.idx === selected))
+      .sort((a, b) => (b.idx === selected) - (a.idx === selected) || b.radius - a.radius);
+    for (const d of order) {
+      const c = d.centre;
+      const X = vp[0] * c[0] + vp[4] * c[1] + vp[8] * c[2] + vp[12], Y = vp[1] * c[0] + vp[5] * c[1] + vp[9] * c[2] + vp[13], W = vp[3] * c[0] + vp[7] * c[1] + vp[11] * c[2] + vp[15];
+      if (W <= 0) continue;
+      const sx = ((X / W) * 0.5 + 0.5) * w, sy = (1 - ((Y / W) * 0.5 + 0.5)) * h;
+      const el = labelDivs.get(d.idx), half = (el.textContent.length * 6.4 + 14) / 2;
+      const box = [sx - half, sy - 9, sx + half, sy + 9];
+      if (d.idx !== selected && taken.some((t) => box[0] < t[2] && box[2] > t[0] && box[1] < t[3] && box[3] > t[1])) continue;
+      taken.push(box); shown.add(d.idx);
+      el.style.left = sx + "px"; el.style.top = sy + "px"; el.classList.toggle("sel", d.idx === selected);
+    }
+    for (const [idx, el] of labelDivs) el.style.display = shown.has(idx) ? "block" : "none";
+  }
+
+  // ---------- render ----------
+  let pending = false, wantPick = false, mouse = { x: 0, y: 0, inside: false }, drag = null;
+  function request() { if (!pending) { pending = true; requestAnimationFrame(render); } }
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.max(1, Math.round(canvas.clientWidth * dpr)), h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  }
+  function render() {
+    pending = false;
+    resize();
+    const aspect = canvas.clientWidth / Math.max(1, canvas.clientHeight);
+    view = lookAt(eye(), cam.target, [0, 1, 0]);
+    proj = perspective(cam.fov, aspect, Math.max(cam.dist * 0.002, sceneRadius * 1e-5), cam.dist + sceneRadius * 6);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0.105, 0.11, 0.122, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST);
+    gl.useProgram(main.p);
+    gl.uniformMatrix4fv(main.u.uView, false, Float32Array.from(view));
+    gl.uniformMatrix4fv(main.u.uProj, false, Float32Array.from(proj));
+    for (const d of draws) {
+      if (!isVisible(d.idx)) continue;
+      const fr = F[d.idx] || {};
+      const base = colourMode === "fragments" ? fragColour(d.idx) : colourMode === "groups" ? (fr.group === null ? GREY : groupColour(fr.group)) : CLAY;
+      gl.uniform1i(main.u.uUseVC, colourMode === "scan" && d.hasColor ? 1 : 0);
+      gl.uniform3fv(main.u.uBase, base);
+      gl.uniform1f(main.u.uHi, d.idx === hovered ? 1 : 0);
+      gl.uniform1f(main.u.uSel, d.idx === selected ? 1 : 0);
+      gl.uniformMatrix4fv(main.u.uModel, false, d.world);
+      gl.bindVertexArray(d.vao); gl.drawElements(gl.TRIANGLES, d.count, d.type, 0);
+    }
+    gl.bindVertexArray(null);
+    placeLabels(mul(proj, view));
+    if (wantPick && mouse.inside && !drag) { wantPick = false; setHover(pickAt(mouse.x, mouse.y)); }
+  }
+  function setHover(f) {
+    if (f !== hovered) { hovered = f; request(); }
+    canvas.style.cursor = drag ? "" : f >= 0 ? "pointer" : "";
+    if (f < 0 || !mouse.inside) { tip.style.display = "none"; return; }
+    const fr = F[f], js = joinsOf.get(f) || [];
+    const conf = js.filter((j) => j.band === "confirmed").length;
+    const where = fr.assembled ? `группа ${fr.group} · ${(groupMembers.get(fr.group) || []).length} фр.` : "не собран";
+    const joins = js.length ? ` · стыков: ${js.length}${META.tiers ? ` (подтв. ${conf})` : ""}` : "";
+    tip.innerHTML = `<b>${esc(fr.name)}</b><span>${where}${joins}</span>`;
+    tip.style.display = "block";
+    const vw = canvas.clientWidth, vh = canvas.clientHeight, tw = tip.offsetWidth, th = tip.offsetHeight;
+    tip.style.left = Math.min(mouse.x + 16, vw - tw - 6) + "px";
+    tip.style.top = Math.min(mouse.y + 18, vh - th - 6) + "px";
+  }
+
+  // ---------- input ----------
+  const pos = (e) => { const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top, inside: true }; };
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.setPointerCapture(e.pointerId); canvas.focus();
+    drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.button === 1 || e.shiftKey, moved: 0, button: e.button };
+    canvas.classList.add("drag"); tip.style.display = "none";
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    mouse = pos(e);
+    if (drag) {
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY; drag.moved += Math.abs(dx) + Math.abs(dy);
+      if (drag.pan) {
+        const s = (2 * cam.dist * Math.tan(cam.fov / 2)) / Math.max(1, canvas.clientHeight);
+        const right = [view[0], view[4], view[8]], up = [view[1], view[5], view[9]];
+        for (let k = 0; k < 3; k++) cam.target[k] += (-right[k] * dx + up[k] * dy) * s;
+      } else {
+        cam.yaw -= dx * 0.008; cam.pitch = Math.max(-1.55, Math.min(1.55, cam.pitch + dy * 0.008));
+      }
+      request();
+    } else { wantPick = true; request(); }
+  });
+  canvas.addEventListener("pointerup", (e) => {
+    canvas.classList.remove("drag");
+    const click = drag && drag.moved < 5 && drag.button === 0;
+    drag = null;
+    if (click) select(pickAt(mouse.x, mouse.y), false);
+    wantPick = true; request();
+  });
+  canvas.addEventListener("pointerleave", () => { mouse.inside = false; if (!drag) { setHover(-1); } });
+  canvas.addEventListener("dblclick", () => { const f = pickAt(mouse.x, mouse.y); if (f >= 0) select(f, true); });
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    cam.dist = Math.max(sceneRadius * 1e-3, Math.min(sceneRadius * 40, cam.dist * Math.exp(e.deltaY * 0.0012)));
+    wantPick = true; request();
+  }, { passive: false });
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  new ResizeObserver(() => request()).observe(canvas);
+
+  const toggleLabels = () => { showLabels = !showLabels; $("bLabels").classList.toggle("on", showLabels); request(); };
+  const cycleColour = () => { colourMode = { scan: "fragments", fragments: "groups", groups: "scan" }[colourMode]; refreshSwatches(); request(); };
+  $("bLabels").addEventListener("click", toggleLabels);
+  $("bColour").addEventListener("click", cycleColour);
+  $("bFit").addEventListener("click", fitAll);
+  $("bAll").addEventListener("click", () => { for (const k of groupVisible.keys()) groupVisible.set(k, true); onlyAssembled = false; $("bAsm").classList.remove("on"); syncBoxes(); refreshVisibility(); fitAll(); });
+  $("bAsm").addEventListener("click", () => { onlyAssembled = !onlyAssembled; $("bAsm").classList.toggle("on", onlyAssembled); refreshVisibility(); fitAll(); });
+  window.addEventListener("keydown", (e) => {
+    if (e.target === search || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.code === "KeyF") fitAll();
+    else if (e.code === "KeyL") toggleLabels();
+    else if (e.code === "KeyC") cycleColour();
+    else if (e.key === "Escape") select(-1, false);
+  });
+
+  // ---------- start ----------
+  refreshSwatches();
+  const params = new URLSearchParams(location.hash.slice(1));
+  if (params.get("labels") === "1") toggleLabels();
+  if (params.get("colour")) { colourMode = ["scan", "fragments", "groups"].includes(params.get("colour")) ? params.get("colour") : colourMode; refreshSwatches(); }
+  // The first view frames the assembly; "Вписать" and "Показать всё" frame everything.
+  const assembledDraws = draws.filter((d) => F[d.idx] && F[d.idx].assembled);
+  frame(assembledDraws.length ? assembledDraws : draws);
+  const want = params.get("fragment");
+  if (want !== null && F.findIndex((f) => f.name === want) >= 0) select(F.findIndex((f) => f.name === want), true);
+  // `#probe=x,y` hovers that point once the scene is drawn: how a headless check sees the tooltip.
+  const probe = (params.get("probe") || "").split(",").map(Number);
+  if (probe.length === 2 && probe.every(Number.isFinite)) { mouse = { x: probe[0], y: probe[1], inside: true }; wantPick = true; }
+  request();
+})();
+</script>
+</body>
+</html>

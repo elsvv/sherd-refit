@@ -1539,9 +1539,35 @@ pub fn write_placed_meshes(
     comment: &str,
     budget: Budget,
 ) -> Result<Vec<PathBuf>> {
+    let every = vec![true; paths.len()];
+    write_placed_selected(out_dir, paths, names, poses, groups, &every, true, comment, budget)
+}
+
+/// [`write_placed_meshes`] for the fragments `which` marks, with the merged files only when
+/// `merged` asks for them: what `run` writes (the museum's request of 2026-09-11).
+///
+/// A fragment no group placed has no placement to show — its `placed/` copy is its original moved
+/// by R §8.2's recentring alone, and on a real collection most fragments are such copies — so
+/// `run` writes the assembled ones unless `--placed-all` asks for the rest. `assembly_<k>.ply`
+/// repeats `placed/` in one file per group without the fragments' names, and `run` writes it on
+/// `--merged-meshes`. Every file written is byte for byte the file [`write_placed_meshes`] writes.
+#[allow(clippy::too_many_arguments, reason = "R §11.4's inputs, plus the two selections")]
+pub fn write_placed_selected(
+    out_dir: impl AsRef<Path>,
+    paths: &[PathBuf],
+    names: &[String],
+    poses: &[Matrix4<f64>],
+    groups: &[Vec<FragId>],
+    which: &[bool],
+    merged: bool,
+    comment: &str,
+    budget: Budget,
+) -> Result<Vec<PathBuf>> {
     let out_dir = out_dir.as_ref();
     let placed_dir = out_dir.join("placed");
-    std::fs::create_dir_all(&placed_dir).map_err(|e| Error::write(&placed_dir, e))?;
+    // The output directory itself always, `placed/` only when a fragment goes into it.
+    let first = if which.iter().any(|&w| w) { &placed_dir } else { out_dir };
+    std::fs::create_dir_all(first).map_err(|e| Error::write(first, e))?;
     // The placed meshes are independent files with fixed names, so they are written in parallel
     // and their results collected by index: the same bytes in the same files in the same order,
     // and the first failure in *fragment* order is the one the run reports. E1 §9 measured this
@@ -1553,6 +1579,7 @@ pub fn write_placed_meshes(
     let semaphore = MemorySemaphore::new(budget);
     let placed: Vec<Result<PathBuf>> = (0..paths.len())
         .into_par_iter()
+        .filter(|&n| which[n])
         .map(|n| {
             let path = &paths[n];
             let _permit = semaphore.acquire(memory::scan_faces(path).map_or(0, reservation));
@@ -1567,7 +1594,7 @@ pub fn write_placed_meshes(
         written.push(file?);
     }
     for (k, group) in groups.iter().enumerate() {
-        if group.len() < 2 {
+        if !merged || group.len() < 2 {
             continue;
         }
         // The members are placed in parallel and merged in group order, which is the order
@@ -1651,7 +1678,7 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 mod tests {
     use super::{
         CandidateJson, FragmentStats, Outcome, ReportJson, Transforms, report_json,
-        report_markdown, transforms, write_merged, write_placed_meshes,
+        report_markdown, transforms, write_merged, write_placed_meshes, write_placed_selected,
     };
     use crate::io::writer::{DEFAULT_COMMENT, OPEN3D_COMMENT};
     use crate::matching::pair::Candidate;
@@ -1903,6 +1930,64 @@ mod tests {
         thin[0].thickness = 1.0;
         let md = report_markdown(&thin, 3.75, &outcome, &timings, &Params::default());
         assert!(md.contains("1.00 **(differs)**"), "{md}");
+    }
+
+    /// `run`'s selection: only the marked fragments get a placed file, the merged files only on
+    /// request, and each file written is the byte-identical file the full writer writes.
+    #[test]
+    fn the_selected_writer_writes_what_it_is_asked_for_and_the_same_bytes() {
+        let dir = std::env::temp_dir().join(format!("sherd-report-sel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let source = dir.join("piece.ply");
+        crate::io::writer::write_ply(&source, &tetra()).expect("the source writes");
+        let mut poses = vec![Matrix4::identity(); 3];
+        poses[1][(0, 3)] = 10.0;
+        let paths = vec![source.clone(), source.clone(), source];
+        let groups = [vec![0, 1], vec![2]];
+        let budget = crate::memory::Budget::default_for_machine();
+
+        let full = dir.join("full");
+        write_placed_meshes(&full, &paths, &names(), &poses, &groups, OPEN3D_COMMENT, budget)
+            .expect("the full writer");
+        let some = dir.join("some");
+        let written = write_placed_selected(
+            &some,
+            &paths,
+            &names(),
+            &poses,
+            &groups,
+            &[true, true, false],
+            false,
+            OPEN3D_COMMENT,
+            budget,
+        )
+        .expect("the selected writer");
+        assert_eq!(written, vec![some.join("placed/one.ply"), some.join("placed/two.ply")]);
+        assert!(!some.join("placed/three.ply").exists(), "the unmarked fragment gets none");
+        assert!(!some.join("assembly_0.ply").exists(), "no merged file unless asked");
+        for name in ["one", "two"] {
+            let a = std::fs::read(full.join(format!("placed/{name}.ply"))).expect("full");
+            let b = std::fs::read(some.join(format!("placed/{name}.ply"))).expect("selected");
+            assert!(a == b, "{name}: the same bytes");
+        }
+
+        let none = dir.join("none");
+        let written = write_placed_selected(
+            &none,
+            &paths,
+            &names(),
+            &poses,
+            &groups,
+            &[false; 3],
+            true,
+            OPEN3D_COMMENT,
+            budget,
+        )
+        .expect("nothing but the merged file");
+        assert_eq!(written, vec![none.join("assembly_0.ply")]);
+        assert!(!none.join("placed").exists(), "no empty placed/ directory");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The writer on a placed mesh: `placed/<name>.ply` for every fragment, `assembly_<k>.ply` for

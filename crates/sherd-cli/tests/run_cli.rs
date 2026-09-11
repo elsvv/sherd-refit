@@ -150,7 +150,30 @@ fn two_runs_agree(input: &Path) {
     for wanted in ["transforms.json", "report.json", "report.md", "preview_segmentation.png"] {
         assert!(a.contains_key(wanted), "{wanted} is missing from {:?}", a.keys());
     }
-    assert!(a.keys().any(|k| k.starts_with("placed/")), "R §11.4's placed meshes: {:?}", a.keys());
+    // `placed/` holds the fragments an assembled group placed, so it exists exactly when
+    // `transforms.json` has a fragment with `placed: true` (the slab's pair is not confirmed).
+    let transforms: serde_json::Value =
+        serde_json::from_slice(&a["transforms.json"]).expect("transforms.json parses");
+    let assembled = transforms["fragments"]
+        .as_object()
+        .expect("a fragments object")
+        .values()
+        .any(|f| f["placed"] == serde_json::Value::Bool(true));
+    assert_eq!(
+        a.keys().any(|k| k.starts_with("placed/")),
+        assembled,
+        "placed/ holds the assembled fragments and only those: {:?}",
+        a.keys()
+    );
+    // The museum's files (`sherd_core::export`), under the same byte-for-byte gate as the rest.
+    for wanted in ["viewer.html", "scene.glb", "transforms.csv", "joins.csv", "README.txt"] {
+        assert!(a.contains_key(wanted), "{wanted} is missing from {:?}", a.keys());
+    }
+    assert!(
+        !a.keys().any(|k| k.starts_with("assembly_")),
+        "the merged meshes are written on --merged-meshes only: {:?}",
+        a.keys()
+    );
     assert!(summary.contains("candidates"), "the summary counts what the matcher found: {summary}");
     assert!(
         summary.contains("preprocess") && summary.contains("wall"),

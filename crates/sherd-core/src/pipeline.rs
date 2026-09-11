@@ -56,7 +56,7 @@ use crate::progress::Watch;
 use crate::refine::{self, FractureCloud, RefinePiece, fracture_cloud, refine_joins};
 use crate::render::{self, PALETTE, Paint, Splat};
 use crate::report::{
-    FragmentStats, MemoryReport, Outcome, Timings, write_placed_meshes, write_report,
+    FragmentStats, MemoryReport, Outcome, Timings, write_placed_selected, write_report,
     write_transforms,
 };
 use crate::spatial::kdtree::PointTree;
@@ -197,7 +197,8 @@ pub struct RunOptions {
     pub preview: bool,
     /// Run R §9's full-resolution refinement.
     pub refine: bool,
-    /// Write R §11.4's placed and merged meshes.
+    /// Write meshes at all: `placed/`, and with it `assembly_<k>.ply`, `scene.glb` and
+    /// `viewer.html` as the switches below say. `false` is `--no-meshes`.
     pub write_meshes: bool,
     /// Read and write `<out>/cache/<name>.sherd` (R §3.7).
     pub cache: bool,
@@ -241,6 +242,16 @@ pub struct RunOptions {
     ///
     /// `report.json` always carries the whole band, so nothing a run found is lost by it.
     pub probable_top: usize,
+    /// `--placed-all`: write `placed/<name>.ply` for **every** fragment, as R §11.4 does, instead
+    /// of only for the fragments an assembled group placed ([`write_placed_selected`]).
+    pub placed_all: bool,
+    /// `--merged-meshes`: write R §11.4's `assembly_<k>.ply` as well. Off by default: it repeats
+    /// `placed/` in one file per group and loses the fragments' names.
+    pub merged_meshes: bool,
+    /// Write `scene.glb` and `viewer.html` ([`crate::export`]) when meshes are written at all.
+    pub viewer: bool,
+    /// `--viewer-faces`: the faces `scene.glb` holds over the whole collection.
+    pub viewer_faces: usize,
 }
 
 impl Default for RunOptions {
@@ -262,6 +273,10 @@ impl Default for RunOptions {
             constraints: None,
             review_images: false,
             probable_top: crate::tiers::PROBABLE_TOP,
+            placed_all: false,
+            merged_meshes: false,
+            viewer: true,
+            viewer_faces: crate::export::scene::DEFAULT_FACES,
         }
     }
 }
@@ -931,14 +946,30 @@ pub fn run_with(
     )?;
     written.push(out_dir.join("report.json"));
     written.push(out_dir.join("report.md"));
+    let paths: Vec<PathBuf> = fragments.iter().map(|f| f.source.path.clone()).collect();
+    let collection = crate::export::collection_title(input);
+    let export = crate::export::Export {
+        collection: &collection,
+        names: &names,
+        sources: &paths,
+        poses: &poses,
+        groups: &assembly.groups,
+        candidates: &candidates,
+        used: &assembly.used,
+        tiers: tiered.is_some(),
+        review: review.as_ref(),
+        thickness,
+    };
     if options.write_meshes {
-        let paths: Vec<PathBuf> = fragments.iter().map(|f| f.source.path.clone()).collect();
-        written.extend(write_placed_meshes(
+        let which = if options.placed_all { vec![true; names.len()] } else { export.assembled() };
+        written.extend(write_placed_selected(
             out_dir,
             &paths,
             &names,
             &poses,
             &assembly.groups,
+            &which,
+            options.merged_meshes,
             crate::io::writer::DEFAULT_COMMENT,
             options.memory,
         )?);
@@ -946,6 +977,26 @@ pub fn run_with(
     if options.preview {
         written.extend(write_previews(out_dir, &fragments, &names, &poses, &assembly.groups)?);
     }
+    // The files for people and for other programs (`crate::export`): additive, read from what
+    // R §11 wrote from, and none of R §11's own files changes because of them.
+    let joins = export.joins();
+    written.extend(crate::export::tables::write_tables(out_dir, &export, &joins)?);
+    if options.write_meshes && options.viewer {
+        let areas: Vec<f64> = fragments
+            .iter()
+            .map(|f| f.mesh.face_areas.iter().map(|&a| f64::from(a)).sum())
+            .collect();
+        let scene = crate::export::scene::write_scene(
+            out_dir,
+            &export,
+            &areas,
+            options.viewer_faces,
+            options.memory,
+        )?;
+        written.push(scene.path.clone());
+        written.push(crate::export::viewer::write_viewer(out_dir, &export, &joins, &scene)?);
+    }
+    written.push(crate::export::readme::write_readme(out_dir, &export, &joins, &written)?);
     // R §11.2's `timings` is written **before** this line on the reference's side too: the dict
     // handed to `write_report` is mutated after `json.dump` has already run, so `report.json`
     // carries every stage but this one. The fixture dumps confirm it — their `timings` hold
@@ -1592,7 +1643,8 @@ fn refine(
 /// whole file, before R §3.3's decimation — so the stage's own high-water mark is
 /// `concurrent jobs x (vertices + normals + the KD query)` of originals, which is the same peak
 /// preprocessing has and is priced by the same model ([`memory::reservation`]). Preprocessing
-/// (`preprocess_watched`) and R §11.4's placed writers ([`write_placed_meshes`]) have both gone
+/// (`preprocess_watched`) and R §11.4's placed writers
+/// ([`write_placed_meshes`](crate::report::write_placed_meshes)) have both gone
 /// through the semaphore since E2; this stage did not, and on a 170-scan collection it is the one
 /// place left where the pool's width alone decides how many originals are resident.
 ///

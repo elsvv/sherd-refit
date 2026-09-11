@@ -81,6 +81,7 @@ pub mod assembly;
 pub mod collection;
 pub mod error;
 pub mod executor;
+pub mod export;
 pub mod fragment;
 pub mod io;
 pub mod matching;

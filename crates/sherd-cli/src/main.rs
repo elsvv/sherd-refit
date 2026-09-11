@@ -264,9 +264,26 @@ struct RunArgs {
     /// Skip full-resolution refinement.
     #[arg(long)]
     no_refine: bool,
-    /// Do not write placed/merged meshes.
+    /// Do not write any mesh: `placed/`, `assembly_<k>.ply`, `scene.glb` or `viewer.html`.
     #[arg(long)]
     no_meshes: bool,
+    /// Write `placed/<name>.ply` for every fragment, the unassembled ones included (R §11.4's own
+    /// behaviour). By default only the fragments an assembled group placed get one: an
+    /// unassembled fragment's copy is its original file, merely recentred.
+    #[arg(long)]
+    placed_all: bool,
+    /// Also write `assembly_<k>.ply`, one merged mesh per assembled group (R §11.4). Off by
+    /// default: it repeats `placed/` and loses the fragments' names.
+    #[arg(long)]
+    merged_meshes: bool,
+    /// Do not write `scene.glb` (the assembly as a glTF scene, one named node per fragment) and
+    /// `viewer.html` (that scene in a browser, the fragment's name under the cursor).
+    #[arg(long)]
+    no_viewer: bool,
+    /// Faces `scene.glb` and `viewer.html` hold over the whole collection, shared out by surface
+    /// area, 2 000 to 60 000 a fragment. Full resolution is in `placed/`.
+    #[arg(long, default_value_t = sherd_core::export::scene::DEFAULT_FACES, value_name = "N")]
+    viewer_faces: usize,
     /// Executor: `auto`, `cpu` or `gpu` (D §6.8).
     #[arg(long, default_value_t = Backend::Auto)]
     backend: Backend,
@@ -1136,6 +1153,10 @@ fn run(args: &RunArgs) -> Result<()> {
         preview: !args.no_preview,
         refine: !args.no_refine,
         write_meshes: !args.no_meshes,
+        placed_all: args.placed_all,
+        merged_meshes: args.merged_meshes,
+        viewer: !args.no_viewer,
+        viewer_faces: args.viewer_faces,
         cache: !args.no_cache,
         workers: schedule_workers(args.workers),
         backend: resolved.backend,

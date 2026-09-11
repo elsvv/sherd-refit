@@ -294,10 +294,14 @@ struct RunArgs {
     /// A batch that does not fit is answered by the CPU and counted, never dropped.
     #[arg(long, value_name = "GB")]
     gpu_memory: Option<f64>,
-    /// Neither read nor write the fragment cache (R §3.7).
+    /// Keep R §3.7's fragment cache in DIR (`<DIR>/<name>.sherd`), so that a re-run of the same
+    /// collection skips preprocessing. Off by default: the result folder holds results only.
+    #[arg(long, value_name = "DIR")]
+    cache_dir: Option<PathBuf>,
+    /// Ignore `--cache-dir`: neither read nor write a fragment cache (R §3.7).
     #[arg(long)]
     no_cache: bool,
-    /// Recompute every fragment and overwrite its cache, even when the cache is valid.
+    /// Recompute every fragment and overwrite its cache in `--cache-dir`, even when it is valid.
     #[arg(long)]
     force: bool,
     /// Gigabytes concurrent scans may hold during preprocessing (D §5, D §9); 0 removes the
@@ -1157,7 +1161,7 @@ fn run(args: &RunArgs) -> Result<()> {
         merged_meshes: args.merged_meshes,
         viewer: !args.no_viewer,
         viewer_faces: args.viewer_faces,
-        cache: !args.no_cache,
+        cache: if args.no_cache { None } else { args.cache_dir.clone() },
         workers: schedule_workers(args.workers),
         backend: resolved.backend,
         adapter: resolved.adapter.clone(),
@@ -1171,8 +1175,8 @@ fn run(args: &RunArgs) -> Result<()> {
         review_images: args.review_images,
         probable_top: args.probable_top,
     };
-    if args.force && !args.no_cache {
-        clear_caches(&args.input, &args.out)?;
+    if let (true, false, Some(dir)) = (args.force, args.no_cache, &args.cache_dir) {
+        clear_caches(&args.input, dir)?;
     }
     let started = std::time::Instant::now();
     if args.backend == Backend::Gpu {
@@ -1234,7 +1238,7 @@ fn bench(args: &BenchArgs) -> Result<()> {
         params: Params { seed: args.seed, ..Params::default() },
         preview: false,
         write_meshes: args.meshes,
-        cache: !args.no_cache,
+        cache: (!args.no_cache).then(|| args.out.join("cache")),
         workers: schedule_workers(args.workers),
         backend: resolved.backend,
         adapter: resolved.adapter.clone(),
@@ -1322,11 +1326,11 @@ fn gpu_check(args: &GpuCheckArgs) -> Result<()> {
 
 /// `--force`: removes the cache files of the collection about to be run, so every fragment is
 /// recomputed and rewritten.
-fn clear_caches(input: &std::path::Path, out: &std::path::Path) -> Result<()> {
+fn clear_caches(input: &std::path::Path, dir: &std::path::Path) -> Result<()> {
     let entries =
         collection::discover(input).with_context(|| format!("scanning {}", input.display()))?;
     for entry in &entries {
-        let path = cache::cache_path(out, &entry.name);
+        let path = cache::cache_file(dir, &entry.name);
         if path.exists() {
             std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
         }

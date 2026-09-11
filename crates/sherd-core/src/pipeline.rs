@@ -95,7 +95,8 @@ pub fn preprocess(
     budget: Budget,
     seed: u64,
 ) -> Vec<Result<Preprocessed>> {
-    preprocess_watched(entries, target_faces, out_dir, budget, seed, &Watch::default())
+    let cache_dir = out_dir.map(|dir| dir.join("cache"));
+    preprocess_watched(entries, target_faces, cache_dir.as_deref(), budget, seed, &Watch::default())
 }
 
 /// [`preprocess`] under D §5's cancellation flag and progress callback.
@@ -107,7 +108,7 @@ pub fn preprocess(
 pub fn preprocess_watched(
     entries: &[Entry],
     target_faces: usize,
-    out_dir: Option<&Path>,
+    cache_dir: Option<&Path>,
     budget: Budget,
     seed: u64,
     watch: &Watch,
@@ -123,7 +124,7 @@ pub fn preprocess_watched(
             // RSS, and wait for it. A file whose size cannot be read reserves nothing — the load
             // below is about to fail with the reader's own error, which is the better one.
             let permit = semaphore.acquire(memory::scan_faces(&entry.path).map_or(0, reservation));
-            let cache_path = out_dir.map(|dir| cache::cache_path(dir, &entry.name));
+            let cache_path = cache_dir.map(|dir| cache::cache_file(dir, &entry.name));
             let (fragment, cached) = Fragment::load_or_build(
                 &entry.path,
                 target_faces,
@@ -200,8 +201,10 @@ pub struct RunOptions {
     /// Write meshes at all: `placed/`, and with it `assembly_<k>.ply`, `scene.glb` and
     /// `viewer.html` as the switches below say. `false` is `--no-meshes`.
     pub write_meshes: bool,
-    /// Read and write `<out>/cache/<name>.sherd` (R §3.7).
-    pub cache: bool,
+    /// The directory R §3.7's fragment cache is read from and written to (`--cache-dir`), or
+    /// `None` — the default — for no cache at all: the result folder holds results, and a finished
+    /// run's cache serves only a re-run of the same collection.
+    pub cache: Option<PathBuf>,
     /// How many pairs the machine can work on at once — the reference's `workers`, and here the
     /// size of the one rayon pool. Only the pair schedule reads it.
     pub workers: usize,
@@ -263,7 +266,7 @@ impl Default for RunOptions {
             preview: true,
             refine: true,
             write_meshes: true,
-            cache: true,
+            cache: None,
             workers: 0,
             backend: Backend::Cpu,
             adapter: None,
@@ -441,7 +444,7 @@ pub fn run_with(
 
     // 1. preprocessing (R §3, through the cache of R §3.7)
     let started = Instant::now();
-    let cache_dir = options.cache.then(|| out_dir.to_path_buf());
+    let cache_dir = options.cache.clone();
     let mut fragments = preprocess_collection(
         &entries,
         options.target_faces,
@@ -1086,12 +1089,12 @@ fn pinned_candidate(
 fn preprocess_collection(
     entries: &[Entry],
     target_faces: usize,
-    out_dir: Option<&Path>,
+    cache_dir: Option<&Path>,
     budget: Budget,
     seed: u64,
     watch: &Watch,
 ) -> Result<Vec<Fragment>> {
-    let results = preprocess_watched(entries, target_faces, out_dir, budget, seed, watch);
+    let results = preprocess_watched(entries, target_faces, cache_dir, budget, seed, watch);
     let mut fragments = Vec::with_capacity(results.len());
     for (i, result) in results.into_iter().enumerate() {
         let mut fragment = result?.fragment;
@@ -2024,7 +2027,8 @@ mod tests {
         let options = RunOptions::default();
         assert_eq!(options.target_faces, 200_000);
         assert_eq!(options.keep_per_pair, 5, "R §5.7's `keep`, not a flag on either side");
-        assert!(options.preview && options.refine && options.write_meshes && options.cache);
+        assert!(options.preview && options.refine && options.write_meshes);
+        assert!(options.cache.is_none(), "a run writes no cache unless asked for one");
         assert_eq!(options.params, Params::default());
     }
 

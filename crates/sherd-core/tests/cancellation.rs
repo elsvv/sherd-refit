@@ -51,7 +51,7 @@ fn files(dir: &Path) -> Vec<String> {
 /// A run with no previews, no meshes and no cache: nothing but `report.*` and `transforms.json`
 /// at the end, so an empty directory means the run really stopped.
 fn options(watch: Watch) -> RunOptions {
-    RunOptions { preview: false, write_meshes: false, cache: false, watch, ..RunOptions::default() }
+    RunOptions { preview: false, write_meshes: false, cache: None, watch, ..RunOptions::default() }
 }
 
 /// A `Progress` that raises the flag the moment the run reports its first unit — D §5's callback

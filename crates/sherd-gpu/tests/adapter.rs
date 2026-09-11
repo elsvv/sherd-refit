@@ -1167,7 +1167,7 @@ fn a_cancelled_gpu_run_leaves_the_device_usable() {
     let options = RunOptions {
         preview: false,
         write_meshes: false,
-        cache: false,
+        cache: None,
         watch,
         ..RunOptions::default()
     };

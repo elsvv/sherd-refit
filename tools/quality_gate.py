@@ -844,6 +844,7 @@ def main(argv=None):
         for seed in a.seeds:
             cmd = [os.path.join(ROOT, a.bin), "run", indir, "--out", work,
                    "--backend", a.backend, "--no-preview", "--no-meshes", "--seed", str(seed),
+                   "--cache-dir", os.path.join(work, "cache"),
                    "--tiers", a.tiers,
                    "--objects", a.objects,
                    "--object-disagreement", a.object_disagreement]

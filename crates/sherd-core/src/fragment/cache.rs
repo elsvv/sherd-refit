@@ -83,9 +83,14 @@ pub const METADATA_KEY: &str = "sherd";
 /// reuse a cache, and a sub-second jitter must not throw one away.
 pub const MTIME_TOLERANCE_NS: i128 = 1_000_000_000;
 
-/// `<out>/cache/<name>.sherd` (D §4.2).
+/// `<out>/cache/<name>.sherd` (D §4.2): where `segment` and `bench` keep their caches.
 pub fn cache_path(out_dir: impl AsRef<Path>, name: &str) -> PathBuf {
-    out_dir.as_ref().join("cache").join(format!("{name}.{EXTENSION}"))
+    cache_file(out_dir.as_ref().join("cache"), name)
+}
+
+/// `<dir>/<name>.sherd`: a fragment's cache file in a directory of caches (`run --cache-dir`).
+pub fn cache_file(dir: impl AsRef<Path>, name: &str) -> PathBuf {
+    dir.as_ref().join(format!("{name}.{EXTENSION}"))
 }
 
 /// The metadata block of a cache file: D §4.2's string map, as one JSON object.

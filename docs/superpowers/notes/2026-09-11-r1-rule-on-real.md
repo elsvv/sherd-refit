@@ -398,11 +398,17 @@ held at seed 0 for the first time on this collection by a default rule.
 | `cargo test --workspace --release` | **pass** — 19 targets, **456 passed, 0 failed**, 3 ignored |
 | `parity --stage all`, both modes, eight dumps | **pass** — 16 runs exit 0, **256 rows** (213 PASS, 43 SKIP, **0 FAIL**), **23 804 checks, 0 failed** — the frozen total, unmoved |
 | `pytest -q` | **pass** — **60 passed in 76.0 s** |
-| `tools/quality_gate.py`, 9 sets × seeds 0–4 | **exit 0** — §7: 930.4 s, **174 correct confirmed joins, 0 false**, terracotta ten of ten |
-| byte identity, seed 0, four sets, `--tiers off --objects off`, against a fresh `373520e` built outside the repository | **pass** — **35 187 leaves compared, 0 non-exempt differences**: 8 `engine.commit`, 16 `timings`, 20 `memory`, and four `- <stage>: N.N s` lines in `report.md`. **There is no fifth bucket** |
+| `tools/quality_gate.py`, 9 sets × seeds 0–4 | **exit 0** — §7: 930.4 s, **174 correct confirmed joins, 0 false**, terracotta ten of ten. Run twice, before and after R1.6's test corrections, with the same answer |
+| byte identity, seed 0, four sets, `--tiers off --objects off`, against a fresh `373520e` built outside the repository | **pass** — **35 187 leaves compared, 0 non-exempt differences**: 8 `engine.commit`, 16 `timings`, 20 `memory`, and six `- <stage>: N.N s` lines in `report.md`. **There is no fifth bucket** — not one leaf under `/candidates`, `/joins_used`, `/joins_rejected`, `/groups`, `/fragments`, `/thickness`, `/params` or anywhere in `transforms.json` outside `engine` differs. `CACHE_VERSION` is unmoved at 7 |
 
-Three tests were added and three were corrected; the three additions are named in R1.2, R1.4 and
-R1.5's own commit messages and the corrections in R1.6's.
+**Three tests were added** — `the_wide_margin_and_its_distance_are_read_at_the_same_pose` (R1.2),
+`the_margin_arm_wants_a_refused_rival_and_a_strict_redraw` (R1.4) and
+`the_agreement_mode_only_ever_takes_joins_out_of_the_confirmed_band` (R1.5) — one was extended
+(`slab_pair::the_wide_rival_is_additive_and_names_a_second_placement` now holds the rival's pose),
+**and seven were corrected**: two lib tests that were asserting the old rule and one tolerance
+(R1.6), and four `run_cli` tests on the slab fixture, which is a curved wall that genuinely fits
+itself in two places and which the shipped rule therefore confirms nothing of — they name
+`--tier-rival-refused off` and say why (R1.4). 453 tests at task V10, **456** here.
 
 ---
 
@@ -449,13 +455,14 @@ because a table nobody re-derives is a table nobody checks.
 
 ## 10. Housekeeping
 
-**Disk.** 83 GiB free at the start, never below 82 GiB, 85 GiB now. Written and kept under
-`output/r1/`: the 49 `--measure` dumps and their report copies (`measure/rules`, 1.1 GB), the rule
-table (`measure/r1.{md,json}`), the two confirmation runs without their caches, the quality gate's
-table and 45 run files, the object-disagreement pair of gate runs, the parity logs, the
-byte-identity runs and their comparison, `acceptance2-check/`, and the seven scripts every number
-above came from. Deleted once measured: the `--measure` work directories (the tool removes them),
-both confirmation caches, and the two byte-identity caches.
+**Disk.** 83 GiB free at the start, never below 74 GiB, 84 GiB now. Written and kept under
+`output/r1/`, **367 MB**: the 49 `--measure` dumps and their report copies (`measure/rules`,
+211 MB), the rule table (`measure/r1.{md,json}`), the two confirmation runs without their caches
+(142 MB), the quality gate's table and its 45 run files, the object-disagreement pair of gate runs,
+the parity logs, the byte-identity runs and their comparison, `acceptance2-check/`, and the eight
+scripts every number above came from. Deleted once measured: the `--measure` work directories (the
+tool removes them), both confirmation caches, the eight byte-identity caches, and the `373520e`
+build tree in the scratchpad.
 
 **Runs.** Development matching stayed inside D §12's small-set rule: 45 `--measure` runs for the
 table, 45 for the quality gate, 10 for the object-disagreement measurement, 8 for byte identity, and

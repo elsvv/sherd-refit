@@ -428,7 +428,7 @@ pub trait Executor: Send + Sync + fmt::Debug {
 (crate `sherd-gpu`) implements the same methods with WGSL kernels and identical batch structs.
 Everything else in the pipeline — hypotheses, NMS, seam/continuity via `kiddo`, scoring
 arithmetic, assembly — stays on the CPU and is written once. `Backend::Auto` picks the GPU only
-if an adapter exists, the self-test passes and its measured throughput beats the CPU by ≥ 1.5×
+if an adapter exists, the self-test passes and its measured throughput beats the CPU by ≥ 1.1× (1.5× until 2026-09-11, when the user lowered it so that the measured 1.07–1.43× stage gain is taken)
 (§6.8).
 
 **Built in phase 2a (task G1), with four things the original sketch did not say.**

@@ -8,7 +8,7 @@
 //!
 //! | flag | with an adapter | without one |
 //! |---|---|---|
-//! | `auto` (default) | the device is opened, the self-test runs, and `Selection::decide` applies D §6.8's rule — an adapter that is not a software one, a passing self-test, ≥ 1.5×, **and** an executor with its matching kernels | the CPU, silently |
+//! | `auto` (default) | the device is opened, the self-test runs, and `Selection::decide` applies D §6.8's rule — an adapter that is not a software one, a passing self-test, ≥ 1.1× (the user lowered the bar from 1.5× on 2026-09-11), **and** an executor with its matching kernels | the GPU |
 //! | `cpu` | the CPU; no device is opened at all | the CPU |
 //! | `gpu` | the device is opened and the self-test must pass, or the run **fails**; every method without a kernel is then counted as delegated | the run **fails**, naming what was tried |
 //!

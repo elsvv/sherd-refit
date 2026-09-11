@@ -293,7 +293,10 @@ impl GpuExecutor {
     /// them, and this policy changes when a *discrete* adapter has been measured on the matching
     /// stage — not when someone re-runs the same seven collections on this one. D §6.8's bar is
     /// 1.5×; the honest measurement on an integrated part is 1.07–1.43×.
-    pub const AUTO: AutoPolicy = AutoPolicy::CpuUntilADiscreteAdapter;
+    /// **2026-09-11, the user's decision:** a measured 1.07–1.43× is still a gain, so `auto`
+    /// takes the GPU on this machine and [`selftest::AUTO_SPEEDUP`] is 1.1×. The measurements
+    /// above are unchanged and are why the gain is what it is.
+    pub const AUTO: AutoPolicy = AutoPolicy::MeasuredOnThisMachine;
 
     /// How many worker threads the matching stage runs beyond `--threads`: **half as many again**
     /// (D §6.4, `Executor::device_slack`).
@@ -487,15 +490,15 @@ mod tests {
     use super::{AutoPolicy, GpuExecutor, Stats};
     use std::time::Duration;
 
-    /// The two matching kernels are in, and `Backend::Auto` still says CPU — by policy.
+    /// The two matching kernels are in, and `Backend::Auto` takes the GPU — by the user's decision.
     #[test]
-    fn the_kernels_exist_and_auto_still_says_cpu() {
+    fn the_kernels_exist_and_auto_takes_the_gpu() {
         const { assert!(GpuExecutor::HAS_KERNELS, "task G2 puts coarse and icp on the device") };
         assert_eq!(
             GpuExecutor::AUTO,
-            AutoPolicy::CpuUntilADiscreteAdapter,
-            "measured on an integrated part: matching is 1.07-1.43x, under D §6.8's 1.5x bar, and \
-             the envelope it shares with the cores is not something tuning moves"
+            AutoPolicy::MeasuredOnThisMachine,
+            "the user's decision of 2026-09-11: 1.07-1.43x on the stage is a gain worth taking, \
+             and the bar is 1.1x"
         );
     }
 

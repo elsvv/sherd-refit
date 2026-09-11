@@ -8,7 +8,7 @@
 //! | adapters and limits | the device can run D §6's kernels at all | the wgpu defaults of [`crate::device::Requirements`] |
 //! | a fixed-order reduction of 1e7 `f32` terms | the shape D §6.4 specifies survives the compiler | **bit-identical** to the CPU mirror (E7 §3) |
 //! | D §6.2's bounded-NN kernel on a synthetic cloud | the grid, the traversal order and the tie rule agree | 0 differing neighbours, `max |Δd|` ≤ 1e-6 of the cloud (E7 §5.1: 56 in 24.6 M, 2.4e-7) |
-//! | host wall time of that kernel, GPU against all CPU cores | whether the GPU is worth using | ≥ 1.5× for `Backend::Auto` (D §6.8) |
+//! | host wall time of that kernel, GPU against all CPU cores | whether the GPU is worth using | ≥ 1.1× for `Backend::Auto` (D §6.8; 1.5× until the user lowered it on 2026-09-11) |
 //!
 //! Three corrections from E7 are built in rather than commented on:
 //!
@@ -53,7 +53,7 @@ use crate::buffers::{self, Dispatch};
 use crate::device::{AdapterEntry, Gpu, Requirements, WORKGROUP};
 
 /// D §6.8's threshold for `Backend::Auto`: the GPU must beat the whole CPU by this much.
-pub const AUTO_SPEEDUP: f64 = 1.5;
+pub const AUTO_SPEEDUP: f64 = 1.1;
 
 /// What the **matching stage** measures on this machine, against the CPU backend — the quantity
 /// [`AUTO_SPEEDUP`] is a bar for, and not the one the self-test reports.
@@ -317,8 +317,8 @@ pub enum AutoPolicy {
     /// D §6.8's own rule, on a machine where the *stage* has been measured at or above
     /// [`AUTO_SPEEDUP`]: a passing self-test on a non-software adapter picks the GPU.
     ///
-    /// Nothing sets this today. It is what a discrete adapter's measurement would set, and it is
-    /// here so that [`Selection::decide`]'s rule has something to be a rule *about*.
+    /// Set since 2026-09-11 by the user's decision: the 1.07–1.43× the stage gains on this
+    /// integrated part is worth taking, and the bar [`AUTO_SPEEDUP`] is 1.1×.
     MeasuredOnThisMachine,
 }
 

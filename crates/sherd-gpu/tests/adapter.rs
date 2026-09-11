@@ -126,14 +126,19 @@ fn the_self_test_holds_on_this_machines_adapter() {
     assert!(test.ns_per_query() > 0.0);
     assert!(test.queries > 0);
 
-    // D §6.8's rule, on the real numbers: the executor is not `Auto`-eligible, whatever the
-    // device did on the self-test's own batch.
+    // D §6.8's rule, on the real numbers: since 2026-09-11 the shipped policy is the measured
+    // one, so `auto` follows the ratio against `AUTO_SPEEDUP` (1.1x).
     let today = Selection::decide(test.clone(), GpuExecutor::AUTO);
-    assert!(!today.use_gpu, "the policy is the CPU until a discrete adapter: {}", today.reason);
+    assert_eq!(
+        today.use_gpu,
+        test.speedup >= AUTO_SPEEDUP && !test.adapter.is_software(),
+        "auto follows the ratio: {}",
+        today.reason
+    );
     println!("  auto (as shipped): {}", today.reason);
 
-    // And on a machine whose stage *has* been measured, the decision is the ratio against
-    // D §6.8's 1.5x.
+    // And the measured policy, spelled out, is the same decision: the ratio against
+    // D §6.8's bar.
     let with_kernels = Selection::decide(test.clone(), AutoPolicy::MeasuredOnThisMachine);
     assert_eq!(
         with_kernels.use_gpu,

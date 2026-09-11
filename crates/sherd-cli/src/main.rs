@@ -928,11 +928,10 @@ fn info(args: &InfoArgs) {
         "                       neither the abort nor the fence it resolves as success, and the",
         "                       port answers such a batch on the CPU and counts it `corrupt` in",
         "                       the run's device lines (task H1, D §7).",
-        "  gpu, when to use it: `--backend gpu` is an opt-in — for measuring the kernels, and for",
-        "                       a discrete adapter. `auto` is the CPU by policy until the matching",
-        "                       stage has been measured on one: on an integrated part the device",
-        "                       and the cores share one envelope and the stage is 1.07-1.43x,",
-        "                       under D §6.8's 1.5x (audit §A.2.4, D §6.8).",
+        "  gpu, when to use it: `auto` takes the GPU when the self-test passes at >= 1.1x (the",
+        "                       user's decision of 2026-09-11; the bar was 1.5x). On this integrated",
+        "                       part the matching stage gains 1.07-1.43x because the device and the",
+        "                       cores share one envelope (D §6.6); a discrete adapter shares nothing.",
     ] {
         println!("{line}");
     }

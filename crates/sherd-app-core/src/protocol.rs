@@ -25,6 +25,11 @@ pub use crate::run::{EngineInfo, FailKind, RunCounts, StageTime};
 pub const PROTOCOL: u32 = 1;
 
 /// What a worker is asked to do — exactly one per process (A §2.1).
+#[allow(
+    clippy::large_enum_variant,
+    reason = "`RunJob` is large because `Params` is, and exactly one `Job` crosses the pipe in a \
+              worker's life: boxing would save that single move and cost every arm a deref"
+)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "job", rename_all = "snake_case")]
 pub enum Job {
@@ -199,6 +204,11 @@ impl RunSpec {
 }
 
 /// What a worker says. One line each, in the order they happened.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "`Done` is the large one because it carries the run's resolved `Params`, and it is \
+              said once, last; the variants that do arrive in numbers are `Stage` and `Progress`"
+)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {

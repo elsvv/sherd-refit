@@ -222,7 +222,13 @@ pub fn new_id(existing: &[String], now: chrono::DateTime<chrono::Local>) -> Stri
     if !existing.contains(&base) {
         return base;
     }
-    (2..).map(|n| format!("{base}-{n}")).find(|id| !existing.contains(id)).unwrap_or(base)
+    // `base` plus the suffixes up to `existing.len() + 1` are one more id than `existing` can
+    // hold, so one of them is always free and the fallback never fires. The range is bounded
+    // rather than open so that it is the type, and not an argument about the data, that says so.
+    (2..=existing.len() + 1)
+        .map(|n| format!("{base}-{n}"))
+        .find(|id| !existing.contains(id))
+        .unwrap_or(base)
 }
 
 /// `now` as `run.json` writes a time.

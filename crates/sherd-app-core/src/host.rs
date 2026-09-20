@@ -46,6 +46,10 @@ pub struct WorkerCommand {
 
 /// What a worker's stream yields: its events, and then the one fact the protocol cannot carry —
 /// that the process itself is over.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "it is `protocol::Event` plus one word; the size is that enum's, and its own reason"
+)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum HostEvent {
     /// One line the worker wrote.
@@ -246,6 +250,10 @@ impl Drop for Worker {
 }
 
 /// How a job ended, as the host files it (A §10).
+#[allow(
+    clippy::large_enum_variant,
+    reason = "`Done` carries the run's resolved `Params`, and one `Outcome` is returned per run"
+)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
     /// It finished. The three blocks are a run's; a `Prepare` and an `Info` fill none of them.

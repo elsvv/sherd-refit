@@ -7,7 +7,9 @@
 //!
 //! **Locking order: the job slot first, then the workspace.** Every path that needs both takes
 //! them in that order, which is what keeps a command and the job thread from waiting on each
-//! other. Nothing holds one across an `await` or across spawning a worker.
+//! other. Neither is ever held while a worker is being *driven*; the job slot alone is held
+//! across the spawn of one, which is what keeps two clicks from starting two workers on the same
+//! folder (see [`crate::jobs::start_prepare`]).
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -22,9 +24,6 @@ use crate::error::CommandError;
 /// The canceller and not the [`Worker`](sherd_app_core::host::Worker) itself: `host::drive`
 /// borrows the worker for the whole run on the job thread, so «Отменить» — which arrives on a
 /// command thread — can only reach it through the handle taken before the run began (A §2.2).
-// Task 4 (`jobs.rs`) is what puts a slot in; until it lands nothing constructs one, and this
-// expectation is what makes removing the attribute part of that task rather than a loose end.
-#[expect(dead_code, reason = "constructed by jobs.rs, which arrives with Prepare in task 4")]
 #[derive(Debug)]
 pub(crate) struct JobSlot {
     /// Which kind of job, for the view and for the events the window is sent.

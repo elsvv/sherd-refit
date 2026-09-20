@@ -14,6 +14,7 @@ use sherd_app_core::workspace::Workspace;
 use tauri::{AppHandle, Manager, State};
 
 use crate::error::CommandError;
+use crate::jobs;
 use crate::recent::{self, RecentEntry};
 use crate::state::AppState;
 
@@ -143,6 +144,34 @@ pub(crate) fn fragment_exclude(
     let ws = held.as_mut().ok_or_else(CommandError::no_workspace)?;
     ws.set_excluded(&name, excluded)?;
     Ok(view::build(ws, job)?)
+}
+
+/// Starts preparing the input (A §5's «preparing» row). Returns as soon as the worker is on its
+/// way: everything the job says arrives at the window as `engine:event`, and its end, with a
+/// fresh view, as `engine:finished`.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `busy`, `no_workspace`, `worker`, `io` or `engine`; see
+/// [`jobs::start_prepare`].
+#[tauri::command]
+pub(crate) fn prepare_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    jobs::start_prepare(&app, state.inner())
+}
+
+/// «Отменить» (A §2.2). Asks the job to stop; it ends at its next unit of work and reports
+/// itself `Failed` with `cancelled`, which is what the window shows. Cancelling nothing is no
+/// error — the button and the job ending on its own race.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `worker` when the job slot is poisoned.
+#[tauri::command]
+pub(crate) fn job_cancel(state: State<'_, AppState>) -> Result<(), CommandError> {
+    jobs::cancel(state.inner())
 }
 
 /// Opening a workspace, whichever door it came through.

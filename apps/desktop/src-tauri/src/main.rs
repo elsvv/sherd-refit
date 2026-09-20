@@ -6,6 +6,7 @@
 
 mod commands;
 mod error;
+mod jobs;
 mod recent;
 mod state;
 
@@ -32,6 +33,8 @@ fn main() {
             commands::workspace_view,
             commands::input_link,
             commands::fragment_exclude,
+            commands::prepare_start,
+            commands::job_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("the window could not be opened");

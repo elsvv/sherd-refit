@@ -4,6 +4,7 @@ members = [
     "crates/sherd-core",
     "crates/sherd-gpu",
     "crates/sherd-backend",
+    "crates/sherd-app-core",
     "crates/sherd-cli",
     "crates/sherd-parity",
 ]
@@ -58,6 +59,10 @@ sha2 = "0.11.0"                           # fixture manifest checksums
 image = { version = "0.25.10", default-features = false, features = [
     "png",
 ] } # preview PNGs
+chrono = { version = "=0.4.45", default-features = false, features = [
+    "clock",
+    "std",
+] } # local wall-clock time for the app's run ids and run.json; nothing in the core reads a clock
 
 # --- CLI, logging, errors ---------------------------------------------------------------------
 clap = { version = "4.6.6", features = ["derive"] }
@@ -92,6 +97,7 @@ sherd-gpu = { path = "crates/sherd-gpu" }
 # `default-features = false`: a front end turns `sherd-backend/gpu` on through its own `gpu`
 # feature, so that `--no-default-features` on the front end reaches all the way down (D §2).
 sherd-backend = { path = "crates/sherd-backend", default-features = false }
+sherd-app-core = { path = "crates/sherd-app-core" }
 sherd-parity = { path = "crates/sherd-parity" }
 
 # Lint baseline for every crate; each member opts in with `[lints] workspace = true`.

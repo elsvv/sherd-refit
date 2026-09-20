@@ -126,7 +126,10 @@ impl Worker {
             .args(&command.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // A §10 promises an `internal` failure's backtrace in `engine.log`. The default panic
+            // hook writes one to stderr — which is the log — only when asked to.
+            .env("RUST_BACKTRACE", "1");
         // CREATE_NO_WINDOW: a worker started from a windowed app must not flash a console.
         #[cfg(windows)]
         {
@@ -136,16 +139,25 @@ impl Worker {
         let mut child = builder
             .spawn()
             .map_err(|e| AppError::Worker(format!("{}: {e}", command.program.display())))?;
+        // A child that cannot be handed its job is ended and reaped here: returning with it
+        // alive would leave a process nobody holds and, once it died, a zombie nobody waits for.
+        let abandon = |mut child: std::process::Child, why: String| {
+            let _ = child.kill();
+            let _ = child.wait();
+            AppError::Worker(why)
+        };
         let (Some(mut stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
-            return Err(AppError::Worker("the engine process has no pipes".to_owned()));
+            return Err(abandon(child, "the engine process has no pipes".to_owned()));
         };
-        let line = serde_json::to_string(job)
-            .map_err(|e| AppError::Worker(format!("the job does not serialise: {e}")))?;
-        writeln!(stdin, "{line}")
-            .and_then(|()| stdin.flush())
-            .map_err(|e| AppError::Worker(format!("the job could not be sent: {e}")))?;
+        let line = match serde_json::to_string(job) {
+            Ok(line) => line,
+            Err(e) => return Err(abandon(child, format!("the job does not serialise: {e}"))),
+        };
+        if let Err(e) = writeln!(stdin, "{line}").and_then(|()| stdin.flush()) {
+            return Err(abandon(child, format!("the job could not be sent: {e}")));
+        }
 
         let (sender, events) = mpsc::channel();
         let stray = log.clone();
@@ -205,6 +217,12 @@ impl Worker {
         self.close_stdin();
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // The pipes are closed now, so both readers reach their end; joining them is what makes
+        // "nothing is still writing into the run's folder" true of `engine.log` as well.
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
+        }
+        self.exited = true;
     }
 
     /// Lets go of the worker's input, which is D §5's cancel by EOF (A §2.1). Says nothing when
@@ -244,8 +262,13 @@ impl Worker {
 /// left to the last [`Canceller`] a window may still be holding, so that the end of the worker's
 /// input stays the end of the worker.
 impl Drop for Worker {
+    /// A worker let go of before it said how it ended is stopped and reaped: the end of its input
+    /// is only a *request* to stop, and a process nobody waits for stays a zombie for as long as
+    /// the app runs.
     fn drop(&mut self) {
-        self.close_stdin();
+        if !self.exited {
+            self.kill();
+        }
     }
 }
 

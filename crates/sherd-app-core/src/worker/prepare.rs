@@ -95,9 +95,13 @@ pub(crate) fn prepare(job: &PrepareJob, context: &Context) -> Result<Event, Fail
                 return Err(Failure::new(FailKind::Input, gone));
             };
             let (glb, seg, png) = files(&dir, name);
+            let stats = FragmentStats::of(fragment);
             let unmoved = previous
                 .get(name)
                 .filter(|p| p.size == stamp.size && p.mtime_ms == stamp.mtime_ms)
+                // The same scan preprocessed at another face budget is another working mesh, and
+                // `<name>.seg.glb` is drawn from the working mesh: its row says whether it moved.
+                .filter(|p| p.stats == stats)
                 .filter(|_| glb.is_file() && seg.is_file() && png.is_file());
             let (coloured, display_faces) = if let Some(kept) = unmoved {
                 (kept.coloured, kept.display_faces)
@@ -109,7 +113,7 @@ pub(crate) fn prepare(job: &PrepareJob, context: &Context) -> Result<Event, Fail
                 file: stamp.file.clone(),
                 size: stamp.size,
                 mtime_ms: stamp.mtime_ms,
-                stats: FragmentStats::of(fragment),
+                stats,
                 warnings: warnings(fragment, median),
                 coloured,
                 display_faces,
@@ -157,7 +161,9 @@ fn write_display(
     let name = fragment.name.as_str();
     let (glb, seg, png) = files(dir, name);
     let permit = semaphore.acquire(memory::scan_faces(source).map_or(0, memory::reservation));
-    let mesh = sherd_core::io::read_mesh(source)?;
+    // `load_mesh` and not `read_mesh`: the cleaned original, which is what `scene.glb` is
+    // simplified from — so a fragment looks the same in the app and in an export (A §3.5).
+    let mesh = sherd_core::io::load_mesh(source)?;
     let display = scene::display_mesh(&mesh, target);
     drop(mesh);
     drop(permit);

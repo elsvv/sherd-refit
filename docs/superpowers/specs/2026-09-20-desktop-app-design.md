@@ -110,8 +110,10 @@ Requests inside a review session:
 | `Cancel`, `Close` | | |
 
 Events common to all jobs: `Stage { name }`, `Progress { stage, done, total }`,
-`Log { level, target, message }`, `FragmentReady { name, stats, warnings }` (Prepare only),
-`Failed { kind, message, detail }`. `Stage` carries no `index`/`of`: the set of stages varies with
+`FragmentReady { name, stats, warnings, … }` (Prepare only), `Failed { kind, message }`. The
+engine's log is not an event: the worker's `tracing` output goes to stderr, which the host appends
+to the run's `engine.log` — so a worker's last words survive a worker that dies mid-sentence.
+`Stage` carries no `index`/`of`: the set of stages varies with
 the options (`screen`, `second_pass`), so the window owns the strip and lights a stage by name when
 its first report arrives.
 

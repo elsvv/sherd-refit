@@ -39,7 +39,14 @@ impl Emitter {
     /// Writes one event. A host that has gone away is not an error worth stopping for here: its
     /// going away closes stdin, which is what stops the job.
     pub(crate) fn emit(&self, event: &Event) {
-        let Ok(mut line) = serde_json::to_vec(event) else { return };
+        let mut line = match serde_json::to_vec(event) {
+            Ok(line) => line,
+            Err(e) => {
+                // stderr is the log (A §2.1): an event that cannot be written is at least said.
+                tracing::error!(error = %e, "an event could not be serialised and was dropped");
+                return;
+            }
+        };
         line.push(b'\n');
         if let Ok(mut out) = self.0.lock() {
             let _ = out.write_all(&line).and_then(|()| out.flush());

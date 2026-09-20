@@ -191,7 +191,11 @@ pub fn list(runs_dir: &Path) -> Result<Vec<RunFile>> {
     let mut runs: Vec<RunFile> = std::fs::read_dir(runs_dir)
         .map_err(|e| AppError::io(runs_dir, e))?
         .filter_map(std::io::Result::ok)
-        .filter_map(|entry| RunFile::load(&entry.path()).ok())
+        .filter_map(|entry| Some((entry.file_name(), RunFile::load(&entry.path()).ok()?)))
+        // A run's id *is* its folder's name: everything that writes a run back finds the folder
+        // by the id. A folder renamed by hand is therefore not a run, rather than a run whose
+        // next save would quietly make a second folder.
+        .filter_map(|(folder, run)| (folder.to_str() == Some(run.id.as_str())).then_some(run))
         .collect();
     runs.sort_by(|a, b| b.id.cmp(&a.id));
     Ok(runs)

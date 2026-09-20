@@ -145,7 +145,7 @@ pub fn to_constraints(
         .map(|d| serde_json::json!([d.a, d.b]))
         .collect();
     let json = serde_json::json!({
-        "version": 1,
+        "version": sherd_core::assembly::constraints::VERSION,
         "must_join": must_join,
         "must_not_join": must_not_join,
     });

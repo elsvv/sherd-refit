@@ -1,0 +1,189 @@
+<h2>Раскладка главного окна</h2>
+<p class="subtitle">Воркспейс открыт, прогон завершён: 155 фрагментов, 17 групп, 39 вероятных стыков ждут ревью. Какой каркас удобнее? Щёлкните по варианту, подробности напишите в терминале.</p>
+
+<style>
+  .wf { font-size: 11px; line-height: 1.35; color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg-secondary); }
+  .wf * { box-sizing: border-box; }
+  .wf-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--bg-tertiary); }
+  .wf-bar .sp { flex: 1; }
+  .chip { padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-secondary); white-space: nowrap; }
+  .chip.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .chip.warn { border-color: var(--warning); color: var(--warning); }
+  .btn { padding: 3px 10px; border-radius: 6px; background: var(--accent); color: #fff; white-space: nowrap; }
+  .btn.ghost { background: transparent; color: var(--text-primary); border: 1px solid var(--border); }
+  .wf-body { display: flex; height: 300px; }
+  .pane { padding: 8px; border-right: 1px solid var(--border); overflow: hidden; }
+  .pane:last-child { border-right: 0; }
+  .pane h5 { margin: 0 0 6px; font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-secondary); font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 6px; padding: 2px 4px; border-radius: 4px; white-space: nowrap; }
+  .row.sel { background: var(--selected-bg); }
+  .row .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .row .mut { color: var(--text-secondary); margin-left: auto; }
+  .ind { padding-left: 14px; }
+  .vp { flex: 1; position: relative; background:
+      radial-gradient(ellipse at 50% 55%, rgba(200,140,80,.35), transparent 55%), var(--bg-primary);
+      display: flex; align-items: center; justify-content: center; color: var(--text-secondary); }
+  .vp .tools { position: absolute; top: 8px; left: 8px; display: flex; gap: 4px; }
+  .vp .tip { position: absolute; left: 54%; top: 38%; padding: 3px 7px; border-radius: 5px; background: var(--bg-secondary); border: 1px solid var(--border); color: var(--text-primary); box-shadow: 0 2px 8px rgba(0,0,0,.2); }
+  .float { position: absolute; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 8px; padding: 8px; box-shadow: 0 4px 14px rgba(0,0,0,.25); }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; }
+  .kv span:nth-child(odd) { color: var(--text-secondary); }
+  .status { }
+  .wf-foot { display: flex; align-items: center; gap: 8px; padding: 4px 10px; border-top: 1px solid var(--border); background: var(--bg-tertiary); color: var(--text-secondary); }
+  .meter { width: 140px; height: 5px; border-radius: 3px; background: var(--border); overflow: hidden; }
+  .meter i { display: block; height: 100%; width: 100%; background: var(--success); }
+  .step { display: flex; gap: 8px; padding: 7px 6px; border-radius: 6px; align-items: flex-start; }
+  .step.cur { background: var(--selected-bg); }
+  .step b { display: block; }
+  .step .n { width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; flex: none; font-size: 10px; }
+  .step.done .n { background: var(--success); color: #fff; border-color: var(--success); }
+  .step.cur .n { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .step small { color: var(--text-secondary); }
+  .stack { display: grid; grid-template-columns: 1fr; gap: 1.25rem; }
+  .stack .card-image { aspect-ratio: auto; display: block; padding: 12px; }
+  .twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: .5rem; }
+  .twocol ul { margin: 0 0 0 1.1rem; font-size: .85rem; color: var(--text-secondary); }
+  .twocol h4 { font-size: .8rem; margin: 0 0 .25rem; }
+  .twocol .p h4 { color: var(--success); } .twocol .c h4 { color: var(--error); }
+</style>
+
+<div class="stack">
+
+  <!-- ============ A ============ -->
+  <div class="card" data-choice="a-three-pane" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="wf">
+        <div class="wf-bar">
+          <b>karas ▾</b>
+          <span class="chip">Прогон 20.09 14:12 · 17 групп ▾</span>
+          <span class="sp"></span>
+          <span class="chip">Вход · 155</span>
+          <span class="chip on">Сборка</span>
+          <span class="chip warn">Ревью · 39</span>
+          <span class="sp"></span>
+          <span class="btn ghost">Экспорт</span>
+          <span class="btn">Перегенерировать</span>
+        </div>
+        <div class="wf-body">
+          <div class="pane" style="width: 210px">
+            <h5>Группы и фрагменты</h5>
+            <div class="row" style="border:1px solid var(--border)">🔍 <span class="mut" style="margin:0">поиск: FY2340…</span></div>
+            <div class="row sel"><span class="dot" style="background:#e07a3f"></span>▾ Группа 0 <span class="mut">20 фр.</span></div>
+            <div class="row ind">FY234001 <span class="mut">инв. 1204/7</span></div>
+            <div class="row ind sel">FY234111 <span class="mut">инв. 1204/31</span></div>
+            <div class="row ind">FY234104 <span class="mut">—</span></div>
+            <div class="row"><span class="dot" style="background:#4f9d69"></span>▸ Группа 1 <span class="mut">8 фр.</span></div>
+            <div class="row"><span class="dot" style="background:#4a7fc1"></span>▸ Группа 2 <span class="mut">6 фр.</span></div>
+            <div class="row"><span class="dot" style="background:#b565c9"></span>▸ Группа 3 <span class="mut">4 фр.</span></div>
+            <div class="row mut" style="margin:0">… ещё 13 групп</div>
+            <div class="row"><span class="dot" style="background:var(--text-tertiary)"></span>▸ Без пары <span class="mut">81 фр.</span></div>
+          </div>
+          <div class="vp">
+            <div class="tools"><span class="chip">Вписать</span><span class="chip">Подписи</span><span class="chip">Цвет: группы ▾</span><span class="chip">Разнести</span></div>
+            3D-сцена: собранные группы
+            <div class="tip"><b>FY234111</b> · инв. 1204/31<br>группа 0 · 3 стыка</div>
+          </div>
+          <div class="pane" style="width: 230px">
+            <h5>Фрагмент FY234111</h5>
+            <div class="kv"><span>инв. №</span><span>1204/31</span><span>группа</span><span>0 (20 фр.)</span><span>стенка</span><span>32.4</span><span>замкнут</span><span>да</span></div>
+            <h5 style="margin-top:10px">Стыки</h5>
+            <div class="row"><span class="dot" style="background:var(--success)"></span>FY234001 <span class="mut">26.6</span></div>
+            <div class="row"><span class="dot" style="background:var(--success)"></span>FY234104 <span class="mut">19.1</span></div>
+            <div class="row"><span class="dot" style="background:var(--warning)"></span>FY234058 <span class="mut">вероятен · 13.9</span></div>
+            <div style="margin-top:8px; display:flex; gap:6px"><span class="btn ghost">Отклонить</span><span class="btn">Подтвердить</span></div>
+          </div>
+        </div>
+        <div class="wf-foot"><span>Готово · 17 мин 46 с · GPU Apple M2 Pro</span><span class="sp" style="flex:1"></span><span>60 подтверждено · 39 вероятно · 81 без пары</span></div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. Три панели и режимы</h3>
+      <p>Одно окно как в Blender/IDE: слева дерево групп и фрагментов, в центре 3D, справа инспектор выбранного. Сверху переключатель режимов <b>Вход · Сборка · Ревью</b> — каркас тот же, меняется содержимое панелей. Прогресс прогона — в нижней строке и поверх сцены.</p>
+      <div class="twocol">
+        <div class="p"><h4>Плюсы</h4><ul><li>Всё под рукой, привычно тем, кто работает в 3D-программах</li><li>Один вьюер и одно дерево на все режимы — меньше кода, легче поддерживать</li><li>Ревью — не отдельный мир: стык виден в контексте всей сборки</li></ul></div>
+        <div class="c"><h4>Минусы</h4><ul><li>Плотный экран, новичку нужно пару минут освоиться</li><li>На маленьком ноутбуке панели надо уметь сворачивать</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ B ============ -->
+  <div class="card" data-choice="b-steps" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="wf">
+        <div class="wf-bar"><b>karas ▾</b><span class="chip">Прогон 20.09 14:12 ▾</span><span class="sp"></span><span class="btn ghost">Настройки</span></div>
+        <div class="wf-body">
+          <div class="pane" style="width: 190px">
+            <div class="step done"><span class="n">✓</span><div><b>Вход</b><small>155 фрагментов · 3 предупр.</small></div></div>
+            <div class="step done"><span class="n">✓</span><div><b>Прогон</b><small>17 мин 46 с · GPU</small></div></div>
+            <div class="step done"><span class="n">✓</span><div><b>Результат</b><small>17 групп · 81 без пары</small></div></div>
+            <div class="step cur"><span class="n">4</span><div><b>Ревью стыков</b><small>39 вероятных · 0 решено</small></div></div>
+            <div class="step"><span class="n">5</span><div><b>Экспорт</b><small>placed, csv, glb, tfm</small></div></div>
+          </div>
+          <div class="pane" style="width: 230px">
+            <h5>Вероятные стыки · по оценке</h5>
+            <div class="row sel"><span class="dot" style="background:var(--warning)"></span>FY234111 – FY234058 <span class="mut">13.9</span></div>
+            <div class="row"><span class="dot" style="background:var(--warning)"></span>FY234003 – FY234101 <span class="mut">12.2</span></div>
+            <div class="row"><span class="dot" style="background:var(--warning)"></span>FY234019 – FZ234010-02 <span class="mut">11.8</span></div>
+            <div class="row"><span class="dot" style="background:var(--warning)"></span>FY234092 – FY234060 <span class="mut">10.4</span></div>
+            <div class="row mut" style="margin:0">… ещё 35</div>
+            <div style="margin-top:10px"><span class="btn ghost">Принять все вероятные</span></div>
+          </div>
+          <div class="vp" style="flex-direction:column; gap:8px">
+            3D: пара в найденной позе, шов подсвечен
+            <div style="display:flex; gap:6px"><span class="btn ghost">Пропустить</span><span class="btn ghost">Отклонить</span><span class="btn">Подтвердить</span></div>
+          </div>
+        </div>
+        <div class="wf-foot"><span>Шаг 4 из 5</span><span class="sp" style="flex:1"></span><span class="btn ghost">← Результат</span><span class="btn">Пересобрать с решениями →</span></div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. Шаги слева</h3>
+      <p>Слева постоянная лента этапов с их статусом: <b>Вход → Прогон → Результат → Ревью → Экспорт</b>. Каждый этап — свой полноэкранный экран, заточенный под одну задачу. Состояние проекта читается с одного взгляда на ленту.</p>
+      <div class="twocol">
+        <div class="p"><h4>Плюсы</h4><ul><li>Понятнее всего новичку: видно, где ты и что дальше</li><li>Состояния (нет входа / устарело / идёт прогон) живут прямо в ленте</li><li>Экран ревью можно сделать очень сфокусированным</li></ul></div>
+        <div class="c"><h4>Минусы</h4><ul><li>Работа не линейна: из ревью постоянно хочется в результат и обратно — лента превращается в обычные вкладки</li><li>Пять разных экранов = больше интерфейса писать и поддерживать</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ C ============ -->
+  <div class="card" data-choice="c-scene-first" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="wf">
+        <div class="wf-body" style="height: 340px">
+          <div class="vp">
+            3D-сцена на всё окно
+            <div class="float" style="top:10px; left:10px; right:10px; display:flex; gap:8px; align-items:center; padding:5px 10px">
+              <b>karas ▾</b><span class="chip">Прогон 20.09 14:12 ▾</span><span style="flex:1"></span><span class="chip">Вписать</span><span class="chip">Подписи</span><span class="chip">Цвет ▾</span><span style="flex:1"></span><span class="chip warn">Ревью · 39</span><span class="btn">Перегенерировать</span>
+            </div>
+            <div class="float" style="top:54px; left:10px; width:190px">
+              <h5 style="margin:0 0 6px; font-size:10px; text-transform:uppercase; color:var(--text-secondary)">Группы</h5>
+              <div class="row sel"><span class="dot" style="background:#e07a3f"></span>Группа 0 <span class="mut">20</span></div>
+              <div class="row"><span class="dot" style="background:#4f9d69"></span>Группа 1 <span class="mut">8</span></div>
+              <div class="row"><span class="dot" style="background:#4a7fc1"></span>Группа 2 <span class="mut">6</span></div>
+              <div class="row mut" style="margin:0">… ещё 14 · без пары 81</div>
+            </div>
+            <div class="float" style="top:54px; right:10px; width:210px">
+              <b>FY234111</b> · инв. 1204/31
+              <div class="row"><span class="dot" style="background:var(--success)"></span>FY234001 <span class="mut">26.6</span></div>
+              <div class="row"><span class="dot" style="background:var(--warning)"></span>FY234058 <span class="mut">вероятен</span></div>
+              <div style="margin-top:6px; display:flex; gap:6px"><span class="btn ghost">Отклонить</span><span class="btn">Подтвердить</span></div>
+            </div>
+            <div class="float" style="bottom:10px; left:50%; transform:translateX(-50%); display:flex; gap:10px; align-items:center; padding:5px 12px; border-radius:16px">
+              <span>Готово · 17:46</span><span class="meter"><i></i></span><span>60 · 39 · 81</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. Сцена во весь экран</h3>
+      <p>3D занимает всё окно, остальное — плавающие панели поверх: список групп, карточка выбранного, пилюля прогресса. Режимов нет; ревью — выезжающая справа панель.</p>
+      <div class="twocol">
+        <div class="p"><h4>Плюсы</h4><ul><li>Максимум места под сборку, выглядит современно</li><li>Хорошо на маленьких экранах</li></ul></div>
+        <div class="c"><h4>Минусы</h4><ul><li>Экран «Вход» (сетка из 155 превью, таблица предупреждений) в эту модель не ложится — он не про сцену</li><li>Длинные списки (39 вероятных, 81 без пары, кандидаты фрагмента) тесно жить в плавающих панелях</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+</div>

@@ -1,0 +1,106 @@
+<h2>Состояния воркспейса, прогресс прогона и режим «Вход»</h2>
+<p class="subtitle">Три части: (1) все состояния и что в каждом делает главная кнопка, (2) как выглядит идущий прогон, (3) режим «Вход» с превью сканов. Выбирать тут нечего — смотрите, чего не хватает или что лишнее.</p>
+
+<style>
+  .wf { font-size: 11px; line-height: 1.35; color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg-secondary); }
+  .wf * { box-sizing: border-box; }
+  .wf-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--bg-tertiary); }
+  .sp { flex: 1; }
+  .chip { padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-secondary); white-space: nowrap; }
+  .chip.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .chip.off { opacity: .45; }
+  .btn { display: inline-block; padding: 3px 10px; border-radius: 6px; background: var(--accent); color: #fff; white-space: nowrap; }
+  .btn.ghost { background: transparent; color: var(--text-primary); border: 1px solid var(--border); }
+  .btn.no { background: transparent; color: var(--error); border: 1px solid var(--error); }
+  .mut { color: var(--text-secondary); }
+  .states { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: .75rem; margin-bottom: 2rem; }
+  .st { border: 1px solid var(--border); border-radius: 8px; padding: .7rem .8rem; background: var(--bg-secondary); font-size: .8rem; }
+  .st h4 { font-size: .85rem; margin: 0 0 .3rem; display: flex; align-items: center; gap: .4rem; }
+  .st h4 i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .st p { margin: 0 0 .5rem; color: var(--text-secondary); }
+  .st .cta { font-size: 11px; }
+  .wf-body { display: flex; height: 330px; }
+  .pane { padding: 8px; overflow: hidden; }
+  .pane h5 { margin: 0 0 6px; font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-secondary); font-weight: 600; }
+  .vp { flex: 1; position: relative; background: radial-gradient(ellipse at 50% 55%, rgba(200,140,80,.3), transparent 45%), var(--bg-primary); display: flex; align-items: center; justify-content: center; color: var(--text-secondary); text-align: center; }
+  .run { position: absolute; inset: auto 50% 22px auto; transform: translateX(50%); width: 480px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; box-shadow: 0 6px 20px rgba(0,0,0,.3); color: var(--text-primary); text-align: left; }
+  .stages { display: flex; gap: 4px; margin: 8px 0; }
+  .stages span { flex: 1; text-align: center; padding: 3px 0; border-radius: 4px; background: var(--bg-tertiary); color: var(--text-secondary); font-size: 10px; }
+  .stages .d { background: rgba(52,199,89,.2); color: var(--success); }
+  .stages .c { background: var(--accent); color: #fff; flex: 2.2; }
+  .meter { height: 7px; border-radius: 4px; background: var(--bg-tertiary); overflow: hidden; }
+  .meter i { display: block; height: 100%; width: 38%; background: var(--accent); }
+  .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+  .cell { border: 1px solid var(--border); border-radius: 6px; padding: 4px; text-align: center; font-size: 10px; }
+  .cell .im { height: 44px; border-radius: 4px; background: radial-gradient(ellipse at 50% 50%, rgba(200,140,80,.55), transparent 65%), var(--bg-tertiary); margin-bottom: 3px; }
+  .cell.sel { outline: 2px solid var(--accent); }
+  .cell.w { border-color: var(--warning); }
+  .cell.pend .im { background: var(--bg-tertiary); opacity: .5; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; }
+  .kv span:nth-child(odd) { color: var(--text-secondary); }
+  .warn { margin-top: 8px; padding: 6px; border-radius: 6px; border: 1px solid var(--warning); }
+  .wf-foot { display: flex; align-items: center; gap: 10px; padding: 5px 10px; border-top: 1px solid var(--border); background: var(--bg-tertiary); color: var(--text-secondary); }
+  h3 { margin-top: .5rem; }
+</style>
+
+<h3>1. Состояния</h3>
+<div class="states">
+  <div class="st"><h4><i style="background:var(--text-tertiary)"></i>Пустой воркспейс</h4><p>Входа нет. Весь экран — приглашение: выбрать или перетащить папку со сканами (.ply .obj .stl .off).</p><span class="btn cta">Выбрать папку со сканами</span></div>
+  <div class="st"><h4><i style="background:var(--accent)"></i>Подготовка входа</h4><p>Список файлов виден сразу. В фоне ядро предобрабатывает сканы: кеш для прогона, превью-картинки, облегчённые 3D-модели, предупреждения. Идёт сама, можно приостановить.</p><span class="mut cta">Подготовка 37 / 155 · ≈ 2 мин</span></div>
+  <div class="st"><h4><i style="background:var(--success)"></i>Готов к сборке</h4><p>Прогонов ещё нет. Кнопка открывает короткий лист: пресет (Стандарт / Тщательно ×2 по времени / Свои), CPU·GPU, оценка времени по этой машине.</p><span class="btn cta">Собрать…</span></div>
+  <div class="st"><h4><i style="background:var(--accent)"></i>Идёт прогон</h4><p>Стадии, счётчик пар, прошло / осталось. Приложение живое: можно смотреть вход и прошлые прогоны. Черновая пересборка в ревью на это время выключена — ядро работает одно.</p><span class="btn no cta">Отменить</span></div>
+  <div class="st"><h4><i style="background:var(--success)"></i>Результат актуален</h4><p>Доступны «Сборка» и «Ревью». Главная кнопка уходит на второй план.</p><span class="btn ghost cta">Перегенерировать…</span></div>
+  <div class="st"><h4><i style="background:var(--warning)"></i>Результат устарел</h4><p>Папка входа изменилась (+3 файла, −1, 2 изменены) или исключён фрагмент. Старый результат по-прежнему открывается, сверху плашка с тем, что именно изменилось.</p><span class="btn cta">Перегенерировать…</span></div>
+  <div class="st"><h4><i style="background:var(--warning)"></i>Есть черновые решения</h4><p>В ревью приняты/отклонены стыки, позы ещё не уточнены. Экспорт сначала сам уточнит (≈30 с).</p><span class="btn cta">Уточнить позы</span></div>
+  <div class="st"><h4><i style="background:var(--error)"></i>Прогон отменён / упал</h4><p>Остаётся в истории со статусом, причиной простыми словами и полным логом. Приложение не падает вместе с ядром.</p><span class="btn ghost cta">Показать лог</span> <span class="btn cta">Повторить</span></div>
+  <div class="st"><h4><i style="background:var(--error)"></i>Вход недоступен</h4><p>Папка переехала или диск отключён. Результаты открываются (сцена лежит в прогоне), новые прогоны и экспорт полных мешей — нет.</p><span class="btn cta">Указать папку заново</span></div>
+</div>
+
+<h3>2. Идущий прогон</h3>
+<div class="wf" style="margin-bottom:2rem">
+  <div class="wf-bar"><b>karas ▾</b><span class="chip">Прогон 20.09 14:12 · идёт ▾</span><span class="sp"></span><span class="chip">Вход · 155</span><span class="chip on">Сборка</span><span class="chip off">Ревью</span><span class="sp"></span><span class="btn no">Отменить</span></div>
+  <div class="wf-body" style="height:300px">
+    <div class="vp">
+      <span>пока результата нет — здесь фрагменты входа россыпью<br>(если есть прошлый прогон — он, с пометкой «предыдущий»)</span>
+      <div class="run">
+        <div style="display:flex; align-items:baseline; gap:8px"><b style="font-size:13px">Сопоставление пар</b><span class="sp"></span><span>прошло <b>6:41</b></span><span class="mut">·</span><span>осталось ≈ <b>11 мин</b></span></div>
+        <div class="stages"><span class="d">Подготовка ✓</span><span class="c">Сопоставление</span><span>Уверенность</span><span>Сборка</span><span>Уточнение</span><span>Файлы</span></div>
+        <div class="meter"><i></i></div>
+        <div style="display:flex; margin-top:6px" class="mut"><span>4 210 из 11 097 пар · 71 стык принят</span><span class="sp"></span><span>GPU Apple M2 Pro · память 2.4 ГБ</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="wf-foot"><span>Оценка «осталось» — по скорости пар в этом прогоне; длительность остальных стадий — из прошлых прогонов на этой машине. Значок в доке/таскбаре тоже показывает прогресс, по завершении — системное уведомление.</span></div>
+</div>
+
+<h3>3. Режим «Вход»</h3>
+<div class="wf">
+  <div class="wf-bar"><b>karas ▾</b><span class="chip">Прогон 20.09 14:12 ▾</span><span class="sp"></span><span class="chip on">Вход · 155 · 11 предупр.</span><span class="chip">Сборка · 17 групп</span><span class="chip">Ревью · 39</span><span class="sp"></span><span class="btn ghost">Экспорт</span><span class="btn ghost">Перегенерировать…</span></div>
+  <div class="wf-body">
+    <div class="pane" style="width: 360px; border-right:1px solid var(--border)">
+      <h5>/Volumes/scans/karas_reduced · 155 файлов · 9.8 ГБ</h5>
+      <div style="display:flex; gap:4px; margin-bottom:6px"><span class="chip on">Все</span><span class="chip">С предупреждениями 11</span><span class="chip">Исключённые 1</span><span class="sp"></span><span class="chip">▦ ☰</span></div>
+      <div class="grid">
+        <div class="cell"><div class="im"></div>FY234001</div>
+        <div class="cell sel w"><div class="im"></div>FY234066 ⚠</div>
+        <div class="cell"><div class="im"></div>FY234005</div>
+        <div class="cell"><div class="im"></div>FY234006</div>
+        <div class="cell"><div class="im"></div>FY234007</div>
+        <div class="cell" style="opacity:.4"><div class="im"></div><s>FY234009</s></div>
+        <div class="cell"><div class="im"></div>FY234010</div>
+        <div class="cell w"><div class="im"></div>FY249013 ⚠</div>
+        <div class="cell pend"><div class="im"></div>FZ234001-01</div>
+        <div class="cell pend"><div class="im"></div>FZ234001-02</div>
+      </div>
+      <div class="mut" style="margin-top:6px">… прокрутка; пустые плитки — превью ещё готовится</div>
+    </div>
+    <div class="vp"><div style="position:absolute; top:8px; left:8px; display:flex; gap:4px"><span class="chip on">Скан</span><span class="chip">Излом красным</span><span class="chip">Сетка</span></div>3D: один фрагмент, облегчённая модель<br><span class="mut">«Излом красным» — что ядро считает поверхностью излома</span></div>
+    <div class="pane" style="width: 220px; border-left:1px solid var(--border)">
+      <h5>FY234066</h5>
+      <div class="kv"><span>файл</span><span>FY234066_reduced.ply</span><span>граней</span><span>1 495 166</span><span>стенка</span><span>78.2</span><span>замкнут</span><span>да</span><span>излом</span><span>12 % площади</span><span>в прогоне</span><span>группа 14</span></div>
+      <div class="warn">⚠ Толщина стенки 78.2 при медиане коллекции 34.2 (+129 %). Возможно, это дно, ручка или чужой сосуд.</div>
+      <div style="margin-top:8px"><span class="btn ghost">Исключить из сборки</span></div>
+    </div>
+  </div>
+  <div class="wf-foot"><span>Исключение фрагмента не трогает файл — это пометка в воркспейсе (случай дубля 234009 / 249010). Незамкнутые меши помечаются отдельно: их стыки ядро не может подтвердить само.</span></div>
+</div>

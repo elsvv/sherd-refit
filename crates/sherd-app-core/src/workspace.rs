@@ -16,6 +16,9 @@ pub const WORKSPACE_FILE: &str = "sherd-workspace.json";
 pub const LOCK_FILE: &str = "sherd-workspace.lock";
 /// The format this build writes, and the newest it reads.
 pub const WORKSPACE_VERSION: u32 = 1;
+/// How many folders up from the workspace the input may be and still be remembered by a relative
+/// path: beside the workspace, or beside its parent — a project folder moved as a whole.
+const MAX_CLIMB: usize = 2;
 
 /// Where the scans are.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,7 +131,12 @@ impl Workspace {
     pub fn set_input(&mut self, dir: &Path) -> Result<()> {
         let absolute = dir.canonicalize().map_err(|e| AppError::io(dir, e))?;
         let root = self.root.canonicalize().map_err(|e| AppError::io(&self.root, e))?;
-        self.file.input = Some(InputRef { relative: relative_to(&root, &absolute), absolute });
+        // Only a *nearby* input gets a relative path. Two folders that share nothing but the
+        // file system's root — a workspace at home, scans on another volume — also have one, and
+        // after the workspace moved it would point at whatever happens to be there.
+        let relative = relative_to(&root, &absolute)
+            .filter(|r| r.components().filter(|c| *c == Component::ParentDir).count() <= MAX_CLIMB);
+        self.file.input = Some(InputRef { absolute, relative });
         self.save()
     }
 

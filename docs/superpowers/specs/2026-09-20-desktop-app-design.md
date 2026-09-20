@@ -109,9 +109,11 @@ Requests inside a review session:
 | `Export { decisions, what, dest }` | progress, then `Exported { files }` | ≈ 15–60 s |
 | `Cancel`, `Close` | | |
 
-Events common to all jobs: `Stage { name, index, of }`, `Progress { stage, done, total }`,
+Events common to all jobs: `Stage { name }`, `Progress { stage, done, total }`,
 `Log { level, target, message }`, `FragmentReady { name, stats, warnings }` (Prepare only),
-`Failed { kind, message, detail }`.
+`Failed { kind, message, detail }`. `Stage` carries no `index`/`of`: the set of stages varies with
+the options (`screen`, `second_pass`), so the window owns the strip and lights a stage by name when
+its first report arrives.
 
 `RunSpec` is the subset of `RunOptions` the app sets (§7.4); everything else is
 `RunOptions::default()`.

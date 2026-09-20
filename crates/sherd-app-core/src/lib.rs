@@ -4,8 +4,10 @@
 
 pub mod atomic;
 pub mod decisions;
+pub mod protocol;
 pub mod run;
 pub mod snapshot;
+pub mod worker;
 pub mod workspace;
 
 use std::path::PathBuf;

@@ -15,6 +15,7 @@ import {
   WebGLRenderer,
 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { type PrincipalAxes, principalAxes } from "./principal";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
 /**
@@ -24,11 +25,18 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 const FOV = 35;
 
 /**
- * Where the camera stands when a fragment is fitted: above, in front and to the right, with
- * `up = +Z`. The scans come out of the scanner Z-up, and a fracture face read straight on shows
- * no relief at all.
+ * Where the camera stands when a fragment has no face to be shown from — fewer than three
+ * vertices — and the side of a fragment's wall it prefers when it has one: above, in front and to
+ * the right, with `up = +Z`, because the scans come out of the scanner Z-up.
  */
 const FROM = new Vector3(1, -1, 0.8).normalize();
+
+/**
+ * How far off face-on a fragment is shown, towards its long side. A sherd met by a fixed direction
+ * is usually met edge-on, which shows nothing; met exactly face-on its relief is flat. The
+ * engine's own previews frame a fragment by its principal axes for the same reason.
+ */
+const TILT = MathUtils.degToRad(25);
 
 /** A little air around the bounding sphere, so nothing touches the edge of the viewport. */
 const MARGIN = 1.15;
@@ -136,6 +144,7 @@ export class FragmentViewer {
   private themeSeen: string | null = null;
 
   private disposed = false;
+  private readonly axes = new WeakMap<Object3D, PrincipalAxes | null>();
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -228,14 +237,46 @@ export class FragmentViewer {
     const radius = Number.isFinite(sphere.radius) && sphere.radius > 0 ? sphere.radius : 1;
     const distance = (radius / Math.sin(MathUtils.degToRad(FOV) / 2)) * MARGIN;
 
+    const from = FROM.clone();
+    const up = new Vector3(0, 0, 1);
+    const axes = this.axesOf(object);
+    if (axes !== null) {
+      const normal = new Vector3(...axes.normal);
+      const major = new Vector3(...axes.major);
+      if (normal.dot(FROM) < 0) {
+        normal.negate();
+      }
+      from.copy(normal).multiplyScalar(Math.cos(TILT)).addScaledVector(major, Math.sin(TILT)).normalize();
+      // Looking down the scanner's own vertical there is no "up" left in it: the long side then.
+      if (Math.abs(from.z) > 0.9) {
+        up.copy(major);
+      }
+    }
+
     this.camera.near = radius / 100;
     this.camera.far = radius * 100;
-    this.camera.up.set(0, 0, 1);
-    this.camera.position.copy(sphere.center).addScaledVector(FROM, distance);
+    this.camera.up.copy(up);
+    this.camera.position.copy(sphere.center).addScaledVector(from, distance);
     this.camera.updateProjectionMatrix();
     this.controls.target.copy(sphere.center);
     this.controls.update();
     this.invalidate();
+  }
+
+  /** A loaded fragment's principal axes, worked out once: `fit()` is also the `F` key. */
+  private axesOf(object: Object3D): PrincipalAxes | null {
+    const known = this.axes.get(object);
+    if (known !== undefined) {
+      return known;
+    }
+    let found: PrincipalAxes | null = null;
+    object.traverse((child) => {
+      if (found === null && isMesh(child)) {
+        found = principalAxes(child.geometry.getAttribute("position").array);
+      }
+    });
+    this.axes.set(object, found);
+    return found;
   }
 
   /** Gives the GPU everything back: the window may live for hours after the last fragment. */

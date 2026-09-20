@@ -136,5 +136,8 @@ export function middleEllipsis(text: string, max: number): string {
  * scans' own units and never claims they are millimetres, so neither does this.
  */
 export function formatExtent(extent: readonly [number, number, number]): string {
-  return extent.map((side) => formatDecimal(side)).join(" × ");
+  // Whole units from a hundred up: three sides with a decimal each do not fit the inspector's
+  // column, and a tenth of a millimetre on a 250 mm sherd is below the scan's own resolution.
+  const side = (n: number): string => (Number.isFinite(n) && Math.abs(n) >= 100 ? n.toFixed(0) : formatDecimal(n));
+  return extent.map(side).join(" × ");
 }

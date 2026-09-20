@@ -282,32 +282,12 @@ export default function InputLeft({ view }: { view: WorkspaceView }) {
   return (
     <div className="flex h-full flex-col">
       <div className="shrink-0 border-b border-border px-2 py-1.5">
-        <p className="truncate text-[11px] text-muted" title={view.input.path ?? undefined}>
-          {view.input.linked
-            ? middleEllipsis(view.input.path ?? t("input.path_unavailable"), PATH_MAX)
-            : t("status.empty")}
-        </p>
-        {/* Only for a folder that answers: with none linked, or one that has moved, «0 файлов ·
-            0 B» would be an answer about a folder nobody counted. */}
-        {view.input.available ? (
-          <p className="mt-0.5 text-[11px] text-muted">
-            {`${t("input.files", { count: rows.length })} · ${formatBytes(totalBytes, language)}`}
+        <div className="flex items-center gap-1">
+          <p className="min-w-0 flex-1 truncate text-[11px] text-muted" title={view.input.path ?? undefined}>
+            {view.input.linked
+              ? middleEllipsis(view.input.path ?? t("input.path_unavailable"), PATH_MAX)
+              : t("status.empty")}
           </p>
-        ) : null}
-
-        <div className="mt-1.5 flex items-center gap-1">
-          {filters.map((choice) => (
-            <Chip
-              key={choice.id}
-              active={filter === choice.id}
-              onClick={() => {
-                useUi.getState().setInputFilter(choice.id);
-              }}
-            >
-              {choice.label}
-            </Chip>
-          ))}
-          <span className="flex-1" />
           <IconButton
             label={t("input.layout_grid")}
             pressed={grid}
@@ -326,6 +306,27 @@ export default function InputLeft({ view }: { view: WorkspaceView }) {
           >
             <List size={13} aria-hidden="true" />
           </IconButton>
+        </div>
+        {/* Only for a folder that answers: with none linked, or one that has moved, «0 файлов ·
+            0 B» would be an answer about a folder nobody counted. */}
+        {view.input.available ? (
+          <p className="mt-0.5 text-[11px] text-muted">
+            {`${t("input.files", { count: rows.length })} · ${formatBytes(totalBytes, language)}`}
+          </p>
+        ) : null}
+
+        <div className="mt-1.5 flex flex-wrap items-center gap-1">
+          {filters.map((choice) => (
+            <Chip
+              key={choice.id}
+              active={filter === choice.id}
+              onClick={() => {
+                useUi.getState().setInputFilter(choice.id);
+              }}
+            >
+              {choice.label}
+            </Chip>
+          ))}
         </div>
       </div>
 

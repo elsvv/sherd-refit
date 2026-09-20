@@ -4,8 +4,13 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use sherd_core::Params;
+use sherd_core::assembly::constraints::Constraints;
+use sherd_core::executor::Engine;
+use sherd_core::memory::Budget;
 use sherd_core::pipeline::{self, RunOptions, RunSummary};
-use sherd_core::session::MatchState;
+use sherd_core::progress::Watch;
+use sherd_core::session::{self, MatchState, Reassembled};
+use sherd_core::tiers::{Thresholds, Tier};
 
 fn slab() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/slab/input")
@@ -67,4 +72,81 @@ fn a_state_of_another_version_or_format_is_refused() {
         let err = MatchState::load(&path).expect_err("refused");
         assert!(matches!(err, sherd_core::Error::State { .. }), "{name}: {err}");
     }
+}
+
+fn fragments(params: &Params) -> Vec<sherd_core::fragment::Fragment> {
+    let entries = sherd_core::collection::discover(slab()).expect("the slab is found");
+    session::load_fragments(
+        &entries,
+        RunOptions::default().target_faces,
+        None,
+        Budget::default_for_machine(),
+        params.seed,
+        &Watch::default(),
+    )
+    .expect("the slab preprocesses")
+}
+
+fn reassembled(state: &MatchState, constraints: Option<&str>) -> Reassembled {
+    let parsed: Option<Constraints> =
+        constraints.map(|json| serde_json::from_str(json).expect("valid constraints"));
+    session::reassemble(Engine::REFERENCE, &fragments(&state.params), state, parsed.as_ref())
+        .expect("reassembles")
+}
+
+#[test]
+fn reassembling_with_no_constraints_is_the_run_before_refinement() {
+    let (summary, path) = accepted_run();
+    let state = MatchState::load(path).unwrap();
+    let out = reassembled(&state, None);
+    assert_eq!(out.assembly.groups, summary.groups);
+    assert_eq!(out.used, summary.used);
+    assert_eq!(out.poses, summary.poses, "bit for bit: the run had `refine: false`");
+}
+
+#[test]
+fn a_rejected_join_splits_its_group() {
+    let (summary, path) = accepted_run();
+    assert!(summary.groups.iter().any(|g| g.len() == 2), "the slab assembles under R §6.5's gate");
+    let state = MatchState::load(path).unwrap();
+    let out = reassembled(&state, Some(r#"{"version":1,"must_not_join":[["pieceA","pieceB"]]}"#));
+    assert!(out.assembly.groups.iter().all(|g| g.len() == 1));
+    assert!(out.used.is_empty());
+}
+
+#[test]
+fn an_accepted_probable_join_is_placed_at_the_pose_that_was_accepted() {
+    // The shipped tier rule confirms nothing on this slab (`run_cli.rs`, `AMBIGUOUS`): its one
+    // join is probable, and a run places nothing. That is the app's review case exactly.
+    let params = Params { tiers: Some(Thresholds::default()), ..Params::default() };
+    let (summary, path) = slab_run("probable", params);
+    assert!(summary.groups.iter().all(|g| g.len() == 1), "nothing is confirmed, nothing placed");
+    let state = MatchState::load(&path).unwrap();
+
+    // The reviewer accepts the pair's *second* accepted pose where there is one, to show that the
+    // pose they chose is the pose that is placed, not the pair's best.
+    let accepted: Vec<_> = state.candidates.iter().filter(|c| c.accepted).collect();
+    let chosen = accepted.get(1).or(accepted.first()).expect("the slab has an accepted candidate");
+    let m = chosen.transform;
+    let rows: Vec<String> = (0..4)
+        .map(|r| format!("[{:?},{:?},{:?},{:?}]", m[(r, 0)], m[(r, 1)], m[(r, 2)], m[(r, 3)]))
+        .collect();
+    let json = format!(
+        r#"{{"version":1,"must_join":[{{"a":"{}","b":"{}","pose":[{}]}}]}}"#,
+        state.names[chosen.a as usize],
+        state.names[chosen.b as usize],
+        rows.join(",")
+    );
+
+    let out = reassembled(&state, Some(&json));
+    assert!(out.assembly.groups.iter().any(|g| g.len() == 2), "the accepted join is placed");
+    let placed = out.candidates.last().expect("the pinned candidate is appended last");
+    assert_eq!(placed.transform, chosen.transform, "the pose is the one that was accepted");
+    assert_eq!(placed.scores, chosen.scores, "R §6 was not run again: the match had scored it");
+    assert_eq!(placed.tier, Tier::Confirmed);
+    assert_eq!(
+        out.candidates.iter().filter(|c| (c.a, c.b) == (chosen.a, chosen.b)).count(),
+        1,
+        "the pair's matched candidates are gone, as in a full run that pins the pair"
+    );
 }

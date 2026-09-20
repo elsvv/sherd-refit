@@ -7,12 +7,24 @@
 
 use std::path::Path;
 
+use nalgebra::Matrix4;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::assembly::constraints::{self, Constraints};
+use crate::assembly::{Assembly, Piece, recenter};
+use crate::collection::Entry;
 use crate::error::{Error, Result};
+use crate::executor::Engine;
+use crate::fragment::Fragment;
 use crate::matching::pair::Candidate;
+use crate::memory::Budget;
+use crate::objects::ObjectReport;
 use crate::params::Params;
+use crate::pipeline;
+use crate::progress::Watch;
 use crate::tiers::TierReport;
+use crate::types::FragId;
 
 /// The `format` tag of a state file.
 pub const STATE_FORMAT: &str = "sherd-match-state";
@@ -147,4 +159,150 @@ impl MatchState {
             tiers: f.tiers,
         })
     }
+}
+
+/// The collection's fragments through R §3.7's cache — what `run_with` itself starts from, for a
+/// session that starts from a saved match instead of a run.
+///
+/// # Errors
+///
+/// The first fragment that fails to preprocess fails the call, as it fails a run.
+pub fn load_fragments(
+    entries: &[Entry],
+    target_faces: usize,
+    cache_dir: Option<&Path>,
+    budget: Budget,
+    seed: u64,
+    watch: &Watch,
+) -> Result<Vec<Fragment>> {
+    pipeline::preprocess_collection(entries, target_faces, cache_dir, budget, seed, watch)
+}
+
+/// What [`reassemble`] produced: R §8's result and the lists it was built from.
+#[derive(Debug)]
+pub struct Reassembled {
+    /// R §8's assembly after the object round.
+    pub assembly: Assembly,
+    /// The candidate list the assembly read — the state's, with each pinned pair's candidates
+    /// replaced by its pinned one, and with what `apply` and the object round did to the bands.
+    pub candidates: Vec<Candidate>,
+    /// The tier report over exactly that list.
+    pub tiers: Option<TierReport>,
+    /// What each constraint did.
+    pub constraints: Option<constraints::Report>,
+    /// Roadmap item 4's report.
+    pub objects: Option<ObjectReport>,
+    /// One world pose per fragment after R §8.2's recentring. **Not refined** (R §9).
+    pub poses: Vec<Matrix4<f64>>,
+    /// The joins the assembly took, in the order it took them.
+    pub used: Vec<(FragId, FragId)>,
+}
+
+/// R §8 over a saved match, under `constraints`, without matching anything (A §3.1).
+///
+/// The result is the one a **full run under the same constraints** would assemble from, given the
+/// same match. A full run does not match a pair that `must_join` pins with a pose: the pair's only
+/// candidate is the pinned one, appended after every matched candidate. This does the same to the
+/// saved list — the pair's matched candidates and their tier rows go, the pinned one is appended.
+/// When the pinned pose is bit for bit the pose of a candidate the match scored, that candidate's
+/// scores and evidence are kept and R §6 is not run again; any other pose is scored by
+/// `pinned_candidate`, as the full run would score it.
+///
+/// The tier pass is not repeated. A decision changes what is placed, not what the engine believed
+/// about the pairs nobody decided on.
+///
+/// # Errors
+///
+/// [`Error::State`] when `fragments` is not the collection the state was matched on, and whatever
+/// `constraints::resolve` refuses (an unknown name, a pair in two lists, a pose that is not rigid).
+pub fn reassemble(
+    engine: Engine<'_>,
+    fragments: &[Fragment],
+    state: &MatchState,
+    constraints: Option<&Constraints>,
+) -> Result<Reassembled> {
+    if !fragments.iter().map(|f| f.name.as_str()).eq(state.names.iter().map(String::as_str)) {
+        return Err(Error::State {
+            path: std::path::PathBuf::new(),
+            message: "the fragments are not the collection this match was made on".to_owned(),
+        });
+    }
+    let params = &state.params;
+    let plan = constraints.map(|file| constraints::resolve(file, &state.names)).transpose()?;
+
+    let mut candidates = state.candidates.clone();
+    let mut tiers = state.tiers.clone();
+    if let Some(plan) = &plan {
+        for forced in &plan.forced {
+            let Some(pose) = forced.pose else { continue };
+            let pair = constraints::key(forced.a, forced.b);
+            let scored = candidates
+                .iter()
+                .position(|c| constraints::key(c.a, c.b) == pair && c.transform == pose);
+            let pinned = match scored {
+                Some(i) => Candidate { accepted: true, ..candidates[i] },
+                None => {
+                    pipeline::pinned_candidate(engine, fragments, forced.a, forced.b, &pose, params)
+                }
+            };
+            let row = scored
+                .and_then(|i| tiers.as_ref().map(|t| (t.evidence[i].clone(), t.probes[i].clone())));
+            let keep: Vec<bool> =
+                candidates.iter().map(|c| constraints::key(c.a, c.b) != pair).collect();
+            retain(&mut candidates, &keep);
+            if let Some(report) = tiers.as_mut() {
+                retain(&mut report.tiers, &keep);
+                retain(&mut report.evidence, &keep);
+                retain(&mut report.probes, &keep);
+                let (evidence, probes) = row.unwrap_or((None, None));
+                report.tiers.push(pinned.tier);
+                report.evidence.push(evidence);
+                report.probes.push(probes);
+            }
+            candidates.push(pinned);
+        }
+    }
+
+    let samples: Vec<Vec<[f64; 3]>> = fragments.iter().map(|f| f.samples.surface_f64()).collect();
+    let scenes: Vec<_> = fragments.par_iter().map(Fragment::surface_scene_arc).collect();
+    let piece = |with_mesh: bool| -> Vec<Piece<'_>> {
+        fragments
+            .iter()
+            .zip(&samples)
+            .zip(&scenes)
+            .map(|((f, s), scene)| Piece {
+                thick: f.thick,
+                res: f.res(),
+                watertight: f.watertight,
+                mesh: if with_mesh { scene.as_deref() } else { None },
+                s_pen: s,
+            })
+            .collect()
+    };
+    let pieces = piece(true);
+    let mut stages = pipeline::StageLog::default();
+    let pipeline::Assembled { assembly, constraints: report, objects } = pipeline::assemble_stage(
+        engine.exec,
+        fragments,
+        &state.names,
+        &pieces,
+        &mut candidates,
+        tiers.as_mut(),
+        plan.as_ref(),
+        params,
+        None,
+        &mut stages,
+    );
+    let used = assembly.used.iter().map(|&i| (candidates[i].a, candidates[i].b)).collect();
+    let poses = recenter(&assembly.poses, &piece(false), &assembly.groups);
+    Ok(Reassembled { assembly, candidates, tiers, constraints: report, objects, poses, used })
+}
+
+/// `Vec::retain` by a mask computed once, so that three parallel vectors lose the same rows.
+fn retain<T>(items: &mut Vec<T>, keep: &[bool]) {
+    let mut at = 0;
+    items.retain(|_| {
+        at += 1;
+        keep[at - 1]
+    });
 }

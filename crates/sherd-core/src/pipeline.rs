@@ -977,7 +977,7 @@ fn second_pass_params(params: &Params) -> Params {
 /// would have reached beside the fact that the pose was pinned. A pair one of whose fragments has
 /// no surface at all cannot be scored; the candidate then carries R §5.6's partial scores and
 /// `accepted = false`, which the constraints section reports as unsatisfiable.
-fn pinned_candidate(
+pub(crate) fn pinned_candidate(
     engine: Engine<'_>,
     fragments: &[Fragment],
     a: FragId,
@@ -1215,7 +1215,7 @@ pub(crate) fn write_outputs(
 /// The reference's `ProcessPoolExecutor.map` raises on the first worker that raised, and a
 /// fragment that cannot be preprocessed has no pose, no pair and no row: there is nothing sensible
 /// to assemble around it.
-fn preprocess_collection(
+pub(crate) fn preprocess_collection(
     entries: &[Entry],
     target_faces: usize,
     cache_dir: Option<&Path>,

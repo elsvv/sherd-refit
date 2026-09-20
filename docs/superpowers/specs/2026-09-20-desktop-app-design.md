@@ -505,7 +505,8 @@ where a bug would be **silent or expensive**, and nowhere else.
 - Everything automated runs on `fixtures/slab`. `karas` and `mixed_all` are never part of a test
   loop; there are two manual acceptance runs on `karas` in the app — after milestone 4 (run,
   progress, result) and after milestone 5 (review, draft, refinement, export).
-- Release builds (`tauri build`) at milestones 3 and 6, not in between.
+- The app is bundled twice: a debug bundle (`tauri build --debug`) at milestone 3, which proves the
+  packaging, and the release build at milestone 6. Not in between.
 - **CI** carries the rest, off the developer's clock: `sherd-app-core` tests on the three OS
   runners, frontend lint / typecheck / Vitest, an unsigned `tauri build` on macOS and Windows.
 

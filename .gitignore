@@ -16,6 +16,10 @@ input/
 !fixtures/**/input/
 !fixtures/**/outputs/
 
+# ...and not the window's «Вход» mode either: `input/` above is about folders of scans, and this
+# one is source code that happens to be named after the mode it draws.
+!apps/desktop/src/modes/input/
+
 # Rust build artefacts; `Cargo.lock` is committed, `target/` is not.
 target/
 

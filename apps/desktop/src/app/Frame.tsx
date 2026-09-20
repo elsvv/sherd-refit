@@ -9,6 +9,9 @@ import type { Unlisten } from "../ipc/api";
 import { toCommandError } from "../ipc/api";
 import type { StaleDiff } from "../ipc/bindings/StaleDiff";
 import type { WorkspaceView } from "../ipc/bindings/WorkspaceView";
+import InputCentre from "../modes/input/InputCentre";
+import InputLeft from "../modes/input/InputLeft";
+import InputRight from "../modes/input/InputRight";
 import { useJobs } from "../state/jobs";
 import type { Status } from "../state/status";
 import { deriveStatus } from "../state/status";
@@ -16,7 +19,7 @@ import type { Mode } from "../state/ui";
 import { useUi } from "../state/ui";
 import { useWorkspace } from "../state/workspace";
 import Button from "../ui/Button";
-import type { BannerProps } from "./Banner";
+import type { BannerAction, BannerProps } from "./Banner";
 import Banner from "./Banner";
 import StatusLine from "./StatusLine";
 import TopBar, { pickAndLinkInput } from "./TopBar";
@@ -37,10 +40,26 @@ function leftWidth(mode: Mode): string {
 }
 
 /**
- * What every mode supplies until it supplies something. Milestone 3 has only «Вход», and its
- * three panes arrive with task 8 — until then the frame is the frame, with nothing in the sides.
+ * What a mode supplies until it supplies something. Milestone 3 has only «Вход»; «Сборка» and
+ * «Ревью» are drawn as disabled tabs and cannot be entered, so their panes stay empty rather
+ * than pretending to be screens (A §7.3).
  */
 const NO_PANES: Panes = { left: null, centre: null, right: null };
+
+/** What the chosen mode puts in the three places. */
+function panesOf(mode: Mode, view: WorkspaceView): Panes {
+  switch (mode) {
+    case "input":
+      return {
+        left: <InputLeft view={view} />,
+        centre: <InputCentre view={view} />,
+        right: <InputRight view={view} />,
+      };
+    case "assembly":
+    case "review":
+      return NO_PANES;
+  }
+}
 
 /** «+3 файла, −1, 2 изменены» — A §5's «устарел» row, in the words the mock-up writes it in. */
 function staleText(diff: StaleDiff, t: TFunction): string {
@@ -123,7 +142,7 @@ export default function Frame({ view }: { view: WorkspaceView }) {
 
   // Milestone 3 loads no assembly, so no group of one can be waiting for refinement (A §8.4).
   const status: Status = deriveStatus(view, selectedRunId, false);
-  const panes: Panes = NO_PANES;
+  const panes: Panes = panesOf(mode, view);
 
   const banners: BannerProps[] = [];
   if (status.kind === "input_missing") {
@@ -144,7 +163,19 @@ export default function Frame({ view }: { view: WorkspaceView }) {
   // A cancelled job is not a failure: the user stopped it, and the button they pressed is all the
   // report they need (A §10's table gives `cancelled` no message of its own).
   if (lastFailure !== null && lastFailure.kind !== "cancelled") {
-    banners.push({ tone: "danger", text: t("banner.job_failed", { message: lastFailure.message }) });
+    // A preparation that failed leaves the input unprepared, and the automatic one will not try
+    // again on its own (App.tsx retries only once per state of the folder) — so the offer to
+    // repeat it by hand is the banner's, and only while there is something left to prepare.
+    const retry: BannerAction | undefined =
+      status.kind === "unprepared"
+        ? {
+            label: t("action.retry_prepare"),
+            onClick: () => {
+              void useJobs.getState().start();
+            },
+          }
+        : undefined;
+    banners.push({ tone: "danger", text: t("banner.job_failed", { message: lastFailure.message }), action: retry });
   }
   if (error !== null) {
     banners.push({

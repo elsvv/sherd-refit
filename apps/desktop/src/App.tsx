@@ -1,14 +1,30 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 import Frame from "./app/Frame";
 import { useShortcuts } from "./app/shortcuts";
 import Welcome from "./app/Welcome";
 import type { Unlisten } from "./ipc/api";
 import { toCommandError } from "./ipc/api";
-import { listenToEngine } from "./state/jobs";
+import type { WorkspaceView } from "./ipc/bindings/WorkspaceView";
+import { listenToEngine, useJobs } from "./state/jobs";
+import { deriveStatus } from "./state/status";
 import { useWorkspace } from "./state/workspace";
 // For its side effect: i18next has to be configured before the first component asks for a word.
 import "./i18n";
+
+/**
+ * The input as one string: every scan's name with its size and modification time, under the
+ * workspace it belongs to. Two views with the same signature need the same preparation, which is
+ * what makes it safe to remember that this one has already been tried.
+ *
+ * The workspace's own folder is in there because the files alone are not unique: two workspaces
+ * can be linked to the very same folder of scans, and the second one would then never be
+ * prepared at all.
+ */
+function inputSignature(view: WorkspaceView): string {
+  const files = view.files.map((file) => `${file.name}:${String(file.size)}:${String(file.mtime_ms)}`);
+  return [view.root, ...files].join("|");
+}
 
 /**
  * The window's root: the welcome screen with no workspace open, the frame with one (A §7.1).
@@ -20,7 +36,12 @@ import "./i18n";
  */
 export default function App() {
   const view = useWorkspace((state) => state.view);
+  const selectedRunId = useWorkspace((state) => state.selectedRunId);
   useShortcuts();
+
+  // The signature of the folder the last automatic preparation was started for. A ref and not
+  // state: it must not cause a render, and it must be read by the effect that writes it.
+  const attempted = useRef<string | null>(null);
 
   useEffect(() => {
     let stop: Unlisten | null = null;
@@ -43,6 +64,31 @@ export default function App() {
       stop?.();
     };
   }, []);
+
+  /**
+   * A `Prepare` starts by itself the moment there is something to prepare (A §5: «`Prepare`
+   * starts by itself when an input folder is linked or found changed»): the preprocessing is
+   * what a run needs anyway, and the thumbnails, display meshes and warnings fall out of it.
+   *
+   * Once per state of the folder, and no more. A preparation that fails leaves the workspace
+   * exactly as it was, so without this guard the failure would start it again, and again; the
+   * banner's «Повторить подготовку» is how a user asks for the retry the app will not take by
+   * itself. A folder that has actually changed has a new signature and is prepared again.
+   */
+  useEffect(() => {
+    if (view === null) {
+      return;
+    }
+    if (deriveStatus(view, selectedRunId, false).kind !== "unprepared") {
+      return;
+    }
+    const signature = inputSignature(view);
+    if (attempted.current === signature) {
+      return;
+    }
+    attempted.current = signature;
+    void useJobs.getState().start();
+  }, [view, selectedRunId]);
 
   useEffect(() => {
     const onFocus = () => {

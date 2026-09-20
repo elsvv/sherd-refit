@@ -37,6 +37,16 @@ pub enum Error {
         message: String,
     },
 
+    /// A saved match ([`MatchState`](crate::session::MatchState)) that is not one, is of another
+    /// version, or does not describe the collection it is being used with (A §3.2).
+    #[error("{path}: {message}")]
+    State {
+        /// The state file.
+        path: PathBuf,
+        /// What is wrong with it.
+        message: String,
+    },
+
     /// The run was asked to stop between two units of work (D §5,
     /// [`progress::Cancel`](crate::progress::Cancel)).
     ///

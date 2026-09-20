@@ -628,6 +628,36 @@ impl SurfaceLadder {
     }
 }
 
+/// A pose as `report.json` and every other file of this project writes one: four rows of four
+/// (README, «Одно соглашение о матрице»).
+///
+/// `nalgebra`'s own `serde` feature is off (D §3), and a [`Matrix4`] would serialise
+/// column-major if it were on — the opposite of every matrix this project has ever written.
+pub(crate) mod rows {
+    use nalgebra::Matrix4;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    /// Writes the matrix row by row.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the format refuses a nested array of `f64` for.
+    pub(crate) fn serialize<S: Serializer>(m: &Matrix4<f64>, s: S) -> Result<S::Ok, S::Error> {
+        let rows: [[f64; 4]; 4] = std::array::from_fn(|r| std::array::from_fn(|c| m[(r, c)]));
+        rows.serialize(s)
+    }
+
+    /// Reads back exactly what [`serialize`] wrote.
+    ///
+    /// # Errors
+    ///
+    /// Anything that is not four rows of four numbers.
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Matrix4<f64>, D::Error> {
+        let rows = <[[f64; 4]; 4]>::deserialize(d)?;
+        Ok(Matrix4::from_fn(|r, c| rows[r][c]))
+    }
+}
+
 /// One verified candidate: a pose, R §6's scores, R §6.5's verdict and roadmap item 3's
 /// confidence band (D §4.1).
 ///
@@ -635,13 +665,14 @@ impl SurfaceLadder {
 /// frame (R §0). [`Candidate::tier`] is R §6.5's verdict under another name
 /// ([`Tier::of_accept`]) until [`crate::tiers::classify`] has run over the finished match; a run
 /// with the tier pass off never calls it, and R §8's gate is then `accepted` exactly as before.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Candidate {
     /// The fragment the pose maps *into* (R §4.1's first name).
     pub a: FragId,
     /// The fragment the pose moves.
     pub b: FragId,
     /// `T`: `p_A = R·p_B + τ`.
+    #[serde(with = "rows")]
     pub transform: Matrix4<f64>,
     /// Every score of R §6.
     pub scores: Scores,

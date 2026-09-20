@@ -255,6 +255,9 @@ pub struct RunOptions {
     pub viewer: bool,
     /// `--viewer-faces`: the faces `scene.glb` holds over the whole collection.
     pub viewer_faces: usize,
+    /// Where to save the match for a later [`reassemble`](crate::session::reassemble) (A §3.1), or
+    /// `None` — the default, and what the CLI always passes — for a run that keeps nothing.
+    pub match_state: Option<PathBuf>,
 }
 
 impl Default for RunOptions {
@@ -280,6 +283,7 @@ impl Default for RunOptions {
             merged_meshes: false,
             viewer: true,
             viewer_faces: crate::export::scene::DEFAULT_FACES,
+            match_state: None,
         }
     }
 }
@@ -691,6 +695,9 @@ pub fn run_with(
             s_pen: s,
         })
         .collect();
+    // 2c''. A §3.1: the lists as the match left them, taken before the constraints below touch
+    // them, because a saved match is what a *reviewer's* constraints will be applied to.
+    let mut snapshot = options.match_state.as_ref().map(|_| (candidates.clone(), tiered.clone()));
     // 2d. and then the half of the constraints that acts on the candidate list: a `must_join` is
     // promoted to the confirmed band; `assemble_under` inside the stage does the other half. It
     // reads and writes only `candidates` and `tiered`, neither of which building the pieces above
@@ -755,6 +762,9 @@ pub fn run_with(
             workers,
             &mut stages,
         )?;
+        // A §3.1 again: R §8.1 rematched pairs and the tier pass judged a different list, so this
+        // is now the match, and the first pass's snapshot is not.
+        snapshot = options.match_state.as_ref().map(|_| (candidates.clone(), tiered.clone()));
         // The constraints, R §8 and the object round again, on the new list. No clock: R §11.2's
         // `timings["assembly"]` is the first pass's, and this pass is already in
         // `timings["second_pass"]`, closed above.
@@ -782,6 +792,24 @@ pub fn run_with(
     }
     let used: Vec<(FragId, FragId)> =
         assembly.used.iter().map(|&i| (candidates[i].a, candidates[i].b)).collect();
+
+    // 3a'. A §3.1's saved match, off unless a caller asked for one — never the CLI, so a run
+    // writes exactly the files it wrote before this existed.
+    if let (Some(path), Some((candidates, tiers))) = (&options.match_state, snapshot.take()) {
+        crate::session::MatchState {
+            names: names.clone(),
+            params: *params,
+            thickness,
+            resolution,
+            pairs: pairs.len(),
+            skipped_pairs: skipped,
+            backend: options.backend_label(),
+            candidates,
+            tiers,
+        }
+        .save(path)?;
+        tracing::info!(out = %path.display(), "match state saved");
+    }
 
     // 3b. roadmap step 7's measurement (audit §D.1), off unless `--measure` asked for it.
     //

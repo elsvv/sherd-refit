@@ -211,7 +211,7 @@ impl ScoreRow {
 /// Every field is reported whether or not the tier reads it: `determined_deg` is in the report
 /// and out of the rule (M1 §5.4), and the resamples are in the report and out of the rule
 /// (M1 §5.8) — they cost 136 → 130 confirmed joins and remove no false one.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Probes {
     /// The pair's `t_pair` (R §4.2) — the unit every distance here is in.
     pub t: f64,
@@ -900,7 +900,7 @@ impl Evidence {
 }
 
 /// What one tier pass decided, by candidate index.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TierReport {
     /// The set the pass ran with — what `report.json` and `transforms.json` carry as "the tier set
     /// used".

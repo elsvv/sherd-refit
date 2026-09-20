@@ -97,6 +97,7 @@ pub mod render;
 pub mod report;
 pub mod review;
 pub mod rng;
+pub mod session;
 pub mod spatial;
 pub mod tiers;
 pub mod types;

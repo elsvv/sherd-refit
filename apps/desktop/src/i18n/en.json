@@ -1,0 +1,32 @@
+{
+  "status": {
+    "empty": "No input",
+    "input_missing": "Input unavailable",
+    "preparing": "Preparing the input",
+    "unprepared": "Input not prepared",
+    "ready": "Ready to assemble",
+    "running": "Run in progress",
+    "current": "Result is current",
+    "stale": "Result is out of date",
+    "draft": "Draft decisions pending",
+    "failed": "Run failed",
+    "cancelled": "Run cancelled",
+    "interrupted": "Run interrupted"
+  },
+  "error": {
+    "io": "A file could not be read or written",
+    "json": "The workspace file is damaged",
+    "not_a_workspace": "There is no workspace in this folder",
+    "locked": "This workspace is already open in another window of the app",
+    "version": "The workspace was made by a different version of the app",
+    "engine": "The engine returned an error",
+    "worker": "The engine could not be started",
+    "busy": "The engine is busy with another job",
+    "no_workspace": "No workspace is open",
+    "unknown": "Unexpected error"
+  },
+  "stage": {
+    "preprocess": "Preprocessing scans",
+    "display": "Previews and meshes"
+  }
+}

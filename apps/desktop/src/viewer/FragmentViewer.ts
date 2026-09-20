@@ -98,8 +98,18 @@ function viewportColour(): Color {
  * busy that the engine may be using for the very run whose progress the window is showing, so
  * every source of change — the controls, a load, a resize, the wireframe toggle — asks for one
  * frame through `invalidate()` and nothing asks for the next one.
+ *
+ * **It makes its own canvas** inside the element it is given, and takes it away again in
+ * `dispose()`. A canvas outlives the WebGL context `dispose()` gives back, and a second viewer
+ * built on the same element would be handed that same lost context by `getContext` — three.js
+ * reads a shader precision off it before anything can check, and throws. Owning the canvas means
+ * a viewer can never be handed another viewer's dead context, which is exactly what React's
+ * StrictMode does on every mount in development.
  */
 export class FragmentViewer {
+  /** The element the canvas lives in, and what the size of the viewport is read from. */
+  private readonly container: HTMLElement;
+
   private readonly canvas: HTMLCanvasElement;
   private readonly renderer: WebGLRenderer;
   private readonly camera: PerspectiveCamera;
@@ -127,7 +137,16 @@ export class FragmentViewer {
 
   private disposed = false;
 
-  constructor(canvas: HTMLCanvasElement) {
+  constructor(container: HTMLElement) {
+    this.container = container;
+    const canvas = document.createElement("canvas");
+    // The renderer is told not to write a width and a height into the style (see `resize()`), so
+    // the canvas is stretched over its container here, once. Three declarations and no class: the
+    // element belongs to this file and nothing else may lay it out.
+    canvas.style.display = "block";
+    canvas.style.width = "100%";
+    canvas.style.height = "100%";
+    container.appendChild(canvas);
     this.canvas = canvas;
     // `low-power` asks a laptop with two GPUs for the integrated one: this is a single fragment
     // under a hemisphere light, and the discrete card may be busy being the engine's backend.
@@ -159,10 +178,7 @@ export class FragmentViewer {
     this.observer = new ResizeObserver(() => {
       this.resize();
     });
-    const parent = canvas.parentElement;
-    if (parent !== null) {
-      this.observer.observe(parent);
-    }
+    this.observer.observe(container);
     this.resize();
   }
 
@@ -243,6 +259,9 @@ export class FragmentViewer {
     // Without this the context lingers until the garbage collector feels like it, and a browser
     // gives out only a handful of them.
     this.renderer.forceContextLoss();
+    // And the canvas goes with the context it carries: a lost context is never given back by
+    // `getContext`, so an element left behind here would be a trap for the next viewer.
+    this.canvas.remove();
   }
 
   /** Swaps what the scene holds; the outgoing object stays in the cache, alive and undisposed. */
@@ -333,13 +352,12 @@ export class FragmentViewer {
   }
 
   /**
-   * The canvas is sized by its parent through CSS; `false` keeps the renderer from writing a
+   * The canvas is sized by its container through CSS; `false` keeps the renderer from writing a
    * width and a height back onto it and fighting the layout.
    */
   private resize(): void {
-    const parent = this.canvas.parentElement;
-    const width = parent?.clientWidth ?? 0;
-    const height = parent?.clientHeight ?? 0;
+    const width = this.container.clientWidth;
+    const height = this.container.clientHeight;
     if (width === 0 || height === 0) {
       return;
     }

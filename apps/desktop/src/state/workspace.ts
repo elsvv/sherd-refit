@@ -10,7 +10,8 @@ import type { WorkspaceView } from "../ipc/bindings/WorkspaceView";
  * The open workspace, as the shell last described it (A §5). The window keeps no second opinion:
  * every command hands back a whole `WorkspaceView`, and that value replaces this one — so a
  * screen that is out of date can only be a screen that has not re-rendered, never a screen that
- * disagrees with the disk.
+ * disagrees with the disk. The one exception is a view that arrives in the middle of a `Prepare`;
+ * see [`carryFragments`] for why, and for how little it carries over.
  *
  * Nothing here derives anything. What the workspace *means* — ready, stale, preparing — is
  * [`deriveStatus`]'s job, computed at render time from this view (A §5).
@@ -25,7 +26,11 @@ export interface WorkspaceState {
   /** Which run of `view.runs` the window is showing; `null` is «the input as it stands». */
   selectedRunId: string | null;
 
-  /** Replaces the view outright — how `engine:finished` delivers the fresh one. */
+  /**
+   * Puts a view the window was handed rather than asked for in place — how `engine:finished`
+   * delivers the fresh one. `null` closes the workspace; anything else goes through
+   * [`carryFragments`], which for the view of a *finished* job means «replace outright».
+   */
   setView(view: WorkspaceView | null): void;
   /** Files a refusal that did not come from one of the actions below. */
   setError(error: CommandError | null): void;
@@ -47,11 +52,37 @@ export interface WorkspaceState {
   applyFragmentReady(info: FragmentInfo): void;
 }
 
+/**
+ * `incoming`, with the fragment rows a running `Prepare` has already produced kept alive.
+ *
+ * `WorkspaceView.fragments` is `fragments/index.json`, and the worker writes that file once, when
+ * the whole pass is over: every view built while a `Prepare` runs carries the *previous* index —
+ * usually none at all. Taking it as it comes would wipe every `fragment_ready` row
+ * [`WorkspaceState.applyFragmentReady`] has collected, and the grid of thumbnails the user is
+ * watching fill would empty itself at the next command — the refresh that follows
+ * `prepare_start`, or an exclusion made while the preparation runs.
+ *
+ * So while a prepare is in flight the rows are carried over by name, `incoming` winning wherever
+ * it has one; a different `root` is a different workspace and carries nothing. The authoritative
+ * index arrives with `engine:finished`, whose view has no job and therefore replaces outright.
+ */
+function carryFragments(current: WorkspaceView | null, incoming: WorkspaceView): WorkspaceView {
+  if (current === null || current.root !== incoming.root || incoming.job?.kind !== "prepare") {
+    return incoming;
+  }
+  const byName = new Map(current.fragments.map((info) => [info.name, info]));
+  for (const info of incoming.fragments) {
+    byName.set(info.name, info);
+  }
+  return { ...incoming, fragments: [...byName.values()] };
+}
+
 export const useWorkspace = create<WorkspaceState>()((set, get) => {
   /** Runs one command: its view on success, its refusal on failure, never both. */
   const command = async (call: () => Promise<WorkspaceView>): Promise<void> => {
     try {
-      set({ view: await call(), error: null });
+      const view = await call();
+      set((state) => ({ view: carryFragments(state.view, view), error: null }));
     } catch (e) {
       set({ error: toCommandError(e) });
     }
@@ -64,7 +95,7 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => {
     selectedRunId: null,
 
     setView: (view) => {
-      set({ view });
+      set((state) => ({ view: view === null ? null : carryFragments(state.view, view) }));
     },
     setError: (error) => {
       set({ error });

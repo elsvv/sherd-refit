@@ -1112,6 +1112,7 @@ pub(crate) struct Finished<'a> {
 
 /// R §11's five writers and `export/`'s files. `written` carries what the caller wrote already
 /// (the measurement, the review images) because `README.txt` lists every file of the folder.
+#[allow(clippy::too_many_lines, reason = "one block per file R §11 writes, and this is the list")]
 pub(crate) fn write_outputs(
     out_dir: &Path,
     done: &Finished<'_>,

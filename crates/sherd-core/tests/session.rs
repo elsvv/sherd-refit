@@ -24,11 +24,11 @@ fn scratch(tag: &str) -> PathBuf {
 }
 
 /// One slab run without refinement, meshes or previews, leaving `match.state` in its folder.
-fn slab_run(tag: &str, params: Params) -> (RunSummary, PathBuf) {
+fn slab_run(tag: &str, params: &Params) -> (RunSummary, PathBuf) {
     let out = scratch(tag);
     let state = out.join("match.state");
     let options = RunOptions {
-        params,
+        params: *params,
         refine: false,
         preview: false,
         write_meshes: false,
@@ -41,7 +41,7 @@ fn slab_run(tag: &str, params: Params) -> (RunSummary, PathBuf) {
 /// The run most tests read: `Params::default()`, so R §6.5's own gate, and the slab assembled.
 fn accepted_run() -> &'static (RunSummary, PathBuf) {
     static RUN: OnceLock<(RunSummary, PathBuf)> = OnceLock::new();
-    RUN.get_or_init(|| slab_run("accepted", Params::default()))
+    RUN.get_or_init(|| slab_run("accepted", &Params::default()))
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn an_accepted_probable_join_is_placed_at_the_pose_that_was_accepted() {
     // The shipped tier rule confirms nothing on this slab (`run_cli.rs`, `AMBIGUOUS`): its one
     // join is probable, and a run places nothing. That is the app's review case exactly.
     let params = Params { tiers: Some(Thresholds::default()), ..Params::default() };
-    let (summary, path) = slab_run("probable", params);
+    let (summary, path) = slab_run("probable", &params);
     assert!(summary.groups.iter().all(|g| g.len() == 1), "nothing is confirmed, nothing placed");
     let state = MatchState::load(&path).unwrap();
 
@@ -154,7 +154,7 @@ fn an_accepted_probable_join_is_placed_at_the_pose_that_was_accepted() {
 #[test]
 fn a_reviewed_assembly_is_written_by_the_runs_own_writers() {
     let params = Params { tiers: Some(Thresholds::default()), ..Params::default() };
-    let (_, path) = slab_run("reviewed", params);
+    let (_, path) = slab_run("reviewed", &params);
     let state = MatchState::load(&path).unwrap();
     let chosen = *state.candidates.iter().find(|c| c.accepted).unwrap();
     let m = chosen.transform;
@@ -184,7 +184,7 @@ fn a_reviewed_assembly_is_written_by_the_runs_own_writers() {
 
     let out = scratch("reviewed-out");
     let options = RunOptions {
-        params: state.params.clone(),
+        params: state.params,
         preview: false,
         write_meshes: false,
         ..RunOptions::default()

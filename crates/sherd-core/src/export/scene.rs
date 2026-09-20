@@ -286,6 +286,42 @@ pub fn glb(ex: &Export<'_>, meshes: &[DisplayMesh], offsets: &[[f64; 3]]) -> Vec
     container(&doc, buffers.bin)
 }
 
+/// One fragment's display mesh as a GLB of its own, in its original file's coordinates (A §3.5).
+///
+/// `scene.glb` bakes a run into the file: a node per fragment carrying that run's matrix. The app
+/// keeps the meshes and the runs apart — the meshes once per workspace, a run as matrices over
+/// them — so that a draft reassembly (A §8.4) moves meshes and regenerates nothing.
+pub fn fragment_glb(name: &str, mesh: &DisplayMesh) -> Vec<u8> {
+    let mut buffers = Buffers::default();
+    let mut node = json!({ "name": name });
+    let mut meshes = Vec::new();
+    if !mesh.faces.is_empty() {
+        meshes.push(mesh_entry(name, mesh, &mut buffers));
+        node["mesh"] = json!(0);
+    }
+    // glTF indexes materials by position: a colourless mesh asks for material 1, so both exist.
+    let materials =
+        vec![material("scan colours", [1.0, 1.0, 1.0]), material("clay", [0.52, 0.33, 0.22])];
+    let bin_length = buffers.bin.len();
+    let mut doc = json!({
+        "asset": {
+            "version": "2.0",
+            "generator": format!("sherd-refit {CORE_VERSION} ({GIT_COMMIT})"),
+        },
+        "scene": 0,
+        "scenes": [{ "name": name, "nodes": [0] }],
+        "nodes": [node],
+        "materials": materials,
+    });
+    if !meshes.is_empty() {
+        doc["meshes"] = json!(meshes);
+        doc["accessors"] = json!(buffers.accessors);
+        doc["bufferViews"] = json!(buffers.views);
+        doc["buffers"] = json!([{ "byteLength": bin_length }]);
+    }
+    container(&doc, buffers.bin)
+}
+
 /// A matte, two-sided material: glTF's default is fully metallic, which renders a sherd black.
 fn material(name: &str, colour: [f64; 3]) -> Value {
     json!({
@@ -300,7 +336,7 @@ fn material(name: &str, colour: [f64; 3]) -> Value {
 }
 
 /// One glTF mesh per fragment with faces, its arrays appended to `buffers`; and which mesh each
-/// fragment got. Material 0 is the scan's colours, 1 the plain clay a colourless scan is drawn in.
+/// fragment got.
 fn mesh_entries(
     ex: &Export<'_>,
     meshes: &[DisplayMesh],
@@ -312,33 +348,39 @@ fn mesh_entries(
         if mesh.faces.is_empty() {
             continue;
         }
-        let (lo, hi) = extent(&mesh.positions);
-        let view = buffers.view(&le_f32(&mesh.positions), ARRAY_BUFFER);
-        let position = buffers.accessor(view, FLOAT, mesh.positions.len(), "VEC3", Some((lo, hi)));
-        let view = buffers.view(&le_f32(&mesh.normals), ARRAY_BUFFER);
-        let normal = buffers.accessor(view, FLOAT, mesh.normals.len(), "VEC3", None);
-        let mut attributes = json!({ "POSITION": position, "NORMAL": normal });
-        if let Some(colors) = &mesh.colors {
-            let view = buffers.view(&le_u16(colors), ARRAY_BUFFER);
-            let color = buffers.accessor(view, UNSIGNED_SHORT, colors.len(), "VEC4", None);
-            buffers.accessors[color]["normalized"] = json!(true);
-            attributes["COLOR_0"] = json!(color);
-        }
-        let (bytes, component) = indices(mesh);
-        let view = buffers.view(&bytes, ELEMENT_ARRAY_BUFFER);
-        let index = buffers.accessor(view, component, mesh.faces.len() * 3, "SCALAR", None);
         mesh_of[n] = Some(entries.len());
-        entries.push(json!({
-            "name": ex.names[n],
-            "primitives": [{
-                "attributes": attributes,
-                "indices": index,
-                "material": usize::from(mesh.colors.is_none()),
-                "mode": 4,
-            }],
-        }));
+        entries.push(mesh_entry(&ex.names[n], mesh, buffers));
     }
     (entries, mesh_of)
+}
+
+/// One glTF mesh, its arrays appended to `buffers`. Material 0 is the scan's colours, 1 the plain
+/// clay a colourless scan is drawn in.
+fn mesh_entry(name: &str, mesh: &DisplayMesh, buffers: &mut Buffers) -> Value {
+    let (lo, hi) = extent(&mesh.positions);
+    let view = buffers.view(&le_f32(&mesh.positions), ARRAY_BUFFER);
+    let position = buffers.accessor(view, FLOAT, mesh.positions.len(), "VEC3", Some((lo, hi)));
+    let view = buffers.view(&le_f32(&mesh.normals), ARRAY_BUFFER);
+    let normal = buffers.accessor(view, FLOAT, mesh.normals.len(), "VEC3", None);
+    let mut attributes = json!({ "POSITION": position, "NORMAL": normal });
+    if let Some(colors) = &mesh.colors {
+        let view = buffers.view(&le_u16(colors), ARRAY_BUFFER);
+        let color = buffers.accessor(view, UNSIGNED_SHORT, colors.len(), "VEC4", None);
+        buffers.accessors[color]["normalized"] = json!(true);
+        attributes["COLOR_0"] = json!(color);
+    }
+    let (bytes, component) = indices(mesh);
+    let view = buffers.view(&bytes, ELEMENT_ARRAY_BUFFER);
+    let index = buffers.accessor(view, component, mesh.faces.len() * 3, "SCALAR", None);
+    json!({
+        "name": name,
+        "primitives": [{
+            "attributes": attributes,
+            "indices": index,
+            "material": usize::from(mesh.colors.is_none()),
+            "mode": 4,
+        }],
+    })
 }
 
 /// The node tree: the collection at the root, one node per assembled group under it (a
@@ -603,7 +645,9 @@ impl Bounds {
 mod tests {
     #![allow(clippy::float_cmp, reason = "the translations compared here are exact")]
 
-    use super::{DisplayMesh, MAX_FACES, MIN_FACES, display_mesh, face_targets, glb, layout};
+    use super::{
+        DisplayMesh, MAX_FACES, MIN_FACES, display_mesh, face_targets, fragment_glb, glb, layout,
+    };
     use crate::export::Export;
     use crate::mesh::Mesh;
     use nalgebra::Matrix4;
@@ -794,5 +838,34 @@ mod tests {
         let mesh = b.mesh().expect("b has a mesh");
         let primitive = mesh.primitives().next().expect("one primitive");
         assert_eq!(primitive.attributes().count(), 3, "POSITION, NORMAL, COLOR_0");
+    }
+
+    /// A §3.5: the app keeps one display mesh per fragment and lays a run over them as matrices,
+    /// so a fragment is a file of its own, in its scan's coordinates.
+    #[test]
+    fn one_fragment_reads_back_as_gltf_in_its_own_coordinates() {
+        let mesh = display_mesh(&tetra_of(2.0), MAX_FACES);
+        let bytes = fragment_glb("FY234001", &mesh);
+        let gltf = gltf::Gltf::from_slice(&bytes).expect("a valid GLB");
+        // As above: without `gltf`'s `names` feature the node's name is only in the JSON chunk,
+        // whose length is the word after the 12-byte header.
+        let length = u32::from_le_bytes(bytes[12..16].try_into().expect("four bytes")) as usize;
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes[20..20 + length]).expect("JSON");
+        assert_eq!(json["nodes"][0]["name"], "FY234001");
+        let node = gltf.nodes().next().expect("one node");
+        assert_eq!(
+            node.transform().matrix(),
+            gltf::scene::Transform::Decomposed {
+                translation: [0.0; 3],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0; 3],
+            }
+            .matrix()
+        );
+        let primitive = node.mesh().expect("a mesh").primitives().next().expect("a primitive");
+        let count = primitive.get(&gltf::Semantic::Positions).expect("positions").count();
+        assert_eq!(count, mesh.positions.len());
+        assert_eq!(primitive.get(&gltf::Semantic::Colors(0)).is_some(), mesh.colors.is_some());
     }
 }

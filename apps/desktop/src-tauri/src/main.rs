@@ -4,6 +4,11 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod commands;
+mod error;
+mod recent;
+mod state;
+
 /// The argument that makes this process the engine.
 pub const ENGINE_WORKER: &str = "--engine-worker";
 
@@ -17,6 +22,17 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .manage(state::AppState::default())
+        .invoke_handler(tauri::generate_handler![
+            commands::app_info,
+            commands::recent_list,
+            commands::workspace_create,
+            commands::workspace_open,
+            commands::workspace_close,
+            commands::workspace_view,
+            commands::input_link,
+            commands::fragment_exclude,
+        ])
         .run(tauri::generate_context!())
         .expect("the window could not be opened");
 }

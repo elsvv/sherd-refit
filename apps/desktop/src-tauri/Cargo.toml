@@ -14,6 +14,9 @@ tauri-build = { version = "=2.6.3", features = [] }
 
 [dependencies]
 sherd-app-core = { path = "../../../crates/sherd-app-core" }
+# Directly, only for `CORE_VERSION` and `GIT_COMMIT` in `app_info`: sherd-app-core does not
+# re-export the engine, and it is already in the tree as its dependency.
+sherd-core = { path = "../../../crates/sherd-core" }
 tauri = { version = "=2.11.6", features = ["protocol-asset"] }
 tauri-plugin-dialog = "=2.7.3"
 tauri-plugin-opener = "=2.5.5"

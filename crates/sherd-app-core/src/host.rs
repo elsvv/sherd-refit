@@ -57,20 +57,51 @@ pub enum HostEvent {
     },
 }
 
+/// The pipe a job is cancelled through, shared between the worker and every [`Canceller`] taken
+/// from it. `None` once the process is over and the pipe has been let go of.
+type Pipe = Arc<Mutex<Option<ChildStdin>>>;
+
 /// A running worker: the process, the pipe the window talks back through, and the threads that
 /// turn its two output streams into events and into `engine.log`.
 ///
 /// Dropping a `Worker` drops its stdin, which is the end of the worker's input and therefore
-/// D §5's cancel (A §2.1): a window that goes away leaves no 3 GB orphan behind it.
+/// D §5's cancel (A §2.1): a window that goes away leaves no 3 GB orphan behind it. An outstanding
+/// [`Canceller`] does not keep that pipe open — see [`Worker::canceller`].
 #[derive(Debug)]
 pub struct Worker {
     child: Child,
     // Kept for the worker's whole life: closing it cancels the job, so it is let go of only once
-    // the process is over.
-    stdin: Option<ChildStdin>,
+    // the process is over. Behind a lock because a `Canceller` writes to it from the window's
+    // thread while `drive` is reading events on another.
+    stdin: Pipe,
     events: Receiver<Event>,
     readers: Vec<JoinHandle<()>>,
     exited: bool,
+}
+
+/// The one thing a window may do to a job it has already handed to [`drive`]: stop it (A §2.2).
+///
+/// [`drive`] borrows the [`Worker`] for the whole run, so «Отменить» cannot be a method on the
+/// worker — by the time there is a run to cancel, the button's thread cannot reach it. A
+/// `Canceller` is taken before the run starts, is cheap to clone and `Send`, and writes the same
+/// line [`Worker::cancel`] does.
+#[derive(Clone, Debug)]
+pub struct Canceller {
+    stdin: Pipe,
+}
+
+impl Canceller {
+    /// Asks the job to stop (A §2.2). The worker raises D §5's flag, ends at its next unit of
+    /// work and says `Failed` with [`FailKind::Cancelled`]; a worker already gone is not an error
+    /// — its exit is what [`Worker::next`] will report anyway.
+    pub fn cancel(&self) {
+        let Ok(mut pipe) = self.stdin.lock() else { return };
+        let Some(stdin) = pipe.as_mut() else { return };
+        // Through serde, so the request the host writes and the one the worker parses cannot
+        // drift apart.
+        let Ok(line) = serde_json::to_string(&Request::Cancel) else { return };
+        let _ = writeln!(stdin, "{line}").and_then(|()| stdin.flush());
+    }
 }
 
 impl Worker {
@@ -141,30 +172,43 @@ impl Worker {
         });
         Ok(Self {
             child,
-            stdin: Some(stdin),
+            stdin: Arc::new(Mutex::new(Some(stdin))),
             events,
             readers: vec![reading, copying],
             exited: false,
         })
     }
 
-    /// Asks the job to stop (A §2.2). The worker raises D §5's flag, ends at its next unit of
-    /// work and says `Failed` with [`FailKind::Cancelled`]; a worker already gone is not an error
-    /// — its exit is what [`next`](Self::next) will report anyway.
+    /// A handle on this worker's cancel, for the thread that will not be holding the worker.
+    ///
+    /// Take it before handing the worker to [`drive`]: that call owns the worker until the run is
+    /// over, so this is the only way «Отменить» reaches a job that is actually running (A §2.2).
+    /// Cancelling through a handle after the worker is gone does nothing, and a handle kept past
+    /// the worker's life does not hold the pipe open — dropping the worker closes it either way.
+    pub fn canceller(&self) -> Canceller {
+        Canceller { stdin: Arc::clone(&self.stdin) }
+    }
+
+    /// Asks the job to stop (A §2.2), for a caller that still holds the worker — before
+    /// [`drive`], or in a test. Same line as [`Canceller::cancel`].
     pub fn cancel(&mut self) {
-        let Some(stdin) = self.stdin.as_mut() else { return };
-        // Through serde, so the request the host writes and the one the worker parses cannot
-        // drift apart.
-        let Ok(line) = serde_json::to_string(&Request::Cancel) else { return };
-        let _ = writeln!(stdin, "{line}").and_then(|()| stdin.flush());
+        self.canceller().cancel();
     }
 
     /// Ends the process now — A §10's hard kill, behind the cooperative cancel. Waits for it, so
     /// that nothing is still writing into the run's folder when this returns.
     pub fn kill(&mut self) {
-        self.stdin = None;
+        self.close_stdin();
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+
+    /// Lets go of the worker's input, which is D §5's cancel by EOF (A §2.1). Says nothing when
+    /// the lock is poisoned: the pipe then goes with the last handle to it instead.
+    fn close_stdin(&self) {
+        if let Ok(mut pipe) = self.stdin.lock() {
+            *pipe = None;
+        }
     }
 
     /// The next thing that happened: an event, then [`HostEvent::Exited`] once, then `None`.
@@ -183,12 +227,21 @@ impl Worker {
         self.exited = true;
         // Its stdout is closed, so the process is over or a breath away from it: let go of stdin,
         // reap it, and collect the readers, so that `engine.log` is whole before anyone reads it.
-        self.stdin = None;
+        self.close_stdin();
         let code = self.child.wait().ok().and_then(|status| status.code());
         for reader in self.readers.drain(..) {
             let _ = reader.join();
         }
         Some(HostEvent::Exited { code })
+    }
+}
+
+/// A window that goes away leaves no 3 GB orphan (A §2.1): the pipe is closed here rather than
+/// left to the last [`Canceller`] a window may still be holding, so that the end of the worker's
+/// input stays the end of the worker.
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.close_stdin();
     }
 }
 
@@ -385,4 +438,18 @@ fn append(log: Option<&Mutex<std::fs::File>>, line: &[u8]) {
     let Some(file) = log else { return };
     let Ok(mut file) = file.lock() else { return };
     let _ = file.write_all(line).and_then(|()| file.write_all(b"\n"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Canceller;
+
+    /// A §2.2: «Отменить» is pressed while [`super::drive`] holds the worker, so the handle has to
+    /// outlive that borrow and cross to the window's own thread. Nothing else about the cancel is
+    /// testable without a process — `tests/worker_e2e.rs` does that part.
+    #[test]
+    fn a_cancel_handle_leaves_the_thread_that_drives_the_run() {
+        const fn goes_anywhere<T: Clone + Send + Sync + 'static>() {}
+        goes_anywhere::<Canceller>();
+    }
 }

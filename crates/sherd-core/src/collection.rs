@@ -174,15 +174,18 @@ mod tests {
     #[test]
     fn an_excluded_fragment_is_left_out_and_the_others_keep_their_names() {
         let dir = scratch("excluding");
-        for name in ["FY234009.ply", "FY249010.ply", "FY234011.ply"] {
+        // Two scans of one stem, which R §2 tells apart by their extensions. Were the exclusion
+        // applied to the files and the names made afterwards, the survivor's stem would be unique
+        // again and it would be renamed `FY234009` — orphaning its cache and its decisions.
+        for name in ["FY234009.ply", "FY234009.obj", "FY249010.ply"] {
             std::fs::write(dir.join(name), b"").unwrap();
         }
         let all: Vec<String> = discover(&dir).unwrap().into_iter().map(|e| e.name).collect();
-        let excluded = std::collections::BTreeSet::from(["FY234009".to_owned()]);
+        assert_eq!(all, ["FY234009_obj", "FY234009_ply", "FY249010"]);
+        let excluded = std::collections::BTreeSet::from(["FY234009_obj".to_owned()]);
         let kept: Vec<String> =
             discover_excluding(&dir, &excluded).unwrap().into_iter().map(|e| e.name).collect();
-        assert_eq!(all.len(), 3);
-        assert_eq!(kept, all.into_iter().filter(|n| n != "FY234009").collect::<Vec<_>>());
+        assert_eq!(kept, ["FY234009_ply", "FY249010"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

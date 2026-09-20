@@ -148,6 +148,28 @@ impl MatchState {
             )));
         }
         let f: FileOwned = serde_json::from_slice(&bytes).map_err(|e| refuse(e.to_string()))?;
+        // `reassemble` indexes the tier report by candidate and the collection by `FragId`. A file
+        // that was cut short or edited by hand is refused here, as a file, rather than found out
+        // there, as a panic in the middle of R §8.
+        if let Some(t) = &f.tiers
+            && [t.tiers.len(), t.evidence.len(), t.probes.len()] != [f.candidates.len(); 3]
+        {
+            return Err(refuse(format!(
+                "the tier report has {}/{}/{} rows for {} candidates",
+                t.tiers.len(),
+                t.evidence.len(),
+                t.probes.len(),
+                f.candidates.len()
+            )));
+        }
+        if let Some(c) = f.candidates.iter().find(|c| c.a.max(c.b) as usize >= f.names.len()) {
+            return Err(refuse(format!(
+                "a candidate joins fragments {} and {} of a collection of {}",
+                c.a,
+                c.b,
+                f.names.len()
+            )));
+        }
         Ok(Self {
             names: f.names,
             params: f.params,
@@ -224,8 +246,13 @@ pub fn reassemble(
 ) -> Result<Reassembled> {
     if !fragments.iter().map(|f| f.name.as_str()).eq(state.names.iter().map(String::as_str)) {
         return Err(Error::State {
-            path: std::path::PathBuf::new(),
-            message: "the fragments are not the collection this match was made on".to_owned(),
+            path: std::path::PathBuf::from("match state"),
+            message: format!(
+                "the {} fragments given are not the {} this match was made on — the input changed; \
+                 run the collection again",
+                fragments.len(),
+                state.names.len()
+            ),
         });
     }
     let params = &state.params;
@@ -355,6 +382,17 @@ pub fn write_reviewed(
 ) -> Result<Vec<PathBuf>> {
     std::fs::create_dir_all(out_dir).map_err(|e| Error::write(out_dir, e))?;
     let timings = Timings::default();
+    // D §4.3's `backend` names the arithmetic that produced the poses, and that is the match's —
+    // `cpu`, or `gpu:Apple M2 Pro` — whatever this process happens to be running on.
+    let (backend, adapter) = match state.backend.split_once(':') {
+        Some((backend, adapter)) => (backend, Some(adapter.to_owned())),
+        None => (state.backend.as_str(), None),
+    };
+    let options = &RunOptions {
+        backend: backend.parse().unwrap_or(options.backend),
+        adapter,
+        ..options.clone()
+    };
     pipeline::write_outputs(
         out_dir,
         &pipeline::Finished {

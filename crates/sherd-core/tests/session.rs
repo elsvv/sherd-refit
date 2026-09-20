@@ -140,6 +140,13 @@ fn an_accepted_probable_join_is_placed_at_the_pose_that_was_accepted() {
 
     let out = reassembled(&state, Some(&json));
     assert!(out.assembly.groups.iter().any(|g| g.len() == 2), "the accepted join is placed");
+    let report = out.tiers.as_ref().expect("the tier pass ran");
+    assert_eq!(
+        [report.tiers.len(), report.evidence.len(), report.probes.len()],
+        [out.candidates.len(); 3],
+        "the tier report lost and gained the rows the candidate list did"
+    );
+    assert!(out.assembly.used.iter().all(|&i| i < out.candidates.len()));
     let placed = out.candidates.last().expect("the pinned candidate is appended last");
     assert_eq!(placed.transform, chosen.transform, "the pose is the one that was accepted");
     assert_eq!(placed.scores, chosen.scores, "R §6 was not run again: the match had scored it");

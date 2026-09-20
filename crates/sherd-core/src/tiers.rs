@@ -1038,7 +1038,7 @@ pub fn probe(
 /// is](crate::pipeline::preprocess_watched): a pair either produced its whole row of [`Probes`] or
 /// produced none of it, so what the bar counts is work that is finished and not work that has
 /// started.
-pub fn probe_watched(
+pub(crate) fn probe_watched(
     engine: Engine<'_>,
     fragments: &[Fragment],
     candidates: &[Candidate],

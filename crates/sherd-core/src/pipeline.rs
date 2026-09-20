@@ -2203,6 +2203,11 @@ mod tests {
         assert_eq!(options.keep_per_pair, 5, "R §5.7's `keep`, not a flag on either side");
         assert!(options.preview && options.refine && options.write_meshes);
         assert!(options.cache.is_none(), "a run writes no cache unless asked for one");
+        assert!(options.match_state.is_none(), "a run keeps its match only when asked to (A §3.1)");
+        assert!(
+            options.excluded.is_empty(),
+            "a run leaves no fragment out unless told to (A §5.1)"
+        );
         assert_eq!(options.params, Params::default());
     }
 

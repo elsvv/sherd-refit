@@ -14,7 +14,7 @@ and a read of the tree at `871b3ae`.
 | shell | Tauri 2; targets macOS (arm64, x86_64) and Windows x64. Linux must keep building, is not a target |
 | process model | one executable, two roles: the UI process, and the same binary re-launched with `--engine-worker` for every engine job. JSON lines over stdio. One worker at a time |
 | crates | new `crates/sherd-app-core` (workspace model, protocol, worker loop; **no Tauri dependency**); `apps/desktop/src-tauri` (thin shell); `apps/desktop/src` (frontend) |
-| core changes | `run_with` split into public stages behind a `session` module, `MatchState` save/load, exclusions in discovery, progress in the three silent stages, a preprocessing observer, backend resolution moved out of the CLI. **CLI output stays byte for byte** |
+| core changes | `run_with`'s assembly and output stages extracted; a `session` module with `MatchState` save/load and `reassemble`; exclusions in discovery; progress in the silent stages; backend resolution moved out of the CLI into a new `sherd-backend` crate. **CLI output stays byte for byte** |
 | workspace | a plain folder holding `sherd-workspace.json`; one collection per workspace; input linked by path, never copied; `runs/<id>/` history; heavy exports only on demand |
 | review | decisions per fragment pair (`accept` with pose / `reject`), saved on every click; **instant draft reassembly** from a warm worker session; full-resolution refinement on a button and before any export |
 | decisions → engine | `accept` = `must_join` with pose, `reject` = `must_not_join` (the existing `assembly::constraints`); carried into the next full run by default |
@@ -52,9 +52,10 @@ side by side; several collections in one workspace; cloud or sharing features.
 
 ```
 crates/
-  sherd-core       + `session`: the run's stages as separate public calls (§3)
-  sherd-gpu        + backend resolution, moved from sherd-cli (§3.6)
-  sherd-cli        same behaviour; `run` composed from `session`
+  sherd-core       + `session`: a saved match, and reassembly from it (§3)
+  sherd-gpu        unchanged
+  sherd-backend    NEW: `--backend` resolution and the self-test, moved from sherd-cli (§3.6)
+  sherd-cli        same behaviour
   sherd-app-core   NEW: workspace model, protocol, worker loop, decisions → constraints,
                    status derivation inputs, ETA calibration, Blender script. No Tauri.
 apps/desktop/
@@ -120,30 +121,50 @@ Events common to all jobs: `Stage { name, index, of }`, `Progress { stage, done,
 Every one of them leaves the CLI's output byte for byte what it is; `crates/sherd-cli/tests/run_cli.rs`
 and `parity --stage all` are the gate.
 
-### 3.1 `sherd_core::session` — the run in stages
+### 3.1 `sherd_core::session` — a saved match, and reassembly from it
 
-`pipeline::run_with` is one 700-line function. Its stages become public calls and `run_with`
-becomes their composition:
+`pipeline::run_with` is one 700-line function and stays the orchestrator. Two pieces of it become
+functions, because a second caller needs exactly them:
+
+- **`assemble_stage`** — `constraints::apply` → `assemble_under` → the object round. `run_with`
+  has this block twice already (first pass, and again after R §8.1's second pass);
+- **`write_outputs`** — R §11's writers and `export/`, the tail of `run_with`.
+
+`session` is built on those two:
 
 ```
-prepare(entries, options, watch)                  -> Vec<Fragment>
-match_collection(fragments, options, engine)      -> MatchState      // R §4–§6, tiers, second pass
-assemble(&MatchState, pieces, Option<&Resolved>)  -> Assembly        // today's `assemble_under`
-refine(&mut Assembly, fragments, entries, …)                          // R §9
-write_outputs(out_dir, &MatchState, &Assembly, &OutputSwitches)       // R §11 and `export/`
+MatchState                                   the candidate list and the tier report as they stood
+                                             before the last `constraints::apply`, with names,
+                                             `Params`, thickness, resolution, backend label
+RunOptions::match_state: Option<PathBuf>     `run_with` saves the state there; the CLI never sets it
+load_fragments(entries, …) -> Vec<Fragment>  the cache-backed preprocessing `run_with` uses
+reassemble(engine, fragments, &MatchState, Option<&Constraints>) -> Reassembled
+refine_poses(…) -> Vec<Matrix4<f64>>         R §9 over the groups it is given
+write_reviewed(out_dir, …)                   `write_outputs` over a `Reassembled`
 ```
 
-`MatchState` is captured after the **last** matching pass (second pass and `--tier-agree-seeds`
-included): fragment names with their cache fingerprints, `Params`, seed, the full candidate list
-with poses, the tier evidence, the engine block.
+Matching itself is not extracted: the app's `Run` job calls `run_with`, and nothing else needs the
+match without the run around it.
+
+**`reassemble` mirrors a full run under the same constraints.** A full run does not match a pair
+pinned by `must_join` with a pose: the pair's only candidate is the pinned one, appended after every
+matched candidate. `reassemble` reproduces that layout — it removes the pair's matched candidates
+(and their rows of the tier report), and appends the pinned one. When the pinned pose is bit for bit
+the pose of a candidate the match already scored — the case for every decision made in the app —
+that candidate's scores are reused and R §6 is not run again; otherwise `pinned_candidate` scores
+it, as the full run would. `must_not_join` is left to `assemble_under`'s veto, as in a full run whose
+pair did get matched. The tier pass is not repeated: a decision changes what is placed, not what the
+engine believed.
 
 ### 3.2 `MatchState::save` / `load`
 
-`runs/<id>/match.state`: an 8-byte magic, a `u32` version, then the serde encoding of `MatchState`
-in a compact binary format. The encoding crate (`postcard` or `bincode`) is chosen in the plan and
-pinned in the workspace manifest like every dependency. Requirements: every `f64` reads back
-bit-identical; 54 000 candidates load in under a second; a file of another version is refused with
-a typed error, never misread.
+`runs/<id>/match.state` is **JSON** through `serde_json` (whose `float_roundtrip` feature, already
+on in this workspace, reads every `f64` back bit-identical), with a `format` tag and a `version`
+number; another version is refused with a typed error, never misread. Not a compact binary format,
+for a reason found in the tree: the types it carries — `Scores`, `Evidence`, `Probes`, `Params` —
+are `report.json`'s own and use `skip_serializing_if`, which `report.json`'s bytes depend on and
+which a non-self-describing format (`postcard`, `bincode`) cannot round-trip. About 35 MB and well
+under a second to read for `karas`'s 54 000 candidates; no new dependency.
 
 ### 3.3 Discovery with exclusions
 
@@ -152,23 +173,28 @@ use it.
 
 ### 3.4 Progress in the silent stages
 
-`Watch::advance` is called today from preprocessing and matching only. It is added to `tiers`
-(per candidate probed), `refine` (per join) and `output` (per file written). Matching is 94 % of
-`karas`'s wall time, so the bar was already honest; this removes the three places it stood still.
+`Watch::advance` is called today from preprocessing and matching only. It is added to `tiers` (per
+candidate probed) and to `refine` (per fracture cloud built, which is where R §9 reads the source
+scans). Matching is 94 % of `karas`'s wall time, so the bar was already honest; this removes the
+two places it stood still in every app run. The output stage writes only tables in an app run; its
+per-file progress arrives with Export (milestone 6), which is what writes meshes.
 
-### 3.5 Preprocessing observer
+### 3.5 Display meshes and thumbnails — no core change
 
-`Prepare` needs a thumbnail and a display mesh per fragment, and the source scan — up to 1.5 M
-faces — is in memory exactly once, inside preprocessing. `preprocess_watched` gains an optional
-per-fragment observer that is handed the loaded source mesh before it is dropped. The app's
-observer calls the existing `export::scene::display_mesh` and `render`; the CLI passes none. When
-the cache is valid but a display file is missing, `Prepare` reads that one source again.
+`Prepare` needs a thumbnail and a display mesh per fragment. It gets them the way the scene export
+does today: a second read of each source through the public `export::scene::display_mesh` and
+`render`, under the same memory semaphore. That is ≈ 10–15 s for 155 scans, once per workspace —
+the files are kept in `fragments/` — and it leaves preprocessing untouched. (An observer inside
+preprocessing would save that read, and was rejected: a cache hit never loads the source, so the
+observer would need a second path anyway.)
 
 ### 3.6 Backend resolution
 
 `--backend auto|cpu|gpu`, the adapter choice and the self-test gate live in
-`crates/sherd-cli/src/gpu.rs`. They move to a library location both binaries link, unchanged, so
-the app and the CLI resolve `auto` identically.
+`crates/sherd-cli/src/gpu.rs`. `resolve`, `Resolved`, `info_lines` and `selftest_lines` move,
+unchanged, to a new crate `sherd-backend` with the same optional `gpu` feature — it cannot be
+`sherd-gpu` itself, because the CPU-only build has no `sherd-gpu` and still needs `resolve`. The
+`gpu-check` adapter stays in the CLI. The app and the CLI then resolve `auto` identically.
 
 ## 4. Workspace on disk
 
@@ -187,7 +213,7 @@ karas/
                             (file, size, mtime per fragment, and the exclusions); engine block;
                             timings; tier counts; app and core versions
     engine.log              everything the worker said
-    match.state             §3.2
+    match.state             §3.2 — JSON, ≈ 35 MB on `karas`
     report.json report.md transforms.json transforms.csv joins.csv     the engine's, immutable
     candidates.json         the UI's index: every confirmed and probable join, and per fragment
                             its ten best rejected candidates, each with pose, scores and reason
@@ -490,8 +516,8 @@ where a bug would be **silent or expensive**, and nowhere else.
 
 Each leaves something that works.
 
-1. **Core.** `session`, `MatchState`, exclusions, progress in the silent stages, the observer,
-   backend resolution moved. CLI byte for byte.
+1. **Core.** `assemble_stage` and `write_outputs` extracted, `session` with `MatchState` and
+   `reassemble`, exclusions, progress in tiers and refine, `sherd-backend`. CLI byte for byte.
 2. **`sherd-app-core`.** Protocol, worker, workspace model, `Prepare` and `Run`; the headless test.
 3. **Shell and frame.** Tauri app, welcome, workspace, mode Вход with preparation and the
    single-fragment viewer.

@@ -1,0 +1,191 @@
+import clsx from "clsx";
+import type { TFunction } from "i18next";
+import type { ReactNode } from "react";
+import { useEffect } from "react";
+import { useTranslation } from "react-i18next";
+
+import { api } from "../ipc";
+import type { Unlisten } from "../ipc/api";
+import { toCommandError } from "../ipc/api";
+import type { StaleDiff } from "../ipc/bindings/StaleDiff";
+import type { WorkspaceView } from "../ipc/bindings/WorkspaceView";
+import { useJobs } from "../state/jobs";
+import type { Status } from "../state/status";
+import { deriveStatus } from "../state/status";
+import type { Mode } from "../state/ui";
+import { useUi } from "../state/ui";
+import { useWorkspace } from "../state/workspace";
+import Button from "../ui/Button";
+import type { BannerProps } from "./Banner";
+import Banner from "./Banner";
+import StatusLine from "./StatusLine";
+import TopBar, { pickAndLinkInput } from "./TopBar";
+
+/** What the active mode puts in the three places of the frame (A §7.3). */
+interface Panes {
+  left: ReactNode;
+  centre: ReactNode;
+  right: ReactNode;
+}
+
+/**
+ * The «Вход» pane is wider than the others because it holds a grid of thumbnails; the tree of
+ * groups that «Сборка» will put on the left needs less (A §7.1's 300 px).
+ */
+function leftWidth(mode: Mode): string {
+  return mode === "input" ? "w-[360px]" : "w-[300px]";
+}
+
+/**
+ * What every mode supplies until it supplies something. Milestone 3 has only «Вход», and its
+ * three panes arrive with task 8 — until then the frame is the frame, with nothing in the sides.
+ */
+const NO_PANES: Panes = { left: null, centre: null, right: null };
+
+/** «+3 файла, −1, 2 изменены» — A §5's «устарел» row, in the words the mock-up writes it in. */
+function staleText(diff: StaleDiff, t: TFunction): string {
+  return [
+    diff.added.length > 0 ? t("banner.stale_added", { count: diff.added.length }) : null,
+    diff.removed.length > 0 ? t("banner.stale_removed", { n: diff.removed.length }) : null,
+    diff.changed.length > 0 ? t("banner.stale_changed", { count: diff.changed.length }) : null,
+    diff.excluded_added.length > 0 ? t("banner.stale_excluded", { count: diff.excluded_added.length }) : null,
+    diff.excluded_removed.length > 0 ? t("banner.stale_included", { count: diff.excluded_removed.length }) : null,
+  ]
+    .filter((part) => part !== null)
+    .join(", ");
+}
+
+/**
+ * The centre of an empty workspace (A §5's first row): a folder of scans is what the app needs
+ * before it can do anything at all, so the invitation takes the whole viewport and accepts both
+ * a click and a folder dropped on the window.
+ */
+function DropZone() {
+  const { t } = useTranslation();
+
+  useEffect(() => {
+    let stop: Unlisten | null = null;
+    let gone = false;
+    void api
+      .onFolderDropped((path) => {
+        void useWorkspace.getState().linkInput(path);
+      })
+      .then(
+        (off) => {
+          if (gone) {
+            off();
+          } else {
+            stop = off;
+          }
+        },
+        (e: unknown) => {
+          useWorkspace.getState().setError(toCommandError(e));
+        },
+      );
+    return () => {
+      gone = true;
+      stop?.();
+    };
+  }, []);
+
+  return (
+    <div className="flex h-full items-center justify-center p-6">
+      <div className="flex w-[420px] flex-col items-center gap-3 rounded-lg border-2 border-dashed border-border px-6 py-10 text-center">
+        <p className="text-sm">{t("drop.title")}</p>
+        <p className="font-mono text-xs text-muted">{t("drop.formats")}</p>
+        <Button
+          variant="primary"
+          size="md"
+          onClick={() => {
+            pickAndLinkInput(t("action.pick_input_title"));
+          }}
+        >
+          {t("action.pick_input")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The window with a workspace in it (`main-layout.html`, variant A): the top bar, whatever the
+ * state of the workspace has to say, three panes of which the two sides collapse, and the status
+ * line. With both sides collapsed the centre fills the window, which is what the user asked for.
+ */
+export default function Frame({ view }: { view: WorkspaceView }) {
+  const { t } = useTranslation();
+  const mode = useUi((state) => state.mode);
+  const leftOpen = useUi((state) => state.leftOpen);
+  const rightOpen = useUi((state) => state.rightOpen);
+  const selectedRunId = useWorkspace((state) => state.selectedRunId);
+  const error = useWorkspace((state) => state.error);
+  const lastFailure = useJobs((state) => state.lastFailure);
+
+  // Milestone 3 loads no assembly, so no group of one can be waiting for refinement (A §8.4).
+  const status: Status = deriveStatus(view, selectedRunId, false);
+  const panes: Panes = NO_PANES;
+
+  const banners: BannerProps[] = [];
+  if (status.kind === "input_missing") {
+    banners.push({
+      tone: "danger",
+      text: t("banner.input_missing"),
+      action: {
+        label: t("action.relink"),
+        onClick: () => {
+          pickAndLinkInput(t("action.pick_input_title"));
+        },
+      },
+    });
+  }
+  if (status.kind === "stale") {
+    banners.push({ tone: "warn", text: t("banner.stale", { diff: staleText(status.diff, t) }) });
+  }
+  // A cancelled job is not a failure: the user stopped it, and the button they pressed is all the
+  // report they need (A §10's table gives `cancelled` no message of its own).
+  if (lastFailure !== null && lastFailure.kind !== "cancelled") {
+    banners.push({ tone: "danger", text: t("banner.job_failed", { message: lastFailure.message }) });
+  }
+  if (error !== null) {
+    banners.push({
+      tone: "danger",
+      text: `${t(`error.${error.kind}`)} · ${error.message}`,
+      onDismiss: () => {
+        useWorkspace.getState().setError(null);
+      },
+    });
+  }
+
+  return (
+    <div className="flex h-full flex-col bg-bg">
+      <TopBar view={view} status={status} />
+      {banners.map((banner, i) => (
+        // Two banners of the same tone can only differ by their text, which is what keys them.
+        <Banner key={`${banner.tone}-${String(i)}-${banner.text}`} {...banner} />
+      ))}
+
+      <div className="flex min-h-0 flex-1">
+        {leftOpen ? (
+          <aside className={clsx("shrink-0 overflow-hidden border-r border-border bg-panel", leftWidth(mode))}>
+            {panes.left}
+          </aside>
+        ) : null}
+
+        <main
+          className={clsx(
+            "relative min-w-0 flex-1 overflow-hidden",
+            status.kind === "empty" ? "bg-bg" : "bg-viewport text-viewport-text",
+          )}
+        >
+          {status.kind === "empty" ? <DropZone /> : panes.centre}
+        </main>
+
+        {rightOpen ? (
+          <aside className="w-[260px] shrink-0 overflow-hidden border-l border-border bg-panel">{panes.right}</aside>
+        ) : null}
+      </div>
+
+      <StatusLine view={view} status={status} />
+    </div>
+  );
+}

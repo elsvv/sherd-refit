@@ -1,4 +1,7 @@
 {
+  "app": {
+    "name": "Sherd Refit"
+  },
   "status": {
     "empty": "Нет входных данных",
     "input_missing": "Вход недоступен",
@@ -28,5 +31,96 @@
   "stage": {
     "preprocess": "Предобработка сканов",
     "display": "Превью и модели"
+  },
+  "welcome": {
+    "tagline": "Сборка 3D-сканов керамических фрагментов",
+    "create": "Создать воркспейс…",
+    "open": "Открыть…",
+    "create_title": "Папка нового воркспейса",
+    "open_title": "Папка воркспейса",
+    "recent": "Недавние",
+    "recent_empty": "Пока ни одного",
+    "unavailable": "папка недоступна"
+  },
+  "date": {
+    "today": "сегодня",
+    "yesterday": "вчера",
+    "days_ago": "{{n}} дн. назад"
+  },
+  "topbar": {
+    "menu": "Меню воркспейса",
+    "modes": "Режимы",
+    "no_runs": "Прогонов ещё нет"
+  },
+  "menu": {
+    "open_other": "Открыть другой…",
+    "close": "Закрыть",
+    "language": "Язык",
+    "language_ru": "Русский",
+    "language_en": "English",
+    "theme": "Тема",
+    "theme_system": "Как в системе",
+    "theme_light": "Светлая",
+    "theme_dark": "Тёмная"
+  },
+  "mode": {
+    "input": "Вход",
+    "assembly": "Сборка",
+    "review": "Ревью",
+    "locked": "Появится после первой сборки"
+  },
+  "pane": {
+    "left": "Левая панель",
+    "right": "Правая панель"
+  },
+  "action": {
+    "pick_input": "Выбрать папку со сканами",
+    "pick_input_title": "Папка со сканами",
+    "prepare": "Подготовить",
+    "cancel": "Отменить",
+    "assemble": "Собрать…",
+    "assemble_soon": "Сборка — в следующей версии",
+    "relink": "Указать папку заново"
+  },
+  "counts": {
+    "fragments_one": "{{count}} фрагмент",
+    "fragments_few": "{{count}} фрагмента",
+    "fragments_many": "{{count}} фрагментов",
+    "fragments_other": "{{count}} фрагмента",
+    "warnings": "{{n}} предупр.",
+    "excluded_one": "{{count}} исключён",
+    "excluded_few": "{{count}} исключено",
+    "excluded_many": "{{count}} исключено",
+    "excluded_other": "{{count}} исключено"
+  },
+  "job": {
+    "elapsed": "прошло {{time}}"
+  },
+  "banner": {
+    "input_missing": "Папка со сканами недоступна: она переехала или диск отключён.",
+    "stale": "Папка входа изменилась: {{diff}}",
+    "stale_added_one": "+{{count}} файл",
+    "stale_added_few": "+{{count}} файла",
+    "stale_added_many": "+{{count}} файлов",
+    "stale_added_other": "+{{count}} файла",
+    "stale_removed": "−{{n}}",
+    "stale_changed_one": "{{count}} изменён",
+    "stale_changed_few": "{{count}} изменены",
+    "stale_changed_many": "{{count}} изменены",
+    "stale_changed_other": "{{count}} изменены",
+    "stale_excluded_one": "{{count}} исключён",
+    "stale_excluded_few": "{{count}} исключены",
+    "stale_excluded_many": "{{count}} исключены",
+    "stale_excluded_other": "{{count}} исключены",
+    "stale_included_one": "{{count}} возвращён",
+    "stale_included_few": "{{count}} возвращены",
+    "stale_included_many": "{{count}} возвращены",
+    "stale_included_other": "{{count}} возвращены",
+    "job_failed": "Подготовка не удалась: {{message}}",
+    "dismiss": "Скрыть"
+  },
+  "drop": {
+    "title": "Перетащите сюда папку со сканами или выберите её",
+    "formats": ".ply .obj .stl .off"
   }
 }

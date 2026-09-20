@@ -1,4 +1,7 @@
 {
+  "app": {
+    "name": "Sherd Refit"
+  },
   "status": {
     "empty": "No input",
     "input_missing": "Input unavailable",
@@ -28,5 +31,84 @@
   "stage": {
     "preprocess": "Preprocessing scans",
     "display": "Previews and meshes"
+  },
+  "welcome": {
+    "tagline": "Assembling 3D scans of ceramic fragments",
+    "create": "Create a workspace…",
+    "open": "Open…",
+    "create_title": "Folder for the new workspace",
+    "open_title": "Workspace folder",
+    "recent": "Recent",
+    "recent_empty": "None yet",
+    "unavailable": "folder unavailable"
+  },
+  "date": {
+    "today": "today",
+    "yesterday": "yesterday",
+    "days_ago": "{{n}} days ago"
+  },
+  "topbar": {
+    "menu": "Workspace menu",
+    "modes": "Modes",
+    "no_runs": "No runs yet"
+  },
+  "menu": {
+    "open_other": "Open another…",
+    "close": "Close",
+    "language": "Language",
+    "language_ru": "Русский",
+    "language_en": "English",
+    "theme": "Theme",
+    "theme_system": "Follow the system",
+    "theme_light": "Light",
+    "theme_dark": "Dark"
+  },
+  "mode": {
+    "input": "Input",
+    "assembly": "Assembly",
+    "review": "Review",
+    "locked": "Appears after the first assembly"
+  },
+  "pane": {
+    "left": "Left pane",
+    "right": "Right pane"
+  },
+  "action": {
+    "pick_input": "Choose the folder with the scans",
+    "pick_input_title": "Folder with the scans",
+    "prepare": "Prepare",
+    "cancel": "Cancel",
+    "assemble": "Assemble…",
+    "assemble_soon": "Assembly comes in the next version",
+    "relink": "Point at the folder again"
+  },
+  "counts": {
+    "fragments_one": "{{count}} fragment",
+    "fragments_other": "{{count}} fragments",
+    "warnings": "{{n}} warnings",
+    "excluded_one": "{{count}} excluded",
+    "excluded_other": "{{count}} excluded"
+  },
+  "job": {
+    "elapsed": "elapsed {{time}}"
+  },
+  "banner": {
+    "input_missing": "The folder with the scans is unavailable: it has moved, or its disk is disconnected.",
+    "stale": "The input folder has changed: {{diff}}",
+    "stale_added_one": "+{{count}} file",
+    "stale_added_other": "+{{count}} files",
+    "stale_removed": "−{{n}}",
+    "stale_changed_one": "{{count}} changed",
+    "stale_changed_other": "{{count}} changed",
+    "stale_excluded_one": "{{count}} excluded",
+    "stale_excluded_other": "{{count}} excluded",
+    "stale_included_one": "{{count}} brought back",
+    "stale_included_other": "{{count}} brought back",
+    "job_failed": "Preparation failed: {{message}}",
+    "dismiss": "Dismiss"
+  },
+  "drop": {
+    "title": "Drop a folder of scans here, or choose one",
+    "formats": ".ply .obj .stl .off"
   }
 }

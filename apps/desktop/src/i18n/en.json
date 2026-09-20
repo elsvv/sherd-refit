@@ -110,5 +110,9 @@
   "drop": {
     "title": "Drop a folder of scans here, or choose one",
     "formats": ".ply .obj .stl .off"
+  },
+  "viewer": {
+    "loading": "Loading the model…",
+    "failed": "The model could not be loaded: {{message}}"
   }
 }

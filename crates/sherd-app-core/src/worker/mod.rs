@@ -4,12 +4,16 @@
 //! tested. An abort must end a run and not the window, the memory must go back to the OS, and a
 //! hard kill must exist behind the cooperative cancel.
 
+mod prepare;
+
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sherd_core::progress::{Cancel, Progress, Watch};
+
+pub use prepare::{INDEX_FILE, THICKNESS_OUTLIER};
 
 use crate::protocol::{Event, FailKind, Job, PROTOCOL, Request};
 
@@ -200,7 +204,8 @@ fn dispatch(job: Job, context: &Context) -> Result<Event, Failure> {
             });
             Ok(Event::Done { counts: None, engine: None, params: None })
         }
-        Job::Prepare(_) | Job::Run(_) => Err(Failure::new(
+        Job::Prepare(job) => prepare::prepare(&job, context),
+        Job::Run(_) => Err(Failure::new(
             FailKind::Protocol,
             "this build of the worker does not run this job yet",
         )),

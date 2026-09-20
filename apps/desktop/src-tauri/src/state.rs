@@ -10,6 +10,12 @@
 //! other. Neither is ever held while a worker is being *driven*; the job slot alone is held
 //! across the spawn of one, which is what keeps two clicks from starting two workers on the same
 //! folder (see [`crate::jobs::start_prepare`]).
+//!
+//! A command that only *reads* the slot holds it just the same, to the end of what it is doing.
+//! Sampling it and letting go leaves a gap in which a job can start, and everything such a
+//! command goes on to do is then wrong about that job: a view would tell the window `job: null`
+//! about a worker that is running, and closing or reopening the workspace would drop the
+//! `Workspace` — and with it A §10's lock — out from under one.
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -32,6 +38,17 @@ pub(crate) struct JobSlot {
     pub(crate) run_id: Option<String>,
     /// How to stop it (A §2.2).
     pub(crate) canceller: Canceller,
+}
+
+impl JobSlot {
+    /// What the window is told about this job (A §5's «preparing» and «running» rows).
+    ///
+    /// A method on the slot rather than on [`AppState`], so that the caller keeps the guard it
+    /// read this from: a view is only true of the moment the job slot says it is, and the
+    /// commands that build one hold that lock while they do.
+    pub(crate) fn view(&self) -> JobView {
+        JobView { kind: self.kind, run_id: self.run_id.clone() }
+    }
 }
 
 /// Everything the shell keeps between commands.
@@ -65,17 +82,5 @@ impl AppState {
     /// [`CommandError::poisoned`].
     pub(crate) fn job(&self) -> Result<MutexGuard<'_, Option<JobSlot>>, CommandError> {
         self.job.lock().map_err(|_| CommandError::poisoned("job"))
-    }
-
-    /// The running job as the view names it (A §5), or `None`.
-    ///
-    /// # Errors
-    ///
-    /// [`CommandError::poisoned`].
-    pub(crate) fn job_view(&self) -> Result<Option<JobView>, CommandError> {
-        Ok(self
-            .job()?
-            .as_ref()
-            .map(|slot| JobView { kind: slot.kind, run_id: slot.run_id.clone() }))
     }
 }

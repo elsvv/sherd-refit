@@ -16,7 +16,7 @@ use tauri::{AppHandle, Manager, State};
 use crate::error::CommandError;
 use crate::jobs;
 use crate::recent::{self, RecentEntry};
-use crate::state::AppState;
+use crate::state::{AppState, JobSlot};
 
 /// Which build this is (A §7.4's settings screen, and every bug report).
 #[derive(Clone, Debug, Serialize)]
@@ -88,7 +88,11 @@ pub(crate) fn workspace_open(
 /// folder, and letting go of the lock under it is the one thing A §10's lock exists to prevent.
 #[tauri::command]
 pub(crate) fn workspace_close(state: State<'_, AppState>) -> Result<(), CommandError> {
-    if state.job()?.is_some() {
+    // Held, not sampled — and to the end of the function, for the reason `open_with` gives: a
+    // slot let go of after the check leaves a gap in which `prepare_start` starts a worker, and
+    // the `None` below would then release the worker's own workspace lock under it.
+    let slot = state.job()?;
+    if slot.is_some() {
         return Err(CommandError::busy());
     }
     *state.workspace()? = None;
@@ -104,7 +108,10 @@ pub(crate) fn workspace_close(state: State<'_, AppState>) -> Result<(), CommandE
 /// cannot be listed.
 #[tauri::command]
 pub(crate) fn workspace_view(state: State<'_, AppState>) -> Result<WorkspaceView, CommandError> {
-    let job = state.job_view()?;
+    // The slot stays locked while the view is built, so the view cannot say `job: null` about a
+    // job started in between (A §5: the window keeps no second opinion, so this one must be true).
+    let slot = state.job()?;
+    let job = slot.as_ref().map(JobSlot::view);
     let held = state.workspace()?;
     let ws = held.as_ref().ok_or_else(CommandError::no_workspace)?;
     Ok(view::build(ws, job)?)
@@ -121,7 +128,9 @@ pub(crate) fn input_link(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<WorkspaceView, CommandError> {
-    let job = state.job_view()?;
+    // Locked across the write and the view, as in `workspace_view`.
+    let slot = state.job()?;
+    let job = slot.as_ref().map(JobSlot::view);
     let mut held = state.workspace()?;
     let ws = held.as_mut().ok_or_else(CommandError::no_workspace)?;
     ws.set_input(&PathBuf::from(path))?;
@@ -139,7 +148,9 @@ pub(crate) fn fragment_exclude(
     name: String,
     excluded: bool,
 ) -> Result<WorkspaceView, CommandError> {
-    let job = state.job_view()?;
+    // Locked across the write and the view, as in `workspace_view`.
+    let slot = state.job()?;
+    let job = slot.as_ref().map(JobSlot::view);
     let mut held = state.workspace()?;
     let ws = held.as_mut().ok_or_else(CommandError::no_workspace)?;
     ws.set_excluded(&name, excluded)?;
@@ -181,13 +192,20 @@ pub(crate) fn job_cancel(state: State<'_, AppState>) -> Result<(), CommandError>
 /// `running` by a crash are marked before any worker of ours exists, so a `running` on disk can
 /// only be nobody's; and the asset protocol is widened to the new root before the window is given
 /// a view naming files under it (A §2.1 — the window is given nothing outside the workspace).
+///
+/// The job slot is *held* for all of it, and not merely read: let go of after the check, it
+/// leaves a gap in which `prepare_start` can fill the slot and spawn a worker on the workspace
+/// that `*held = None` below is about to drop — releasing A §10's `sherd-workspace.lock` under a
+/// live worker of ours, and letting `run::mark_interrupted` write `interrupted` over a run that
+/// is still being written. Job first, then the workspace, as [`crate::state`] requires.
 fn open_with(
     app: &AppHandle,
     state: &AppState,
     path: &Path,
     open: fn(&Path) -> sherd_app_core::Result<Workspace>,
 ) -> Result<WorkspaceView, CommandError> {
-    if state.job()?.is_some() {
+    let slot = state.job()?;
+    if slot.is_some() {
         return Err(CommandError::busy());
     }
     let mut held = state.workspace()?;
@@ -197,7 +215,7 @@ fn open_with(
     run::mark_interrupted(&ws.runs_dir(), &now)?;
     app.asset_protocol_scope().allow_directory(ws.root(), true)?;
     recent::touch(&config_dir(app)?, ws.root(), &now);
-    // No job: nothing may be running, or the `busy` above would have answered.
+    // No job: nothing was running, and the slot is still held here, so nothing may have started.
     let view = view::build(&ws, None)?;
     *held = Some(ws);
     Ok(view)

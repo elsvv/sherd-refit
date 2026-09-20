@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/sherd-core", "crates/sherd-gpu", "crates/sherd-cli", "crates/sherd-parity"]
+members = [
+    "crates/sherd-core",
+    "crates/sherd-gpu",
+    "crates/sherd-backend",
+    "crates/sherd-cli",
+    "crates/sherd-parity",
+]
 
 # `sherd-py` (pyo3 module) joins the workspace in phase 3a; its dependencies are deliberately
 # absent here until then. `sherd-gpu` joined in phase 2a (task G1).
@@ -83,6 +89,9 @@ proptest = "1.11.0"
 # --- workspace members ------------------------------------------------------------------------
 sherd-core = { path = "crates/sherd-core" }
 sherd-gpu = { path = "crates/sherd-gpu" }
+# `default-features = false`: a front end turns `sherd-backend/gpu` on through its own `gpu`
+# feature, so that `--no-default-features` on the front end reaches all the way down (D §2).
+sherd-backend = { path = "crates/sherd-backend", default-features = false }
 sherd-parity = { path = "crates/sherd-parity" }
 
 # Lint baseline for every crate; each member opts in with `[lints] workspace = true`.

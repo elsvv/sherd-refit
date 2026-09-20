@@ -12,10 +12,11 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use sherd_core::Params;
 use sherd_core::assembly::constraints::Constraints;
+use sherd_core::matching::verify::Scores;
 use sherd_core::objects::ObjectParams;
 use sherd_core::pipeline::RunOptions;
 use sherd_core::report::FragmentStats;
-use sherd_core::tiers::Thresholds;
+use sherd_core::tiers::{Evidence, Thresholds, Tier};
 
 pub use crate::run::{EngineInfo, FailKind, RunCounts, StageTime};
 
@@ -332,6 +333,35 @@ pub struct UnplacedDto {
     pub b: String,
     /// What to tell the reviewer — the tier's refusal, or the conflict that dropped it.
     pub reason: String,
+}
+
+/// One row of `candidates.json` (A §4), the index the review screen works from: a row carries
+/// everything A §8.3 puts on the screen for one candidate, so that opening a join reads a few
+/// hundred kilobytes and never the 54 000 rows of `report.json`.
+///
+/// By name and not by [`sherd_core::FragId`]: the index outlives the collection's numbering, and
+/// A §8.1's decisions are about names too.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CandidateRow {
+    /// The fragment the pose maps *into* (R §4.1's first name).
+    pub a: String,
+    /// The fragment the pose moves.
+    pub b: String,
+    /// `T`: `p_a = T · p_b`, row-major — the matrix the viewer puts on **b**.
+    pub pose: [[f64; 4]; 4],
+    /// R §5.7's ranking key, `seam · tight`: what the queue sorts on.
+    pub score: f64,
+    /// Every number R §6 produced, for the scores panel against its thresholds.
+    pub scores: Scores,
+    /// The band it ended in — after the constraints and the object round, which is the band the
+    /// run acted on.
+    pub tier: Tier,
+    /// Whether R §8 built with this pair. Several candidates of a pair routinely converge on one
+    /// placement, so the flag is the pair's and not one pose's.
+    pub used: bool,
+    /// The tier pass's evidence, which is what A §8.3 says «почему не подтверждено» from; `None`
+    /// where the pass did not run or never probed this candidate.
+    pub evidence: Option<Evidence>,
 }
 
 #[cfg(test)]

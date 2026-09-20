@@ -5,15 +5,18 @@
 //! hard kill must exist behind the cooperative cancel.
 
 mod prepare;
+mod run;
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sherd_core::progress::{Cancel, Progress, Watch};
 
 pub use prepare::{INDEX_FILE, THICKNESS_OUTLIER};
+pub use run::{CANDIDATES_FILE, MATCH_STATE_FILE, REJECTED_PER_FRAGMENT};
 
 use crate::protocol::{Event, FailKind, Job, PROTOCOL, Request};
 
@@ -125,6 +128,20 @@ pub(crate) fn fail_kind(error: &sherd_core::Error) -> FailKind {
     }
 }
 
+/// A §10's `disk` class, naming the file it happened to.
+pub(crate) fn io_failure(path: &Path, e: &dyn std::fmt::Display) -> Failure {
+    Failure::new(FailKind::Disk, format!("{}: {e}", path.display()))
+}
+
+/// This crate's own error as a failure: an engine error keeps the class it already has
+/// (A §10), and everything else here is a workspace file that could not be read or written.
+pub(crate) fn app_failure(error: &crate::AppError) -> Failure {
+    match error {
+        crate::AppError::Core(e) => Failure::new(fail_kind(e), e.to_string()),
+        other => Failure::new(FailKind::Disk, other.to_string()),
+    }
+}
+
 /// Serves one job: `Hello`, the job's events, then `Done` or `Failed`. Returns the process's exit
 /// code — 0 done, 1 failed, 2 cancelled.
 ///
@@ -205,10 +222,7 @@ fn dispatch(job: Job, context: &Context) -> Result<Event, Failure> {
             Ok(Event::Done { counts: None, engine: None, params: None })
         }
         Job::Prepare(job) => prepare::prepare(&job, context),
-        Job::Run(_) => Err(Failure::new(
-            FailKind::Protocol,
-            "this build of the worker does not run this job yet",
-        )),
+        Job::Run(job) => run::run(&job, context),
     }
 }
 

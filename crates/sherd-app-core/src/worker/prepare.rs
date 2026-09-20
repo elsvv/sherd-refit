@@ -13,7 +13,7 @@ use sherd_core::memory::{self, Budget, MemorySemaphore};
 use sherd_core::render::{self, Paint, Splat};
 use sherd_core::report::FragmentStats;
 
-use super::{Context, Failure};
+use super::{Context, Failure, app_failure, io_failure};
 use crate::protocol::{Event, FailKind, FragmentInfo, PrepareJob, Warning};
 use crate::{atomic, snapshot};
 
@@ -131,20 +131,6 @@ pub(crate) fn prepare(job: &PrepareJob, context: &Context) -> Result<Event, Fail
 /// The memory the pass may hold: what the sheet asked for, or what the machine suggests.
 fn budget(gb: Option<f64>) -> Budget {
     gb.map_or_else(Budget::default_for_machine, Budget::gigabytes)
-}
-
-/// A §10's `disk` class, naming the file it happened to.
-fn io_failure(path: &Path, e: &dyn std::fmt::Display) -> Failure {
-    Failure::new(FailKind::Disk, format!("{}: {e}", path.display()))
-}
-
-/// This crate's own error as a failure: an engine error keeps the class it already has
-/// (A §10), and everything else here is a workspace file that could not be read or written.
-fn app_failure(error: &crate::AppError) -> Failure {
-    match error {
-        crate::AppError::Core(e) => Failure::new(super::fail_kind(e), e.to_string()),
-        other => Failure::new(FailKind::Disk, other.to_string()),
-    }
 }
 
 /// The three files one prepared fragment has in `fragments/` (A §3.5).

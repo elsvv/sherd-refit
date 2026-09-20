@@ -3,6 +3,8 @@
 //! files. Nothing here depends on Tauri, which is what lets all of it be tested headless.
 
 pub mod atomic;
+pub mod run;
+pub mod snapshot;
 pub mod workspace;
 
 use std::path::PathBuf;

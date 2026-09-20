@@ -4,6 +4,7 @@
 
 pub mod atomic;
 pub mod decisions;
+pub mod host;
 pub mod protocol;
 pub mod run;
 pub mod snapshot;

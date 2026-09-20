@@ -74,6 +74,11 @@ pub(crate) struct EngineFinished {
 /// (`{ "Done": { … } } | { "Failed": { … } }`), so the frontend imports that binding and this is
 /// the one thing that has to keep matching it. [`From<&Outcome>`] below names every variant and
 /// every field, so a change in `sherd-app-core` is a compile error here and not a wrong payload.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the mirrored `host::Outcome` allows it for the same reason — `Done` carries the run's \
+              resolved `Params`, and exactly one of these is built per job, on its way out"
+)]
 #[derive(Clone, Debug, Serialize)]
 pub(crate) enum OutcomeDto {
     /// It finished. A `Prepare` fills none of the three blocks; a run fills all of them.

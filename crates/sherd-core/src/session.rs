@@ -330,8 +330,7 @@ pub fn refine_poses(
     budget: Budget,
     watch: &Watch,
 ) -> Result<Vec<Matrix4<f64>>> {
-    let _ = watch; // R §9's own progress arrives with A §3.4; the signature is already its shape.
-    pipeline::refine(engine, fragments, groups, poses, used, params, budget)
+    pipeline::refine(engine, fragments, groups, poses, used, params, budget, watch)
 }
 
 /// R §11's writers and `export/` over a reviewed assembly: the files `sherd-refit-rs run` writes,

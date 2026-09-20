@@ -96,6 +96,7 @@ use crate::matching::pair::{Candidate, Pair, RivalSource, SurfaceLadder, WideRiv
 use crate::matching::scales::Scales;
 use crate::matching::verify::{self, Scores, Surfaces, over, pose_inverse, under};
 use crate::params::Params;
+use crate::progress::Watch;
 use crate::types::FragId;
 
 /// How far apart two candidates must place the sherd before they count as **different
@@ -959,8 +960,25 @@ pub fn classify(
     params: &Params,
     thresholds: &Thresholds,
 ) -> TierReport {
+    classify_watched(engine, fragments, candidates, params, thresholds, &Watch::default())
+}
+
+/// [`classify`] under D §5's progress callback (A §3.4): one report per pair probed.
+///
+/// Per pair and not per candidate, because [`probe`] climbs the ladders once for a pair and
+/// answers for every accepted candidate of it at the end — the pair is the unit of work, so it is
+/// the unit the bar can honestly count. The pass reports nothing else: the bands themselves are
+/// arithmetic over numbers already in hand and take no measurable time.
+pub fn classify_watched(
+    engine: Engine<'_>,
+    fragments: &[Fragment],
+    candidates: &[Candidate],
+    params: &Params,
+    thresholds: &Thresholds,
+    watch: &Watch,
+) -> TierReport {
     let started = std::time::Instant::now();
-    let probes = probe(engine, fragments, candidates, params);
+    let probes = probe_watched(engine, fragments, candidates, params, watch);
     let evidence: Vec<Option<Evidence>> = candidates
         .iter()
         .zip(&probes)
@@ -1011,6 +1029,22 @@ pub fn probe(
     candidates: &[Candidate],
     params: &Params,
 ) -> Vec<Option<Probes>> {
+    probe_watched(engine, fragments, candidates, params, &Watch::default())
+}
+
+/// [`probe`] under D §5's progress callback (A §3.4), reporting the stage `"tiers"`.
+///
+/// The report is the last statement of the pair's job, as [`preprocess_watched`'s
+/// is](crate::pipeline::preprocess_watched): a pair either produced its whole row of [`Probes`] or
+/// produced none of it, so what the bar counts is work that is finished and not work that has
+/// started.
+pub fn probe_watched(
+    engine: Engine<'_>,
+    fragments: &[Fragment],
+    candidates: &[Candidate],
+    params: &Params,
+    watch: &Watch,
+) -> Vec<Option<Probes>> {
     // Task S3: a rule whose margin arm wants a re-search, on a run that performs none, is the
     // support arm alone -- every candidate without an independent join beside it stays probable.
     // That is a legitimate thing to ask for and a surprising thing to get by accident, so it says
@@ -1058,16 +1092,24 @@ pub fn probe(
         .map(|(&key, list)| (key, list.clone()))
         .collect();
 
+    let probed = std::sync::atomic::AtomicUsize::new(0);
+    let to_probe = work.len();
     let found: Vec<(usize, Probes)> = work
         .par_iter()
         .flat_map(|(key, list)| {
-            one_pair(
+            let row = one_pair(
                 engine,
                 Collection { fragments, redraws: &redraws, candidates, best: &best },
                 list,
                 *key,
                 params,
-            )
+            );
+            watch.advance(
+                "tiers",
+                probed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
+                to_probe,
+            );
+            row
         })
         .collect();
 

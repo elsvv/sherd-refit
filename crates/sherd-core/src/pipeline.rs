@@ -657,7 +657,8 @@ pub fn run_with(
     // to be decided first. It needs nothing the assembly produces — the support count walks the
     // accepted-candidate graph and not the groups — and it needs R §6.1's fracture BVHs, which are
     // alive from the last pair until the block that releases them below.
-    let mut tiered = tier_pass(engine, &fragments, &mut candidates, params, &mut stages);
+    let mut tiered =
+        tier_pass(engine, &fragments, &mut candidates, params, &options.watch, &mut stages);
     // 2c'. Task R1's agreement mode, off unless `--tier-agree-seeds` is above one: the whole
     // matching and the whole tier pass again, at another seed, and a join keeps the confirmed
     // band only where every run put the sherd in the same place.
@@ -748,7 +749,8 @@ pub fn run_with(
         // margin, the placements and the support count are all statements about the list as a
         // whole, and a pair rematched with the larger budget changes them for pairs it never
         // touched. The pass is repeated rather than patched for that reason.
-        tiered = tier_pass(engine, &fragments, &mut candidates, params, &mut stages);
+        tiered =
+            tier_pass(engine, &fragments, &mut candidates, params, &options.watch, &mut stages);
         // And the agreement mode again with it, for the same reason: the pass is a statement about
         // the candidate list the tier just judged, and this is a different list.
         agree_pass(
@@ -900,8 +902,16 @@ pub fn run_with(
     let mut poses = assembly.poses.clone();
     if options.refine && assembly.groups.iter().any(|g| g.len() > 1) {
         let started = Instant::now();
-        poses =
-            refine(engine, &fragments, &assembly.groups, &poses, &used, params, options.memory)?;
+        poses = refine(
+            engine,
+            &fragments,
+            &assembly.groups,
+            &poses,
+            &used,
+            params,
+            options.memory,
+            &options.watch,
+        )?;
         stages.finish("refine", started.elapsed().as_secs_f64());
         tracing::info!(seconds = stages.timings["refine"], joins = used.len(), "refinement done");
     }
@@ -1381,7 +1391,14 @@ fn agree_pass(
             &options.watch,
         )?;
         let mut theirs: Vec<Candidate> = per_pair.into_iter().flatten().collect();
-        let banded = crate::tiers::classify(engine, &redrawn, &theirs, &at_seed, &inner);
+        let banded = crate::tiers::classify_watched(
+            engine,
+            &redrawn,
+            &theirs,
+            &at_seed,
+            &inner,
+            &options.watch,
+        );
         for (c, &tier) in theirs.iter_mut().zip(&banded.tiers) {
             c.tier = tier;
         }
@@ -1440,11 +1457,13 @@ fn tier_pass(
     fragments: &[Fragment],
     candidates: &mut [Candidate],
     params: &Params,
+    watch: &Watch,
     stages: &mut StageLog,
 ) -> Option<crate::tiers::TierReport> {
     let thresholds = params.tiers?;
     let started = Instant::now();
-    let report = crate::tiers::classify(engine, fragments, candidates, params, &thresholds);
+    let report =
+        crate::tiers::classify_watched(engine, fragments, candidates, params, &thresholds, watch);
     for (c, &tier) in candidates.iter_mut().zip(&report.tiers) {
         c.tier = tier;
     }
@@ -1605,16 +1624,22 @@ fn match_all(
                             // with the tier pass off neither pays for it nor carries it.
                             params.tiers.is_some(),
                         );
+                        // Counted outside the log line and not inside it: `tracing` does not
+                        // evaluate a field's expression when nothing is subscribed at `info`, so
+                        // a `fetch_add` written as a field is a count that exists only while
+                        // someone is watching the log — and the progress callback is for the
+                        // people who are watching something else (A §3.4).
+                        let at = done.fetch_add(1, Ordering::Relaxed) + 1;
                         tracing::info!(
                             pair = %format!("{}__{}", fragments[a].name, fragments[b].name),
                             seconds = started.elapsed().as_secs_f64(),
                             candidates = cs.len(),
                             accepted = cs.iter().filter(|c| c.accepted).count(),
-                            at = done.fetch_add(1, Ordering::Relaxed) + 1,
+                            at,
                             of = pairs.len(),
                             "pair matched"
                         );
-                        watch.advance("matching", done.load(Ordering::Relaxed), pairs.len());
+                        watch.advance("matching", at, pairs.len());
                         Ok((k, cs))
                     })
                     .collect::<Result<Vec<_>>>()
@@ -1745,6 +1770,7 @@ fn second_pass_pairs(
 ///
 /// `pub(crate)` for [`crate::session::refine_poses`], which runs it over the groups a review left
 /// unrefined (A §3.1) rather than over all of them.
+#[allow(clippy::too_many_arguments, reason = "R §9's inputs, one argument each")]
 pub(crate) fn refine(
     engine: Engine<'_>,
     fragments: &[Fragment],
@@ -1753,6 +1779,7 @@ pub(crate) fn refine(
     used: &[(FragId, FragId)],
     params: &Params,
     budget: Budget,
+    watch: &Watch,
 ) -> Result<Vec<Matrix4<f64>>> {
     let in_group: Vec<bool> = {
         let mut flags = vec![false; fragments.len()];
@@ -1763,7 +1790,7 @@ pub(crate) fn refine(
         }
         flags
     };
-    let clouds = fracture_clouds(fragments, &in_group, budget)?.0;
+    let clouds = fracture_clouds(fragments, &in_group, budget, watch)?.0;
     let pieces: Vec<RefinePiece<'_>> = fragments
         .iter()
         .zip(&clouds)
@@ -1791,12 +1818,19 @@ pub(crate) fn refine(
 ///
 /// Returns the clouds and what the semaphore did, so the caller can log it as preprocessing does
 /// and the test can read it.
+///
+/// It reports progress under the stage `"refine"` (A §3.4): the clouds are where R §9's time goes
+/// — one whole original scan read per grouped fragment — and the spanning walk that follows is
+/// arithmetic over what they hold, so a bar that counts clouds is counting the stage.
 fn fracture_clouds(
     fragments: &[Fragment],
     in_group: &[bool],
     budget: Budget,
+    watch: &Watch,
 ) -> Result<(Vec<Option<FractureCloud>>, memory::SemaphoreStats)> {
     let semaphore = MemorySemaphore::new(budget);
+    let built = AtomicUsize::new(0);
+    let to_build = in_group.iter().filter(|&&inside| inside).count();
     let clouds: Vec<Option<FractureCloud>> = fragments
         .par_iter()
         .zip(in_group)
@@ -1826,6 +1860,7 @@ fn fracture_clouds(
             );
             drop(original);
             drop(permit);
+            watch.advance("refine", built.fetch_add(1, Ordering::Relaxed) + 1, to_build);
             Ok(Some(cloud))
         })
         .collect::<Result<Vec<Option<FractureCloud>>>>()?;
@@ -1967,8 +2002,8 @@ pub fn write_previews(
 #[cfg(test)]
 mod tests {
     use super::{
-        BLOCK, Budget, RunOptions, block_size, pair_blocks, preprocess, run, second_pass_pairs,
-        set_threads,
+        BLOCK, Budget, RunOptions, Watch, block_size, pair_blocks, preprocess, run,
+        second_pass_pairs, set_threads,
     };
     use crate::collection::Entry;
     use crate::matching::pair::Candidate;
@@ -2016,10 +2051,12 @@ mod tests {
                 .collect();
         let in_group = vec![true; fragments.len()];
 
-        let (free, _) = super::fracture_clouds(&fragments, &in_group, Budget::unbounded())
-            .expect("the clouds build");
-        let (bounded, stats) = super::fracture_clouds(&fragments, &in_group, Budget::bytes(1))
-            .expect("the clouds build under a budget that admits nothing");
+        let (free, _) =
+            super::fracture_clouds(&fragments, &in_group, Budget::unbounded(), &Watch::default())
+                .expect("the clouds build");
+        let (bounded, stats) =
+            super::fracture_clouds(&fragments, &in_group, Budget::bytes(1), &Watch::default())
+                .expect("the clouds build under a budget that admits nothing");
 
         assert_eq!(stats.peak_running, 1, "one scan at a time: {stats:?}");
         assert!(

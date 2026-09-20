@@ -199,3 +199,38 @@ fn a_reviewed_assembly_is_written_by_the_runs_own_writers() {
     assert!(report.contains("## Constraints"), "the reviewer's decision is in the report");
     assert!(report.contains("pieceA"));
 }
+
+/// A `Progress` that keeps what it was told, so the test can read the last report of a stage.
+#[derive(Debug, Default)]
+struct Recorder(std::sync::Mutex<Vec<(String, usize, usize)>>);
+
+impl sherd_core::progress::Progress for Recorder {
+    fn advance(&self, stage: &str, done: usize, total: usize) {
+        self.0.lock().unwrap().push((stage.to_owned(), done, total));
+    }
+}
+
+#[test]
+fn the_tier_pass_and_the_refinement_report_their_progress() {
+    let recorder = std::sync::Arc::new(Recorder::default());
+    let out = scratch("progress");
+    let options = RunOptions {
+        // `rival_refused: false` is the one conjunct the slab needs off to confirm its join
+        // (`run_cli.rs`, `AMBIGUOUS`) — and R §9 only runs when something was assembled.
+        params: Params {
+            tiers: Some(Thresholds { rival_refused: false, ..Thresholds::default() }),
+            ..Params::default()
+        },
+        preview: false,
+        write_meshes: false,
+        watch: Watch { cancel: None, progress: Some(recorder.clone()) },
+        ..RunOptions::default()
+    };
+    pipeline::run(&slab(), &out, &options).expect("the slab runs");
+    let seen = recorder.0.lock().unwrap();
+    for stage in ["preprocess", "matching", "tiers", "refine"] {
+        let last = seen.iter().filter(|(s, ..)| s == stage).max_by_key(|(_, done, _)| *done);
+        let (_, done, total) = last.unwrap_or_else(|| panic!("`{stage}` reported nothing"));
+        assert!(*total > 0 && done == total, "`{stage}` ended at {done} of {total}");
+    }
+}

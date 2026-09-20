@@ -11,6 +11,9 @@ publish.workspace = true
 [features]
 default = ["gpu"]
 gpu = ["sherd-backend/gpu"]
+# The window's TypeScript types, written out by `cargo test --features ts` (A §2.2: the wire
+# contract has one source, and it is the Rust). Off by default — nothing the engine ships needs it.
+ts = ["dep:ts-rs"]
 
 [[bin]]
 name = "sherd-engine-worker"
@@ -28,6 +31,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+ts-rs = { workspace = true, optional = true }
 
 [lints]
 workspace = true

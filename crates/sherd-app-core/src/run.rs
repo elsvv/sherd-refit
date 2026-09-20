@@ -16,6 +16,7 @@ pub const RUN_FILE: &str = "run.json";
 pub const RUN_VERSION: u32 = 1;
 
 /// Why a job failed (A §10). The window turns a kind into a sentence and an action.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailKind {
@@ -38,6 +39,7 @@ pub enum FailKind {
 }
 
 /// Where a run is in its life.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RunStatus {
@@ -59,6 +61,7 @@ pub enum RunStatus {
 }
 
 /// What matched: D §4.3's engine block.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineInfo {
     /// `sherd-core`'s version.
@@ -72,6 +75,7 @@ pub struct EngineInfo {
 }
 
 /// One stage's wall clock.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StageTime {
     /// R §11.2's stage name.
@@ -81,6 +85,7 @@ pub struct StageTime {
 }
 
 /// What a finished run found — the numbers the history and the mode tabs show.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RunCounts {
     /// Fragments in the run.
@@ -104,6 +109,7 @@ pub struct RunCounts {
 }
 
 /// `run.json`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunFile {
     /// [`RUN_VERSION`].
@@ -118,9 +124,11 @@ pub struct RunFile {
     /// Where it is in its life.
     pub status: RunStatus,
     /// The launch sheet, as the window sent it.
+    #[cfg_attr(feature = "ts", ts(type = "Record<string, unknown>"))]
     pub spec: serde_json::Value,
     /// Every threshold it resolved to; filled when the run ends.
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "Record<string, unknown> | null"))]
     pub params: Option<Params>,
     /// The input it ran on (A §4, «Stale»).
     pub input: InputSnapshot,

@@ -208,6 +208,29 @@ pub fn serve(mut input: impl BufRead + Send + 'static, output: impl Write + Send
     }
 }
 
+/// The engine role of a binary (A §2.1): the bin target of this crate and the app's own
+/// executable under `--engine-worker` are this one call, so that the process the app spawns and
+/// the one the headless tests spawn cannot drift apart.
+///
+/// Sets `tracing` up first, because the log is the only place an engine failure explains itself
+/// (A §10): stderr, which the host appends to the run's `engine.log`, without ANSI — a log file is
+/// not a terminal — and never stdout, which belongs to the protocol and nothing else.
+///
+/// Returns the process's exit code: 0 done, 1 failed, 2 cancelled.
+pub fn serve_stdio() -> i32 {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("sherd=info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_target(false)
+        .init();
+    // `StdinLock<'static>` is `BufRead` but not `Send`, and `serve` reads the rest of the input on
+    // a thread of its own; a `BufReader` over `Stdin` is both.
+    serve(std::io::BufReader::new(std::io::stdin()), std::io::stdout())
+}
+
 /// Says why, and gives the exit code that goes with it.
 fn fail(emitter: &Emitter, failure: &Failure) -> i32 {
     emitter.emit(&Event::Failed { kind: failure.kind, message: failure.message.clone() });

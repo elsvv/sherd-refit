@@ -8,6 +8,7 @@ pub mod host;
 pub mod protocol;
 pub mod run;
 pub mod snapshot;
+pub mod view;
 pub mod worker;
 pub mod workspace;
 

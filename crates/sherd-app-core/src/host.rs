@@ -277,6 +277,7 @@ impl Drop for Worker {
     clippy::large_enum_variant,
     reason = "`Done` carries the run's resolved `Params`, and one `Outcome` is returned per run"
 )]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
     /// It finished. The three blocks are a run's; a `Prepare` and an `Info` fill none of them.
@@ -286,6 +287,7 @@ pub enum Outcome {
         /// What ran it.
         engine: Option<EngineInfo>,
         /// Every threshold it resolved to.
+        #[cfg_attr(feature = "ts", ts(type = "Record<string, unknown> | null"))]
         params: Option<Params>,
     },
     /// It did not.

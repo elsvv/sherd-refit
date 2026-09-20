@@ -92,6 +92,7 @@ pub enum Request {
 
 /// The launch sheet's executor (A §7.4), which is `sherd_core::Backend` with serde on it — the
 /// engine's own enum has none, deliberately, because it is not part of any file it writes.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendChoice {
@@ -105,6 +106,7 @@ pub enum BackendChoice {
 
 /// Which of A §7.4's three buttons the sheet came from. It changes nothing the engine reads — the
 /// thresholds below are the whole truth — and is carried so the history can say what was asked.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Preset {
@@ -117,6 +119,7 @@ pub enum Preset {
 }
 
 /// The subset of `RunOptions` the window sets (A §7.4); everything else is `RunOptions::default()`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunSpec {
     /// Which button the sheet came from.
@@ -128,6 +131,7 @@ pub struct RunSpec {
     /// The GPU memory budget in gigabytes, or `None` for the backend's own guess.
     pub gpu_memory_gb: Option<f64>,
     /// R §10's seed.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub seed: u64,
     /// Faces of the working mesh.
     pub target_faces: usize,
@@ -209,6 +213,7 @@ impl RunSpec {
     reason = "`Done` is the large one because it carries the run's resolved `Params`, and it is \
               said once, last; the variants that do arrive in numbers are `Stage` and `Progress`"
 )]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
@@ -256,6 +261,7 @@ pub enum Event {
         /// What ran it.
         engine: Option<EngineInfo>,
         /// Every threshold it resolved to.
+        #[cfg_attr(feature = "ts", ts(type = "Record<string, unknown> | null"))]
         params: Option<Params>,
     },
     /// The job is over and it did not. Always the last line (A §10).
@@ -268,6 +274,7 @@ pub enum Event {
 }
 
 /// One preprocessed fragment, as the window's collection table shows it (A §5).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FragmentInfo {
     /// The fragment's name (R §2).
@@ -275,10 +282,13 @@ pub struct FragmentInfo {
     /// Its file's name in the input folder.
     pub file: String,
     /// Bytes, for the input snapshot the host keeps (A §4).
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub size: u64,
     /// Modification time, milliseconds since the epoch.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub mtime_ms: i64,
     /// R §11.3's fragment row.
+    #[cfg_attr(feature = "ts", ts(as = "FragmentStatsTs"))]
     pub stats: FragmentStats,
     /// What the window should say about it in red.
     pub warnings: Vec<Warning>,
@@ -288,7 +298,43 @@ pub struct FragmentInfo {
     pub display_faces: usize,
 }
 
+/// [`sherd_core::report::FragmentStats`], field for field, for the TypeScript bindings only: the
+/// engine's type cannot derive `TS` from here, and A §2.2's wire contract must still have one
+/// source. [`crate::view`]'s tests compare the two field by field, so a field added to the
+/// engine's row and forgotten here fails the app's own test suite rather than the window.
+#[cfg(feature = "ts")]
+#[derive(Debug, Default, serde::Serialize, ts_rs::TS)]
+#[ts(export, rename = "FragmentStats")]
+pub struct FragmentStatsTs {
+    /// The fragment's name in the collection.
+    name: String,
+    /// Faces of the working mesh.
+    #[ts(type = "number")]
+    faces: u64,
+    /// Faces of the file, after R §3.1's cleaning and before the largest-component pass.
+    #[ts(type = "number")]
+    orig_faces: u64,
+    /// Vertices of the same.
+    #[ts(type = "number")]
+    orig_vertices: u64,
+    /// R §3.2's wall thickness.
+    thickness: f64,
+    /// R §3.2's unfiltered ray mode.
+    thickness_mode: f64,
+    /// R §3.3's `res`.
+    resolution: f64,
+    /// R §3.3.2's verdict.
+    watertight: bool,
+    /// The working mesh's bounding-box side lengths.
+    extent: [f64; 3],
+    /// Total area of the working mesh.
+    area: f64,
+    /// Fracture area over total area (R §3.4).
+    fracture_area_fraction: f64,
+}
+
 /// Something worth telling the reviewer about one fragment (A §5).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "warning", rename_all = "snake_case")]
 pub enum Warning {
@@ -304,6 +350,7 @@ pub enum Warning {
 }
 
 /// What was assembled, by name: the window has the meshes already and needs only the poses.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AssemblyDto {
     /// The groups, largest first, as the engine laid them out.
@@ -317,6 +364,7 @@ pub struct AssemblyDto {
 }
 
 /// One assembled group.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GroupDto {
     /// Its fragments, by name.
@@ -326,6 +374,7 @@ pub struct GroupDto {
 }
 
 /// One join of a group.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinDto {
     /// One fragment.
@@ -335,6 +384,7 @@ pub struct JoinDto {
 }
 
 /// A pair the assembly did not use, and why.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnplacedDto {
     /// One fragment.
@@ -351,6 +401,7 @@ pub struct UnplacedDto {
 ///
 /// By name and not by [`sherd_core::FragId`]: the index outlives the collection's numbering, and
 /// A §8.1's decisions are about names too.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CandidateRow {
     /// The fragment the pose maps *into* (R §4.1's first name).
@@ -362,15 +413,18 @@ pub struct CandidateRow {
     /// R §5.7's ranking key, `seam · tight`: what the queue sorts on.
     pub score: f64,
     /// Every number R §6 produced, for the scores panel against its thresholds.
+    #[cfg_attr(feature = "ts", ts(type = "Record<string, number | boolean | null>"))]
     pub scores: Scores,
     /// The band it ended in — after the constraints and the object round, which is the band the
     /// run acted on.
+    #[cfg_attr(feature = "ts", ts(type = "\"confirmed\" | \"probable\" | \"rejected\""))]
     pub tier: Tier,
     /// Whether R §8 built with this pair. Several candidates of a pair routinely converge on one
     /// placement, so the flag is the pair's and not one pose's.
     pub used: bool,
     /// The tier pass's evidence, which is what A §8.3 says «почему не подтверждено» from; `None`
     /// where the pass did not run or never probed this candidate.
+    #[cfg_attr(feature = "ts", ts(type = "Record<string, unknown> | null"))]
     pub evidence: Option<Evidence>,
 }
 

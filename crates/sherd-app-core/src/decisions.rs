@@ -13,6 +13,7 @@ pub const DECISIONS_FILE: &str = "decisions.json";
 pub const DECISIONS_VERSION: u32 = 1;
 
 /// What the reviewer said about a pair.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
@@ -23,6 +24,7 @@ pub enum Verdict {
 }
 
 /// One decision.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Decision {
     /// One fragment, by name.
@@ -49,6 +51,7 @@ pub struct Decision {
 }
 
 /// `decisions.json`: the decisions as they stand. Undo and redo are the window's.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DecisionsFile {
     /// [`DECISIONS_VERSION`].

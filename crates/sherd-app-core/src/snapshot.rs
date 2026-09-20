@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::{AppError, Result};
 
 /// One scan as the snapshot saw it.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileStamp {
     /// The fragment's name (R §2) — what every decision, cache and display mesh is keyed by.
@@ -20,12 +21,15 @@ pub struct FileStamp {
     /// The file's name in the input folder.
     pub file: String,
     /// Bytes.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub size: u64,
     /// Modification time, milliseconds since the epoch; 0 where the file system has none.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub mtime_ms: i64,
 }
 
 /// The input as it stood.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputSnapshot {
     /// Every scan of the folder, the excluded ones included, in R §2's order.
@@ -35,6 +39,7 @@ pub struct InputSnapshot {
 }
 
 /// How two snapshots differ, by fragment name.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StaleDiff {
     /// Scans that are there now and were not.

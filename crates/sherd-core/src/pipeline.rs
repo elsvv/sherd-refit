@@ -362,20 +362,23 @@ pub fn default_workers() -> usize {
 /// a timing without its memory. A machine whose resident set cannot be read keeps the timings and
 /// reports no memory at all.
 #[derive(Debug, Default)]
-struct StageLog {
-    timings: Timings,
-    peaks: crate::report::Ordered<u64>,
-    monitor: Option<crate::memory::RssMonitor>,
+pub(crate) struct StageLog {
+    /// R §11.2's `timings`, in the order the stages closed.
+    pub(crate) timings: Timings,
+    /// The peak resident set of each of those stages.
+    pub(crate) peaks: crate::report::Ordered<u64>,
+    /// The sampler, absent where the resident set cannot be read.
+    pub(crate) monitor: Option<crate::memory::RssMonitor>,
 }
 
 impl StageLog {
     /// Starts the clock's companion. The sampler runs until this is dropped.
-    fn start() -> Self {
+    pub(crate) fn start() -> Self {
         Self { monitor: crate::memory::RssMonitor::start(), ..Self::default() }
     }
 
     /// Closes `stage`: its seconds, its peak resident set, and the log line an operator reads.
-    fn finish(&mut self, stage: &str, seconds: f64) {
+    pub(crate) fn finish(&mut self, stage: &str, seconds: f64) {
         self.timings.insert(stage, seconds);
         let Some(monitor) = &self.monitor else {
             return;
@@ -387,7 +390,7 @@ impl StageLog {
 
     /// `report.json`'s `memory` block — `timings`' neighbour — or `None` where the resident
     /// set cannot be read.
-    fn memory(&self) -> Option<MemoryReport> {
+    pub(crate) fn memory(&self) -> Option<MemoryReport> {
         let monitor = self.monitor.as_ref()?;
         Some(MemoryReport { peak_rss: monitor.peak(), stages: self.peaks.clone() })
     }
@@ -665,13 +668,6 @@ pub fn run_with(
         workers,
         &mut stages,
     )?;
-    let gate = if params.tiers.is_some() { Gate::Confirmed } else { Gate::Accepted };
-    // 2d. and then the half of the constraints that acts on the candidate list: a `must_join` is
-    // promoted to the confirmed band. `assemble_under` below does the other half.
-    let mut honoured = plan.as_ref().map(|r| {
-        constraints::apply(r, &names, &mut candidates, tiered.as_mut(), gate == Gate::Confirmed)
-    });
-
     // 3. assembly (R §8). The timer starts here, not at `assemble`: the reference builds the
     // stage's own `MatchData` inside `timings["assembly"]`, and PMC-8's cheaper equivalent — the
     // fragments' own samples and their whole-mesh BVHs — belongs in the same place.
@@ -695,39 +691,30 @@ pub fn run_with(
             s_pen: s,
         })
         .collect();
-    let mut assembly = assemble_under(
-        engine.exec,
-        &pieces,
-        &candidates,
-        params,
-        gate,
-        plan.as_ref(),
-        params.objects.as_ref(),
-    );
-    stages.finish("assembly", started.elapsed().as_secs_f64());
-
-    // 3'. roadmap item 4's object pass (audit §D.2), off unless `Params::objects` is set.
+    // 2d. and then the half of the constraints that acts on the candidate list: a `must_join` is
+    // promoted to the confirmed band; `assemble_under` inside the stage does the other half. It
+    // reads and writes only `candidates` and `tiered`, neither of which building the pieces above
+    // touches, which is why the stage may hold it rather than `run_with`.
     //
-    // Here and not before R §8, because a consensus needs the groups R §8 builds and a
+    // 3'. roadmap item 4's object pass (audit §D.2) closes the stage, off unless `Params::objects`
+    // is set. Here and not before R §8, because a consensus needs the groups R §8 builds and a
     // disagreement needs the poses it placed. It runs **one** round: the demotions it finds are
     // applied to the bands and R §8 is run again on them, and no further, because a second round's
     // demotions would be computed on the groups the first round's demotions built and the answer
     // would then depend on how many rounds were run.
-    let mut object_pass = object_round(
-        &fragments,
-        &names,
-        &mut candidates,
-        &mut assembly,
-        &pieces,
-        ObjectRound {
+    let Assembled { mut assembly, constraints: mut honoured, objects: mut object_pass } =
+        assemble_stage(
+            engine.exec,
+            &fragments,
+            &names,
+            &pieces,
+            &mut candidates,
+            tiered.as_mut(),
+            plan.as_ref(),
             params,
-            gate,
-            constraints: plan.as_ref(),
-            tiers: tiered.as_mut(),
-            exec: engine.exec,
-            stages: &mut stages,
-        },
-    );
+            Some(started),
+            &mut stages,
+        );
 
     // 3a. second pass (R §8.1, off by default)
     let retry = second_pass_pairs(&names, &pairs, &candidates, &assembly.groups, params);
@@ -768,32 +755,20 @@ pub fn run_with(
             workers,
             &mut stages,
         )?;
-        honoured = plan.as_ref().map(|r| {
-            constraints::apply(r, &names, &mut candidates, tiered.as_mut(), gate == Gate::Confirmed)
-        });
-        assembly = assemble_under(
+        // The constraints, R §8 and the object round again, on the new list. No clock: R §11.2's
+        // `timings["assembly"]` is the first pass's, and this pass is already in
+        // `timings["second_pass"]`, closed above.
+        Assembled { assembly, constraints: honoured, objects: object_pass } = assemble_stage(
             engine.exec,
-            &pieces,
-            &candidates,
-            params,
-            gate,
-            plan.as_ref(),
-            params.objects.as_ref(),
-        );
-        object_pass = object_round(
             &fragments,
             &names,
-            &mut candidates,
-            &mut assembly,
             &pieces,
-            ObjectRound {
-                params,
-                gate,
-                constraints: plan.as_ref(),
-                tiers: tiered.as_mut(),
-                exec: engine.exec,
-                stages: &mut stages,
-            },
+            &mut candidates,
+            tiered.as_mut(),
+            plan.as_ref(),
+            params,
+            None,
+            &mut stages,
         );
         tracing::info!(
             pairs = retry.len(),
@@ -909,97 +884,27 @@ pub fn run_with(
     let mut written = Vec::new();
     written.extend(measured);
     written.extend(review_files);
-    let stats: Vec<FragmentStats> = fragments.iter().map(FragmentStats::of).collect();
-    let rejected: Vec<(usize, String)> =
-        assembly.rejected.iter().map(|r| (r.candidate, r.reason.message(&names))).collect();
-    let outcome = Outcome {
-        names: &names,
-        candidates: &candidates,
-        used: &assembly.used,
-        rejected: &rejected,
-        groups: &assembly.groups,
-        tiers: tiered.as_ref(),
-        constraints: honoured.as_ref(),
-        review: review.as_ref(),
-        objects: object_pass.as_ref(),
-        probable_top: options.probable_top,
-    };
-    let tier_joins = tiered.as_ref().map(|_| crate::tiers::joins(&candidates, &names));
-    write_transforms(
-        out_dir.join("transforms.json"),
-        &names,
-        &poses,
-        &assembly.groups,
-        &assembly.order,
-        thickness,
-        params,
-        Some(&options.backend_label()),
-        tier_joins.as_deref(),
-    )?;
-    written.push(out_dir.join("transforms.json"));
-    write_report(
+    let memory = stages.memory();
+    let written = write_outputs(
         out_dir,
-        &stats,
-        thickness,
-        &outcome,
-        &stages.timings,
-        params,
-        &options.backend_label(),
-        stages.memory().as_ref(),
+        &Finished {
+            input,
+            fragments: &fragments,
+            names: &names,
+            candidates: &candidates,
+            assembly: &assembly,
+            tiers: tiered.as_ref(),
+            constraints: honoured.as_ref(),
+            review: review.as_ref(),
+            objects: object_pass.as_ref(),
+            poses: &poses,
+            thickness,
+            timings: &stages.timings,
+            memory: memory.as_ref(),
+        },
+        options,
+        written,
     )?;
-    written.push(out_dir.join("report.json"));
-    written.push(out_dir.join("report.md"));
-    let paths: Vec<PathBuf> = fragments.iter().map(|f| f.source.path.clone()).collect();
-    let collection = crate::export::collection_title(input);
-    let export = crate::export::Export {
-        collection: &collection,
-        names: &names,
-        sources: &paths,
-        poses: &poses,
-        groups: &assembly.groups,
-        candidates: &candidates,
-        used: &assembly.used,
-        tiers: tiered.is_some(),
-        review: review.as_ref(),
-        thickness,
-    };
-    if options.write_meshes {
-        let which = if options.placed_all { vec![true; names.len()] } else { export.assembled() };
-        written.extend(write_placed_selected(
-            out_dir,
-            &paths,
-            &names,
-            &poses,
-            &assembly.groups,
-            &which,
-            options.merged_meshes,
-            crate::io::writer::DEFAULT_COMMENT,
-            options.memory,
-        )?);
-    }
-    if options.preview {
-        written.extend(write_previews(out_dir, &fragments, &names, &poses, &assembly.groups)?);
-    }
-    // The files for people and for other programs (`crate::export`): additive, read from what
-    // R §11 wrote from, and none of R §11's own files changes because of them.
-    let joins = export.joins();
-    written.extend(crate::export::tables::write_tables(out_dir, &export, &joins)?);
-    if options.write_meshes && options.viewer {
-        let areas: Vec<f64> = fragments
-            .iter()
-            .map(|f| f.mesh.face_areas.iter().map(|&a| f64::from(a)).sum())
-            .collect();
-        let scene = crate::export::scene::write_scene(
-            out_dir,
-            &export,
-            &areas,
-            options.viewer_faces,
-            options.memory,
-        )?;
-        written.push(scene.path.clone());
-        written.push(crate::export::viewer::write_viewer(out_dir, &export, &joins, &scene)?);
-    }
-    written.push(crate::export::readme::write_readme(out_dir, &export, &joins, &written)?);
     // R §11.2's `timings` is written **before** this line on the reference's side too: the dict
     // handed to `write_report` is mutated after `json.dump` has already run, so `report.json`
     // carries every stage but this one. The fixture dumps confirm it — their `timings` hold
@@ -1079,6 +984,202 @@ fn pinned_candidate(
             wide: None,
         },
     }
+}
+
+/// What R §8 and the two passes around it leave behind.
+#[derive(Debug)]
+pub(crate) struct Assembled {
+    /// R §8's assembly, after roadmap item 4's one object round.
+    pub(crate) assembly: crate::assembly::Assembly,
+    /// What `constraints.json` did, when there was one.
+    pub(crate) constraints: Option<constraints::Report>,
+    /// Roadmap item 4's report, when `Params::objects` is set.
+    pub(crate) objects: Option<objects::ObjectReport>,
+}
+
+/// `constraints::apply`, R §8 and the object round — the block `run_with` runs after every
+/// matching pass, and the whole of what [`crate::session::reassemble`] runs (A §3.1).
+///
+/// `started` is the first pass's clock: R §11.2's `timings["assembly"]` covers building the pieces
+/// as well, so the caller starts it and this function only closes it, between R §8 and the object
+/// round, where `run_with` always closed it. `None` records nothing.
+#[allow(clippy::too_many_arguments, reason = "R §8's inputs, one argument each")]
+pub(crate) fn assemble_stage(
+    exec: &dyn Executor,
+    fragments: &[Fragment],
+    names: &[String],
+    pieces: &[Piece<'_>],
+    candidates: &mut [Candidate],
+    mut tiers: Option<&mut crate::tiers::TierReport>,
+    plan: Option<&Resolved>,
+    params: &Params,
+    started: Option<Instant>,
+    stages: &mut StageLog,
+) -> Assembled {
+    let gate = if params.tiers.is_some() { Gate::Confirmed } else { Gate::Accepted };
+    let constraints = plan.map(|r| {
+        constraints::apply(r, names, candidates, tiers.as_deref_mut(), gate == Gate::Confirmed)
+    });
+    let mut assembly =
+        assemble_under(exec, pieces, candidates, params, gate, plan, params.objects.as_ref());
+    if let Some(started) = started {
+        stages.finish("assembly", started.elapsed().as_secs_f64());
+    }
+    let objects = object_round(
+        fragments,
+        names,
+        candidates,
+        &mut assembly,
+        pieces,
+        ObjectRound { params, gate, constraints: plan, tiers, exec, stages },
+    );
+    Assembled { assembly, constraints, objects }
+}
+
+/// Everything R §11's writers and `export/` read, borrowed from whoever finished an assembly —
+/// `run_with`, or [`crate::session::write_reviewed`] (A §3.1).
+#[derive(Debug)]
+pub(crate) struct Finished<'a> {
+    /// The input directory, for the collection's title.
+    pub(crate) input: &'a Path,
+    /// The collection.
+    pub(crate) fragments: &'a [Fragment],
+    /// Its names, by [`FragId`].
+    pub(crate) names: &'a [String],
+    /// Every candidate, as the assembly saw them.
+    pub(crate) candidates: &'a [Candidate],
+    /// R §8's result.
+    pub(crate) assembly: &'a crate::assembly::Assembly,
+    /// The tier report, when the tier pass ran.
+    pub(crate) tiers: Option<&'a crate::tiers::TierReport>,
+    /// What the constraints did.
+    pub(crate) constraints: Option<&'a constraints::Report>,
+    /// The review images' index.
+    pub(crate) review: Option<&'a crate::review::ReviewIndex>,
+    /// Roadmap item 4's report.
+    pub(crate) objects: Option<&'a objects::ObjectReport>,
+    /// One recentred world pose per fragment.
+    pub(crate) poses: &'a [Matrix4<f64>],
+    /// The collection's median wall thickness.
+    pub(crate) thickness: f64,
+    /// R §11.2's `timings`.
+    pub(crate) timings: &'a Timings,
+    /// `report.json`'s `memory` block.
+    pub(crate) memory: Option<&'a MemoryReport>,
+}
+
+/// R §11's five writers and `export/`'s files. `written` carries what the caller wrote already
+/// (the measurement, the review images) because `README.txt` lists every file of the folder.
+pub(crate) fn write_outputs(
+    out_dir: &Path,
+    done: &Finished<'_>,
+    options: &RunOptions,
+    mut written: Vec<PathBuf>,
+) -> Result<Vec<PathBuf>> {
+    let stats: Vec<FragmentStats> = done.fragments.iter().map(FragmentStats::of).collect();
+    let rejected: Vec<(usize, String)> = done
+        .assembly
+        .rejected
+        .iter()
+        .map(|r| (r.candidate, r.reason.message(done.names)))
+        .collect();
+    let outcome = Outcome {
+        names: done.names,
+        candidates: done.candidates,
+        used: &done.assembly.used,
+        rejected: &rejected,
+        groups: &done.assembly.groups,
+        tiers: done.tiers,
+        constraints: done.constraints,
+        review: done.review,
+        objects: done.objects,
+        probable_top: options.probable_top,
+    };
+    let tier_joins = done.tiers.map(|_| crate::tiers::joins(done.candidates, done.names));
+    write_transforms(
+        out_dir.join("transforms.json"),
+        done.names,
+        done.poses,
+        &done.assembly.groups,
+        &done.assembly.order,
+        done.thickness,
+        &options.params,
+        Some(&options.backend_label()),
+        tier_joins.as_deref(),
+    )?;
+    written.push(out_dir.join("transforms.json"));
+    write_report(
+        out_dir,
+        &stats,
+        done.thickness,
+        &outcome,
+        done.timings,
+        &options.params,
+        &options.backend_label(),
+        done.memory,
+    )?;
+    written.push(out_dir.join("report.json"));
+    written.push(out_dir.join("report.md"));
+    let paths: Vec<PathBuf> = done.fragments.iter().map(|f| f.source.path.clone()).collect();
+    let collection = crate::export::collection_title(done.input);
+    let export = crate::export::Export {
+        collection: &collection,
+        names: done.names,
+        sources: &paths,
+        poses: done.poses,
+        groups: &done.assembly.groups,
+        candidates: done.candidates,
+        used: &done.assembly.used,
+        tiers: done.tiers.is_some(),
+        review: done.review,
+        thickness: done.thickness,
+    };
+    if options.write_meshes {
+        let which =
+            if options.placed_all { vec![true; done.names.len()] } else { export.assembled() };
+        written.extend(write_placed_selected(
+            out_dir,
+            &paths,
+            done.names,
+            done.poses,
+            &done.assembly.groups,
+            &which,
+            options.merged_meshes,
+            crate::io::writer::DEFAULT_COMMENT,
+            options.memory,
+        )?);
+    }
+    if options.preview {
+        written.extend(write_previews(
+            out_dir,
+            done.fragments,
+            done.names,
+            done.poses,
+            &done.assembly.groups,
+        )?);
+    }
+    // The files for people and for other programs (`crate::export`): additive, read from what
+    // R §11 wrote from, and none of R §11's own files changes because of them.
+    let joins = export.joins();
+    written.extend(crate::export::tables::write_tables(out_dir, &export, &joins)?);
+    if options.write_meshes && options.viewer {
+        let areas: Vec<f64> = done
+            .fragments
+            .iter()
+            .map(|f| f.mesh.face_areas.iter().map(|&a| f64::from(a)).sum())
+            .collect();
+        let scene = crate::export::scene::write_scene(
+            out_dir,
+            &export,
+            &areas,
+            options.viewer_faces,
+            options.memory,
+        )?;
+        written.push(scene.path.clone());
+        written.push(crate::export::viewer::write_viewer(out_dir, &export, &joins, &scene)?);
+    }
+    written.push(crate::export::readme::write_readme(out_dir, &export, &joins, &written)?);
+    Ok(written)
 }
 
 /// [`preprocess`] with the ids assigned and the first failure turned into the run's failure.

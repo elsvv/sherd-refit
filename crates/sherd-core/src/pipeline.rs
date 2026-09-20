@@ -258,6 +258,9 @@ pub struct RunOptions {
     /// Where to save the match for a later [`reassemble`](crate::session::reassemble) (A §3.1), or
     /// `None` — the default, and what the CLI always passes — for a run that keeps nothing.
     pub match_state: Option<PathBuf>,
+    /// Fragments left out of the run by name (A §5.1); empty — the default — is every scan of the
+    /// input directory, which is all the CLI ever asks for.
+    pub excluded: BTreeSet<String>,
 }
 
 impl Default for RunOptions {
@@ -284,6 +287,7 @@ impl Default for RunOptions {
             viewer: true,
             viewer_faces: crate::export::scene::DEFAULT_FACES,
             match_state: None,
+            excluded: BTreeSet::new(),
         }
     }
 }
@@ -431,7 +435,7 @@ pub fn run_with(
     options: &RunOptions,
     engine: Engine<'_>,
 ) -> Result<RunSummary> {
-    let entries = collection::discover(input)?;
+    let entries = collection::discover_excluding(input, &options.excluded)?;
     if entries.len() < 2 {
         return Err(Error::read(
             input,

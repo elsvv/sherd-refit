@@ -90,9 +90,26 @@ pub fn discover(dir: impl AsRef<Path>) -> Result<Vec<Entry>> {
     Ok(files.into_iter().zip(names).map(|(path, name)| Entry { path, name }).collect())
 }
 
+/// [`discover`] without the fragments named in `excluded` (A §5.1).
+///
+/// The names are made over the **whole** directory first and the exclusion is applied to them, so
+/// leaving a scan out never renames another — R §2 disambiguates equal stems, and a name that
+/// moved would orphan every decision and every cache keyed by it. A name in `excluded` that is
+/// not in the directory is ignored: the file it named may simply be gone.
+///
+/// # Errors
+///
+/// [`discover`]'s.
+pub fn discover_excluding(
+    dir: impl AsRef<Path>,
+    excluded: &std::collections::BTreeSet<String>,
+) -> Result<Vec<Entry>> {
+    Ok(discover(dir)?.into_iter().filter(|entry| !excluded.contains(&entry.name)).collect())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{discover, find_meshes, fragment_names};
+    use super::{discover, discover_excluding, find_meshes, fragment_names};
     use std::path::PathBuf;
 
     fn scratch(tag: &str) -> PathBuf {
@@ -149,6 +166,23 @@ mod tests {
         assert_eq!(entries[0].name, "x_obj");
         assert_eq!(entries[1].name, "x_ply");
         assert!(entries[0].path.ends_with("x.obj"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A §5.1: an excluded scan is left out by **name**, after the names are made, so that
+    /// leaving one out renames nothing else.
+    #[test]
+    fn an_excluded_fragment_is_left_out_and_the_others_keep_their_names() {
+        let dir = scratch("excluding");
+        for name in ["FY234009.ply", "FY249010.ply", "FY234011.ply"] {
+            std::fs::write(dir.join(name), b"").unwrap();
+        }
+        let all: Vec<String> = discover(&dir).unwrap().into_iter().map(|e| e.name).collect();
+        let excluded = std::collections::BTreeSet::from(["FY234009".to_owned()]);
+        let kept: Vec<String> =
+            discover_excluding(&dir, &excluded).unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(all.len(), 3);
+        assert_eq!(kept, all.into_iter().filter(|n| n != "FY234009").collect::<Vec<_>>());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

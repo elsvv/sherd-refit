@@ -1177,6 +1177,9 @@ fn run(args: &RunArgs) -> Result<()> {
         // A §3.1's saved match is the desktop app's, not `run`'s: a state file in the result
         // folder would be a file `sherd-refit-rs run` never wrote before.
         match_state: None,
+        // A §5.1's exclusions are a workspace decision the app keeps; `run` assembles the whole
+        // directory it is pointed at, as it always has.
+        excluded: std::collections::BTreeSet::new(),
     };
     if let (true, false, Some(dir)) = (args.force, args.no_cache, &args.cache_dir) {
         clear_caches(&args.input, dir)?;

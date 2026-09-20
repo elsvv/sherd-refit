@@ -189,6 +189,8 @@ pub(crate) fn write_outputs(
 }
 ```
 
+(`Finished` derives `Debug` because every type it borrows does; if `cargo check` names one that does not, drop the derive and add `#[allow(missing_debug_implementations)]` with that type as the reason — do not add derives to `review.rs` for it.)
+
 Body: **move** `run_with`'s lines from `let stats: Vec<FragmentStats> = …` through `written.push(crate::export::readme::write_readme(…)?);` (≈ 912–1002) into it, unchanged except for these substitutions:
 
 | in `run_with` | in `write_outputs` |

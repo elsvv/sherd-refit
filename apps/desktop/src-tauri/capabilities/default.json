@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the one window may ask of the shell",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:allow-open", "opener:allow-reveal-item-in-dir"]
+}

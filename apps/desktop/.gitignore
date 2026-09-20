@@ -1,0 +1,5 @@
+# What pnpm, Vite and Tauri produce. `pnpm-lock.yaml`, `src-tauri/Cargo.lock` and the icons
+# `tauri icon` generated are committed; these are not.
+node_modules/
+dist/
+src-tauri/gen/

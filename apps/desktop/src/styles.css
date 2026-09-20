@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+/* The app's whole palette (A §5). Every colour in every component is one of these tokens; a
+   literal colour anywhere else is a bug. Light is the default, `data-theme="dark"` on <html> is
+   the other one — the 3D viewport stays dark in both, because thumbnails are rendered on #292929
+   and a scan reads best against dark. */
+:root {
+  --bg: #f4f4f6;  --panel: #ffffff;  --panel-2: #ececef;  --border: #d4d4da;
+  --text: #1c1c1f;  --muted: #6e6e76;  --accent: #0a6ee0;  --accent-text: #ffffff;
+  --ok: #2f9e55;  --warn: #d98a0b;  --danger: #d6372f;  --clay: #c98a58;
+  --viewport: #26262a;  --viewport-text: #b9b9c2;  --select: rgba(10, 110, 224, 0.12);
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --bg: #1b1b1e;  --panel: #242428;  --panel-2: #2e2e33;  --border: #3a3a41;
+  --text: #ececf1;  --muted: #94949d;  --accent: #3b8ff5;  --accent-text: #ffffff;
+  --ok: #3fb568;  --warn: #f0a530;  --danger: #f0574e;  --clay: #d29a6b;
+  --viewport: #161618;  --viewport-text: #8d8d97;  --select: rgba(59, 143, 245, 0.18);
+  color-scheme: dark;
+}
+@theme inline {
+  --color-bg: var(--bg);  --color-panel: var(--panel);  --color-panel-2: var(--panel-2);
+  --color-border: var(--border);  --color-text: var(--text);  --color-muted: var(--muted);
+  --color-accent: var(--accent);  --color-accent-text: var(--accent-text);  --color-ok: var(--ok);
+  --color-warn: var(--warn);  --color-danger: var(--danger);  --color-clay: var(--clay);
+  --color-viewport: var(--viewport);  --color-viewport-text: var(--viewport-text);  --color-select: var(--select);
+}
+html, body, #root { height: 100%; }
+body { background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; user-select: none; -webkit-user-select: none; }

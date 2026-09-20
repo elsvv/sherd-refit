@@ -19,5 +19,10 @@ input/
 # Rust build artefacts; `Cargo.lock` is committed, `target/` is not.
 target/
 
+# The desktop app's JavaScript side: `pnpm-lock.yaml` is committed, what pnpm and Vite produce
+# from it is not.
+node_modules/
+apps/desktop/dist/
+
 # brainstorming mock-ups of the visual companion; the decisions they led to are in docs/superpowers/specs/
 .superpowers/

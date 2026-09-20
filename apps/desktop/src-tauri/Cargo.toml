@@ -1,0 +1,60 @@
+[package]
+name = "sherd-desktop"
+description = "sherd-refit's desktop app: a Tauri 2 shell over sherd-app-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+
+# A workspace of its own; see `exclude` in the repository's root Cargo.toml.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+sherd-app-core = { path = "../../../crates/sherd-app-core" }
+tauri = { version = "=2.11.6", features = ["protocol-asset"] }
+tauri-plugin-dialog = "=2.7.3"
+tauri-plugin-opener = "=2.5.5"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
+tracing = "0.1.44"
+
+# The root workspace's two profile decisions, repeated because profiles are per workspace — and
+# one more: the engine itself is optimised in dev, or `tauri dev` on a real collection would match
+# pairs at opt-level 0.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.sherd-core]
+opt-level = 3
+
+[profile.dev.package.sherd-gpu]
+opt-level = 3
+
+[lints.rust]
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unsafe_code = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+needless_pass_by_value = "allow" # Tauri commands take their arguments by value

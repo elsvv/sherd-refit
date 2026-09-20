@@ -9,6 +9,11 @@ members = [
     "crates/sherd-parity",
 ]
 
+# The desktop shell is a workspace of its own (apps/desktop/src-tauri/Cargo.toml): `--workspace`
+# here is what CI builds on Linux runners with no WebKit, and the core's CI must not come to
+# depend on a GUI toolkit. It shares this `target/` through its own .cargo/config.toml.
+exclude = ["apps/desktop/src-tauri"]
+
 # `sherd-py` (pyo3 module) joins the workspace in phase 3a; its dependencies are deliberately
 # absent here until then. `sherd-gpu` joined in phase 2a (task G1).
 

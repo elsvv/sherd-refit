@@ -1,0 +1,3 @@
+# One `target/` for the repository: the engine is compiled once, not once per workspace.
+[build]
+target-dir = "../../../target"

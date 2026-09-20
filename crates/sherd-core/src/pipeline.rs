@@ -1742,7 +1742,10 @@ fn second_pass_pairs(
 
 /// R §9 for a whole collection: one fracture cloud per member of a group of two or more, then the
 /// spanning walk.
-fn refine(
+///
+/// `pub(crate)` for [`crate::session::refine_poses`], which runs it over the groups a review left
+/// unrefined (A §3.1) rather than over all of them.
+pub(crate) fn refine(
     engine: Engine<'_>,
     fragments: &[Fragment],
     groups: &[Vec<FragId>],

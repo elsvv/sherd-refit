@@ -5,7 +5,7 @@
 //! 0.14 s of it. A decision about one join therefore costs a reassembly, provided the candidate
 //! list the assembly was built from is still there — which is what [`MatchState`] is.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use nalgebra::Matrix4;
 use rayon::prelude::*;
@@ -21,8 +21,9 @@ use crate::matching::pair::Candidate;
 use crate::memory::Budget;
 use crate::objects::ObjectReport;
 use crate::params::Params;
-use crate::pipeline;
+use crate::pipeline::{self, RunOptions};
 use crate::progress::Watch;
+use crate::report::Timings;
 use crate::tiers::TierReport;
 use crate::types::FragId;
 
@@ -305,4 +306,74 @@ fn retain<T>(items: &mut Vec<T>, keep: &[bool]) {
         at += 1;
         keep[at - 1]
     });
+}
+
+/// R §9's full-resolution refinement over `groups` — every group of the assembly, or only the
+/// ones a review left unrefined (A §8.4). Reads the source scans. The result is not recentred.
+///
+/// Refinement is a property of a group: R §9 walks a group's used joins, so a group whose members
+/// and joins a reassembly did not change keeps the poses it was refined to, and only the rest is
+/// worth the scans. R §8.2's recentring is the caller's, because it is the whole assembly's and
+/// not one group's.
+///
+/// # Errors
+///
+/// A source scan that cannot be read.
+#[allow(clippy::too_many_arguments, reason = "R §9's inputs, one argument each")]
+pub fn refine_poses(
+    engine: Engine<'_>,
+    fragments: &[Fragment],
+    groups: &[Vec<FragId>],
+    poses: &[Matrix4<f64>],
+    used: &[(FragId, FragId)],
+    params: &Params,
+    budget: Budget,
+    watch: &Watch,
+) -> Result<Vec<Matrix4<f64>>> {
+    let _ = watch; // R §9's own progress arrives with A §3.4; the signature is already its shape.
+    pipeline::refine(engine, fragments, groups, poses, used, params, budget)
+}
+
+/// R §11's writers and `export/` over a reviewed assembly: the files `sherd-refit-rs run` writes,
+/// with the reviewer's decisions in `report.md`'s `## Constraints` (A §9.1).
+///
+/// `poses` are the caller's — recentred, refined or not — and `options` carries the output
+/// switches (`write_meshes`, `placed_all`, `merged_meshes`, `viewer`, `preview`) and the backend
+/// label. `timings` and `memory` are empty: this is not a run, and a duration no stage measured
+/// would be a worse record than none.
+///
+/// # Errors
+///
+/// Whatever a writer fails on.
+pub fn write_reviewed(
+    out_dir: &Path,
+    input: &Path,
+    fragments: &[Fragment],
+    state: &MatchState,
+    done: &Reassembled,
+    poses: &[Matrix4<f64>],
+    options: &RunOptions,
+) -> Result<Vec<PathBuf>> {
+    std::fs::create_dir_all(out_dir).map_err(|e| Error::write(out_dir, e))?;
+    let timings = Timings::default();
+    pipeline::write_outputs(
+        out_dir,
+        &pipeline::Finished {
+            input,
+            fragments,
+            names: &state.names,
+            candidates: &done.candidates,
+            assembly: &done.assembly,
+            tiers: done.tiers.as_ref(),
+            constraints: done.constraints.as_ref(),
+            review: None,
+            objects: done.objects.as_ref(),
+            poses,
+            thickness: state.thickness,
+            timings: &timings,
+            memory: None,
+        },
+        options,
+        Vec::new(),
+    )
 }

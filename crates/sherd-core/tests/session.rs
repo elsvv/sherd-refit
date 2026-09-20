@@ -150,3 +150,52 @@ fn an_accepted_probable_join_is_placed_at_the_pose_that_was_accepted() {
         "the pair's matched candidates are gone, as in a full run that pins the pair"
     );
 }
+
+#[test]
+fn a_reviewed_assembly_is_written_by_the_runs_own_writers() {
+    let params = Params { tiers: Some(Thresholds::default()), ..Params::default() };
+    let (_, path) = slab_run("reviewed", params);
+    let state = MatchState::load(&path).unwrap();
+    let chosen = *state.candidates.iter().find(|c| c.accepted).unwrap();
+    let m = chosen.transform;
+    let rows: Vec<String> = (0..4)
+        .map(|r| format!("[{:?},{:?},{:?},{:?}]", m[(r, 0)], m[(r, 1)], m[(r, 2)], m[(r, 3)]))
+        .collect();
+    let json = format!(
+        r#"{{"version":1,"must_join":[{{"a":"pieceA","b":"pieceB","pose":[{}]}}]}}"#,
+        rows.join(",")
+    );
+    let frags = fragments(&state.params);
+    let parsed: Constraints = serde_json::from_str(&json).unwrap();
+    let done = session::reassemble(Engine::REFERENCE, &frags, &state, Some(&parsed)).unwrap();
+
+    let refined = session::refine_poses(
+        Engine::REFERENCE,
+        &frags,
+        &done.assembly.groups,
+        &done.assembly.poses,
+        &done.used,
+        &state.params,
+        Budget::default_for_machine(),
+        &Watch::default(),
+    )
+    .expect("R §9 runs");
+    assert_eq!(refined.len(), frags.len());
+
+    let out = scratch("reviewed-out");
+    let options = RunOptions {
+        params: state.params.clone(),
+        preview: false,
+        write_meshes: false,
+        ..RunOptions::default()
+    };
+    let written =
+        session::write_reviewed(&out, &slab(), &frags, &state, &done, &done.poses, &options)
+            .expect("the writers run");
+    for file in ["transforms.json", "report.json", "report.md", "transforms.csv", "joins.csv"] {
+        assert!(written.iter().any(|p| p.ends_with(file)), "{file} is written");
+    }
+    let report = std::fs::read_to_string(out.join("report.md")).unwrap();
+    assert!(report.contains("## Constraints"), "the reviewer's decision is in the report");
+    assert!(report.contains("pieceA"));
+}

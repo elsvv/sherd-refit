@@ -30,6 +30,7 @@ use sherd_app_core::eta::{self, Calibration};
 use sherd_app_core::host::{self, Carried, Outcome, Worker, WorkerCommand};
 use sherd_app_core::protocol::{Decision, Event, Job, Request, ReviewJob, RunSpec};
 use sherd_app_core::run::{self, EngineInfo, FailKind, RunCounts, RunFile};
+use sherd_app_core::settings::Settings;
 use sherd_app_core::view::{self, JobKind, WorkspaceView};
 use sherd_app_core::workspace::{WORKSPACE_FILE, Workspace};
 use sherd_core::Params;
@@ -255,7 +256,12 @@ impl Lang {
 #[derive(Clone, Debug)]
 pub(crate) enum JobStart {
     /// Preprocess the collection into the workspace's cache (A §5).
-    Prepare,
+    Prepare {
+        /// What this machine allows a job of ours (A §11). A `Prepare` has no launch sheet of
+        /// its own to read a memory limit and a thread count from, and those two are the
+        /// machine's answer rather than the collection's — see [`prepare`].
+        machine: Settings,
+    },
     /// One run of the pipeline, on this launch sheet (A §7.4).
     Run {
         /// What the user launched.
@@ -341,7 +347,7 @@ pub(crate) fn start(
         let mut held = state.workspace()?;
         let ws = held.as_mut().ok_or_else(CommandError::no_workspace)?;
         match kind {
-            JobStart::Prepare => prepare(ws, &command)?,
+            JobStart::Prepare { machine } => prepare(ws, &command, &machine)?,
             JobStart::Run { spec, carry_from } => {
                 open_run(ws, &command, &spec, carry_from.as_deref())?
             }
@@ -534,8 +540,8 @@ fn wait_for_slot(
     }
 }
 
-/// Starts a `Prepare` (A §5: the preprocessing every run needs anyway, and the thumbnails, display
-/// meshes and warnings fall out of it).
+/// Starts a `Prepare` (A §5: the preprocessing every run needs anyway, and the thumbnails,
+/// display meshes and warnings fall out of it), within what A §11's settings allow it.
 ///
 /// # Errors
 ///
@@ -545,7 +551,10 @@ pub(crate) fn start_prepare(
     state: &AppState,
     lang: Lang,
 ) -> Result<(), CommandError> {
-    start(app, state, JobStart::Prepare, lang)?;
+    // Read before the slot is taken: `start` holds the job lock from its first line, and no lock
+    // of this app is held across a file operation ([`crate::state`]) — not even one this small.
+    let machine = crate::settings::current(app);
+    start(app, state, JobStart::Prepare { machine }, lang)?;
     Ok(())
 }
 
@@ -610,18 +619,30 @@ pub(crate) fn start_review(
     Ok(())
 }
 
-/// The `Prepare` job and a worker on it.
-fn prepare(ws: &Workspace, command: &WorkerCommand) -> Result<Started, CommandError> {
-    // A §7.4: the sheet the user last launched decides `target_faces`, the seed and the budgets,
-    // so the cache a `Prepare` leaves is the cache that run would have wanted. Anything else on
-    // disk — an older app's sheet, a hand edit — falls back to the defaults rather than refusing
-    // to prepare: the sheet is a convenience, not the user's work.
+/// The `Prepare` job and a worker on it, inside `machine`'s limits.
+fn prepare(
+    ws: &Workspace,
+    command: &WorkerCommand,
+    machine: &Settings,
+) -> Result<Started, CommandError> {
+    // A §7.4: the sheet the user last launched decides `target_faces` and the seed, so the cache
+    // a `Prepare` leaves is the cache that run would have wanted. Anything else on disk — an
+    // older app's sheet, a hand edit — falls back to the defaults rather than refusing to
+    // prepare: the sheet is a convenience, not the user's work.
     let spec = ws
         .file()
         .last_spec
         .clone()
         .and_then(|sheet| serde_json::from_value::<RunSpec>(sheet).ok())
         .unwrap_or_default();
+    // The memory limit and the thread count come from A §11's settings and not from that sheet,
+    // because they are the only two of its answers that are about this computer rather than
+    // about this collection: a preparation is the app helping itself, started without a dialog,
+    // and how much of the machine it may take while the user is doing something else is exactly
+    // what the settings screen is for. Neither changes what the cache holds — `target_faces` and
+    // the seed do, and those are the run's — so a cache prepared under one limit is the cache a
+    // run under another will find and use.
+    let spec = RunSpec { memory_gb: machine.memory_gb, workers: machine.workers, ..spec };
     let job = host::prepare_job(ws, &spec)?;
     // A `Prepare` has no run folder, so its log sits beside `sherd-workspace.json` (A §4).
     let worker = Worker::spawn(command, &job, Some(&ws.root().join(PREPARE_LOG)))?;

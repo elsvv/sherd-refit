@@ -17,6 +17,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::protocol::AssemblyDto;
 use crate::snapshot::InputSnapshot;
 
@@ -40,6 +42,64 @@ pub enum Scope {
     /// One group by its index in [`AssemblyDto::groups`] — the same number the window prints as
     /// «Группа N», whatever its size, because the inspector asked for that one.
     Group(usize),
+}
+
+/// [`Resolution`] as the window asks for it (A §9.2's two menu items).
+///
+/// A mirror and not serde on [`Resolution`] itself, for [`ScopeDto`]'s reason.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionDto {
+    /// «в полном разрешении».
+    Full,
+    /// «облегчённые модели».
+    Display,
+}
+
+/// [`Scope`] as the window asks for it: «вся сборка» from the export menu, or «эта группа» from
+/// the group inspector.
+///
+/// A mirror rather than serde and `ts-rs` on [`Scope`] itself, because the two are not the same
+/// thing: [`Scope`] is an argument of a pure function that knows nothing of any window, and this
+/// is a shape on a wire, tagged the way [`crate::protocol::ExportWhat`] is so that the window
+/// reads one style of union throughout. Nothing of this ever reaches the engine's process — «в
+/// Blender» is the shell's own work (A §9.2) — which is why it lives here and not in
+/// [`crate::protocol`].
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScopeDto {
+    /// Every group of two or more.
+    All,
+    /// The one group the inspector has open.
+    Group {
+        /// Its index in [`AssemblyDto::groups`], as the window prints it.
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
+        index: usize,
+    },
+}
+
+impl From<ResolutionDto> for Resolution {
+    /// One name for one name.
+    fn from(dto: ResolutionDto) -> Self {
+        match dto {
+            ResolutionDto::Full => Self::Full,
+            ResolutionDto::Display => Self::Display,
+        }
+    }
+}
+
+impl From<ScopeDto> for Scope {
+    /// One name for one name. An index the assembly does not have is not refused here: it names
+    /// no group, [`groups_of`] finds none, and the script is written with nothing in it — which
+    /// is a Blender file that says «объектов: 0» rather than a command that failed.
+    fn from(dto: ScopeDto) -> Self {
+        match dto {
+            ScopeDto::All => Self::All,
+            ScopeDto::Group { index } => Self::Group(index),
+        }
+    }
 }
 
 /// One fragment as the script places it.

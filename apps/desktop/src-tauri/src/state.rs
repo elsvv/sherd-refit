@@ -18,6 +18,7 @@
 //! about a worker that is running, and closing or reopening the workspace would drop the
 //! `Workspace` — and with it A §10's lock — out from under one.
 
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 use sherd_app_core::host::{Canceller, Killer, Requester};
@@ -88,6 +89,14 @@ pub(crate) struct AppState {
     /// open: it is a property of this build and of the machine's adapters, and the launch sheet
     /// asks for it every time it opens.
     engine_info: Mutex<Option<EngineInfoView>>,
+    /// Where the last export of this session was written (A §9.1), or `None` before the first.
+    ///
+    /// The one folder outside the open workspace that [`crate::commands::reveal`] will show.
+    /// A §2.1 gives the window nothing outside the workspace and lets it ask for nothing outside
+    /// it — and an export is the one thing the user deliberately puts elsewhere, so the shell
+    /// remembers that one place rather than opening «Показать в папке» to any path the window
+    /// names.
+    last_export: Mutex<Option<PathBuf>>,
 }
 
 impl AppState {
@@ -122,5 +131,16 @@ impl AppState {
         &self,
     ) -> Result<MutexGuard<'_, Option<EngineInfoView>>, CommandError> {
         self.engine_info.lock().map_err(|_| CommandError::poisoned("engine info"))
+    }
+
+    /// The last export's folder, locked. Unrelated to the two above, as
+    /// [`engine_info`](Self::engine_info) is: it is about what this session has written, not
+    /// about the folder that is open, and it takes part in no locking order.
+    ///
+    /// # Errors
+    ///
+    /// [`CommandError::poisoned`].
+    pub(crate) fn last_export(&self) -> Result<MutexGuard<'_, Option<PathBuf>>, CommandError> {
+        self.last_export.lock().map_err(|_| CommandError::poisoned("last export"))
     }
 }

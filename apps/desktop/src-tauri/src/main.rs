@@ -10,6 +10,7 @@ mod commands;
 mod error;
 mod jobs;
 mod recent;
+mod settings;
 mod state;
 
 /// The argument that makes this process the engine.
@@ -63,6 +64,12 @@ fn main() {
             commands::review_pair,
             commands::review_refine,
             commands::review_close,
+            commands::export_default_dest,
+            commands::export_start,
+            commands::blender_open,
+            commands::reveal,
+            commands::settings_get,
+            commands::settings_set,
         ])
         .run(tauri::generate_context!())
         .expect("the window could not be opened");

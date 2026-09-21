@@ -10,6 +10,7 @@ pub mod host;
 pub mod protocol;
 pub mod review;
 pub mod run;
+pub mod settings;
 pub mod snapshot;
 pub mod view;
 pub mod worker;

@@ -10,10 +10,14 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use sherd_app_core::blender::{self, Resolution, ResolutionDto, ScopeDto};
 use sherd_app_core::decisions::{DECISIONS_FILE, DECISIONS_VERSION, DecisionsFile};
 use sherd_app_core::eta::{self, Calibration};
 use sherd_app_core::host::{self, Outcome, Requester, Worker};
-use sherd_app_core::protocol::{AssemblyDto, CandidateRow, Event, Job, Request, RunSpec};
+use sherd_app_core::protocol::{
+    AssemblyDto, CandidateRow, Event, ExportWhat, Job, Request, RunSpec,
+};
+use sherd_app_core::settings::Settings;
 use sherd_app_core::view::{self, JobKind, WorkspaceView};
 use sherd_app_core::workspace::Workspace;
 use sherd_app_core::{AppError, atomic, run, snapshot};
@@ -22,6 +26,7 @@ use tauri::{AppHandle, Manager, State};
 use crate::error::CommandError;
 use crate::jobs::{self, Lang};
 use crate::recent::{self, RecentEntry};
+use crate::settings;
 use crate::state::{AppState, JobSlot};
 
 /// Which build this is (A §7.4's settings screen, and every bug report).
@@ -463,6 +468,135 @@ pub(crate) fn review_close(state: State<'_, AppState>) -> Result<(), CommandErro
     Ok(())
 }
 
+/// What the app remembers about this computer (A §11): the executor a sheet starts on, the
+/// memory limit, the threads, and where Blender is. Read by the settings screen, and by the
+/// launch sheet for the defaults it offers a workspace that has no sheet of its own to repeat.
+///
+/// Cannot fail: a file that is missing, damaged or written by a newer build is the defaults and
+/// a line in the log ([`settings::current`]) — a preferences file is not worth a screen that
+/// will not open.
+#[tauri::command]
+pub(crate) fn settings_get(app: AppHandle) -> Settings {
+    settings::current(&app)
+}
+
+/// Writes them, and answers with what is now on disk.
+///
+/// The answer is the file's content and not the argument, for A §5's reason: the window keeps no
+/// second opinion about state the shell owns, and what it should now show is what was written —
+/// this build's `version`, whatever the window sent.
+///
+/// **`async`**: `Settings::save` is an atomic write that ends with an `fsync`, which on a slow or
+/// a network home directory is tens of milliseconds the main thread would spend not drawing.
+///
+/// # Errors
+///
+/// As [`settings::write`]: `json` for a limit this build would not read back, `io` when this
+/// machine has no config folder or the file cannot be written.
+#[tauri::command(async)]
+pub(crate) fn settings_set(app: AppHandle, settings: Settings) -> Result<Settings, CommandError> {
+    crate::settings::write(&app, settings)
+}
+
+/// The stamp an export's own folder is named after: local time to the minute, exactly as a run's
+/// id is (A §4) — two things the user sees side by side in `runs/` and `exports/` should not be
+/// dated in two different ways.
+const STAMP: &str = "%Y-%m-%d_%H%M";
+
+/// Where «Экспорт» offers to write, before the user has picked anywhere (A §9.1):
+/// `<workspace>/exports/<YYYY-MM-DD_HHMM>_<folder|tables>`.
+///
+/// Inside the workspace, because that is the folder the user already keeps this collection's work
+/// in and the one place the app can be sure it may write; the dialog's «Выбрать…» is there for
+/// everywhere else. A suggestion and not a decision: the window sends back whatever the user
+/// settled on, and [`export_start`] writes there.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `no_workspace`, or `io` when the workspace's path is not text this
+/// process can hand to the window.
+#[tauri::command]
+pub(crate) fn export_default_dest(
+    state: State<'_, AppState>,
+    what: ExportWhat,
+) -> Result<String, CommandError> {
+    let kind = match what {
+        ExportWhat::Folder { .. } => "folder",
+        ExportWhat::Tables => "tables",
+    };
+    let stamp = chrono::Local::now().format(STAMP);
+    let held = state.workspace()?;
+    let ws = held.as_ref().ok_or_else(CommandError::no_workspace)?;
+    as_text(&ws.exports_dir().join(format!("{stamp}_{kind}")))
+}
+
+/// Writes the reviewed assembly of `run_id` into `dest` with the engine's own writers (A §9.1).
+///
+/// The session is what does it — it is holding the fragments and the match already (A §8) — so
+/// this opens one over `run_id` if there is none, and sends A §9.1's `Export` down the same line
+/// [`review_apply`] sends a decision. A session over *another* run is closed first and waited
+/// for, exactly as a run would close it ([`jobs::start_review`]): an export of run A must not be
+/// answered by a session that is holding run B's match.
+///
+/// **The decisions come from the file and not from the window**, as [`review_refine`]'s do and
+/// for the same reason: what is exported must be the assembly `decisions.json` describes, so that
+/// the folder written and the folder the app would build again from disk are the same one.
+///
+/// Everything after this arrives as the session's own events (A §2.1): an `assembly` — the
+/// refinement A §9.1 runs first becomes the session's baseline, so the window's state is the
+/// state that was exported — then the `output` stage's progress, then `exported`. A refusal (the
+/// folder is not empty, there is no room, the scans are gone) is a `request_failed` and the
+/// session stays open, which is what lets the dialog offer another folder.
+///
+/// **`async`** for [`review_apply`]'s reason and one more: opening a session spawns a worker and
+/// may wait for another to let the slot go.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `busy` while a `Prepare` or a run has the worker, `no_workspace`,
+/// `io` when there is no such run or `dest` is not an absolute path, `json` when the run's
+/// `decisions.json` cannot be read, or `worker`.
+#[tauri::command(async)]
+pub(crate) fn export_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    run_id: String,
+    what: ExportWhat,
+    dest: String,
+) -> Result<(), CommandError> {
+    // Absolute, and checked here rather than trusted: `dest` becomes a folder the worker creates
+    // and writes gigabytes into, and a relative one would be resolved against whatever directory
+    // this app happens to have been started from — which on a desktop is nobody's choice at all.
+    let dest = PathBuf::from(dest);
+    if !dest.is_absolute() {
+        let why = std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "an export needs the whole path of a folder, not a relative one",
+        );
+        return Err(AppError::io(&dest, why).into());
+    }
+    // Nothing when that very session is already open; otherwise the worker is started and the
+    // slot is filled before this returns, so the `Export` below reaches it. A request written
+    // before the session says `ready` waits in its queue and is answered as soon as it has
+    // loaded — the session reads its input from the first moment (A §8).
+    jobs::start_review(&app, state.inner(), run_id.clone())?;
+    let (open, requester) = session(state.inner())?;
+    if open != run_id {
+        // The gap between the two lines above is wide enough for another command to have taken
+        // the worker for another run. Refusing is right: the export the user asked for is of this
+        // run, and the session in the slot cannot answer it.
+        return Err(CommandError::busy());
+    }
+    let dir = run_dir(state.inner(), &run_id)?;
+    let decisions = DecisionsFile::load_or_default(&dir)?;
+    // Before the request and not after the answer: the `exported` event the window will reveal
+    // carries this same folder, and A §2.1 lets the window ask to reveal only what the shell has
+    // agreed to. A send that then fails leaves a remembered folder and nothing else.
+    *state.last_export()? = Some(dest.clone());
+    requester.send(&Request::Export { decisions, what, dest })?;
+    Ok(())
+}
+
 /// The open review session: the run it is over, and the handle its questions go down.
 ///
 /// The lock is taken and let go of here, not held: what follows writes a file and writes to a
@@ -633,6 +767,225 @@ pub(crate) fn run_delete(
     let held = state.workspace()?;
     let ws = held.as_ref().ok_or_else(CommandError::no_workspace)?;
     Ok(view::build(ws, job)?)
+}
+
+/// What «Открыть в Blender» came to (A §9.2).
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct BlenderOutcome {
+    /// Whether Blender was found and started. `false` is the ordinary answer on a machine that
+    /// has none, not a failure: the script is written either way.
+    pub(crate) launched: bool,
+    /// The script that was written, whole path — what «Показать в папке» reveals.
+    pub(crate) script: String,
+    /// The Blender that was started, or `None` when none was found; the toast names it.
+    pub(crate) blender: Option<String>,
+}
+
+/// What the file a Blender launch writes is called, inside its own dated folder.
+const BLENDER_SCRIPT: &str = "open_in_blender.py";
+
+/// «Открыть в Blender» (A §9.2): the assembly, or one group of it, as a Python script — written
+/// into `exports/<stamp>_blender/`, and run by Blender when this machine has one.
+///
+/// **The script first, the launch second, and neither depends on the other.** Blender is not
+/// installed on most museum machines and is installed in five different places on the rest, so
+/// «не найден» is an ordinary outcome and the file must already be on disk when it happens: the
+/// window then offers «Показать в папке» and «Указать путь к Blender…», and the colleague who
+/// has Blender on another computer has something to carry there.
+///
+/// Started **detached** and never waited for: Blender is a window of its own that the person will
+/// keep open for an hour, and the app must not hold a thread, a pipe or its own exit on it. Its
+/// three streams go to nowhere for the same reason — a full pipe nobody reads would stop it.
+///
+/// **`async`**: it reads two of the run's files, writes a third and spawns a process, none of
+/// which belongs on the thread that draws the window.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `no_workspace`, `io` when there is no such run, when the original
+/// scans are asked for and the input folder is not available, or when the script cannot be
+/// written, and `json` when the run's `assembly.json` or `run.json` does not parse.
+#[tauri::command(async)]
+pub(crate) fn blender_open(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    run_id: String,
+    scope: ScopeDto,
+    resolution: ResolutionDto,
+) -> Result<BlenderOutcome, CommandError> {
+    let resolution = Resolution::from(resolution);
+    // Everything the workspace has to say, under its lock and no longer: what follows reads
+    // files, writes one and starts a process, and no lock of this app is held across any of those
+    // ([`crate::state`]).
+    let (dir, input, fragments, exports, title) = {
+        let held = state.workspace()?;
+        let ws = held.as_ref().ok_or_else(CommandError::no_workspace)?;
+        let dir = run_dir_of(ws, &run_id)?;
+        // The original scans need the input folder; the display meshes are the workspace's own
+        // and do not. A collection whose input has moved can still be opened in Blender as the
+        // window draws it, which is the lighter of A §9.2's two choices anyway.
+        let input = match (ws.input(), resolution) {
+            (Some(input), _) => input,
+            (None, Resolution::Display) => PathBuf::new(),
+            (None, Resolution::Full) => {
+                let why = std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "the original scans are not available; open the lighter models instead, or \
+                     point the workspace at the folder again",
+                );
+                return Err(AppError::io(ws.root(), why).into());
+            }
+        };
+        let name = ws.root().file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let title = if name.is_empty() { run_id.clone() } else { format!("{name} · {run_id}") };
+        (dir, input, ws.fragments_dir(), ws.exports_dir(), title)
+    };
+    let assembly: AssemblyDto = atomic::read_json(&dir.join(host::ASSEMBLY_FILE))?;
+    // The run's own snapshot and not the folder as it is now: it names the file each fragment was
+    // read from, which is what the script has to import (A §9.2).
+    let snapshot = run::RunFile::load(&dir)?.input;
+    let groups = blender::groups_of(&assembly, &snapshot, &input, &fragments, scope.into());
+    let script = blender::script(&title, &groups, resolution);
+    let path = write_script(&exports, &script)?;
+    // Read back as text before anything is started: a path this process cannot put into JSON is
+    // a toast with nowhere to send the user, and finding that out after Blender has opened would
+    // leave the window reporting a failure over a launch that worked.
+    let written = as_text(&path)?;
+    let blender = blender::find_blender(settings::current(&app).blender_path.as_deref());
+    let launched = blender.as_deref().is_some_and(|exe| launch(exe, &path));
+    Ok(BlenderOutcome {
+        launched,
+        script: written,
+        blender: blender.as_deref().map(|exe| exe.to_string_lossy().into_owned()),
+    })
+}
+
+/// Writes one generated script into a folder of its own under `exports/`, and answers where.
+///
+/// A folder per launch, dated to the minute like a run (A §4) and given `-2`, `-3` when that
+/// minute is taken — which is not a corner case here: opening group 1 and then group 2 is two
+/// launches within a few seconds, and the second overwriting the first would pull the file out
+/// from under a Blender that is still starting up.
+fn write_script(exports: &Path, script: &str) -> Result<PathBuf, CommandError> {
+    let stamp = chrono::Local::now().format(STAMP);
+    let mut dir = exports.join(format!("{stamp}_blender"));
+    // Bounded rather than open, as `run::new_id` is: a hundred launches in one minute is already
+    // impossible by hand, and a loop with no end has no business in a command.
+    for n in 2..=100 {
+        if !dir.exists() {
+            break;
+        }
+        dir = exports.join(format!("{stamp}_blender-{n}"));
+    }
+    std::fs::create_dir_all(&dir).map_err(|source| AppError::io(&dir, source))?;
+    let path = dir.join(BLENDER_SCRIPT);
+    std::fs::write(&path, script).map_err(|source| AppError::io(&path, source))?;
+    Ok(path)
+}
+
+/// Starts `blender --python <script>` and leaves it to itself; answers whether it started.
+///
+/// The child is reaped on a thread of its own rather than waited for or forgotten: forgotten, it
+/// would sit in the process table as a zombie for as long as this app is open; waited for, it
+/// would hold a command thread for the whole hour the person spends in Blender. The thread does
+/// nothing but block in `wait`, and it ends when Blender does.
+///
+/// Nothing here fails the command. A Blender that will not start is «не запустился» in the
+/// toast, with the script already written beside it — see [`blender_open`].
+fn launch(blender: &Path, script: &Path) -> bool {
+    let started = std::process::Command::new(blender)
+        .arg("--python")
+        .arg(script)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    match started {
+        Ok(mut child) => {
+            let reaped =
+                std::thread::Builder::new().name("sherd-blender".to_owned()).spawn(move || {
+                    let _ = child.wait();
+                });
+            if let Err(error) = reaped {
+                tracing::warn!(%error, "Blender was started but will not be reaped until exit");
+            }
+            true
+        }
+        Err(error) => {
+            tracing::warn!(
+                blender = %blender.display(),
+                %error,
+                "Blender was found but would not start; the script is on disk"
+            );
+            false
+        }
+    }
+}
+
+/// «Показать в папке» (A §9.1, A §9.2): asks the desktop to open the folder holding `path` with
+/// that file selected.
+///
+/// **Two folders and no others**: the open workspace, and the folder the last export of this
+/// session was written into. A §2.1 gives the window nothing outside the workspace and lets it
+/// ask for nothing outside it, and an export's destination is the single thing the user
+/// deliberately puts elsewhere — so it is remembered ([`export_start`]) rather than trusted from
+/// the argument. A path that does not resolve is refused as well: there is nothing to show, and
+/// a comparison of prefixes is only meaningful between paths that exist.
+///
+/// **`async`**: `reveal_item_in_dir` is a call into the desktop's own file manager, which on a
+/// cold Finder or Explorer is a second of somebody else's work.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `io` when the path does not exist, is not one of the two the window
+/// may ask for, or the desktop will not show it.
+#[tauri::command(async)]
+pub(crate) fn reveal(state: State<'_, AppState>, path: String) -> Result<(), CommandError> {
+    let path = PathBuf::from(path);
+    let refused = |why: &str| -> CommandError {
+        AppError::io(&path, std::io::Error::new(std::io::ErrorKind::PermissionDenied, why)).into()
+    };
+    let Ok(resolved) = path.canonicalize() else {
+        return Err(refused("there is nothing at this path to show"));
+    };
+    // One lock at a time and neither held with the other: these two are about different things
+    // — the folder that is open and what this session has written — and a path that needs both
+    // held at once would put them into a locking order they do not have ([`crate::state`]).
+    let workspace = state.workspace()?.as_ref().map(|ws| ws.root().to_owned());
+    let export = state.last_export()?.clone();
+    let inside = [workspace, export]
+        .into_iter()
+        .flatten()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| resolved.starts_with(&root));
+    if !inside {
+        return Err(refused("this is neither the open workspace nor the last export"));
+    }
+    tauri_plugin_opener::reveal_item_in_dir(&resolved)
+        .map_err(|source| AppError::io(&resolved, std::io::Error::other(source)).into())
+}
+
+/// A path as the window receives it.
+///
+/// Lossless or nothing: a `to_string_lossy` here would hand the window a path with a replacement
+/// character in it, which it would send back as the folder to export into — and that folder is
+/// not the one the user picked. Such a path cannot be put into JSON at all, so it is said once,
+/// here, with the path named as far as it can be printed.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `io`.
+fn as_text(path: &Path) -> Result<String, CommandError> {
+    match path.to_str() {
+        Some(text) => Ok(text.to_owned()),
+        None => {
+            let why = std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} cannot be written as text", path.display()),
+            );
+            Err(AppError::io(path, why).into())
+        }
+    }
 }
 
 /// What this build can run on (A §7.4's «Вычисления»), as the launch sheet says it under the
@@ -888,9 +1241,9 @@ fn same_folder(a: &Path, b: &Path) -> bool {
     resolve(a) == resolve(b)
 }
 
-/// Where the app keeps what is not a workspace's (A §4): the recent list, and later the GPU
-/// self-test and the settings.
-fn config_dir(app: &AppHandle) -> Result<PathBuf, CommandError> {
+/// Where the app keeps what is not a workspace's (A §4): the recent list, A §6's calibration and
+/// A §11's settings.
+pub(crate) fn config_dir(app: &AppHandle) -> Result<PathBuf, CommandError> {
     Ok(app.path().app_config_dir()?)
 }
 

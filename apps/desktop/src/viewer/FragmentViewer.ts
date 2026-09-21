@@ -129,6 +129,14 @@ export class FragmentViewer {
   /** The last `CACHE_LIMIT` scenes by URL, oldest first — a `Map` keeps what was inserted when. */
   private readonly cache = new Map<string, Object3D>();
 
+  /**
+   * The loads under way, by URL. Two `show()`s of one fragment before either resolved — the
+   * arrow keys run back and forth over a slow GLB, StrictMode mounts the pane twice — would
+   * otherwise parse it twice and put two scenes in the cache under one key, of which only the
+   * second is ever disposed. The first would be geometry the driver holds until the window closes.
+   */
+  private readonly loading = new Map<string, Promise<Object3D>>();
+
   /** What is on screen; `null` between a `show(null)` and the next fragment. */
   private current: Object3D | null = null;
 
@@ -204,13 +212,33 @@ export class FragmentViewer {
     }
 
     const cached = this.cache.get(url);
-    const object = cached ?? (await this.loader.loadAsync(url)).scene;
+    const object = cached ?? (await this.load(url));
     this.remember(url, object);
     if (token !== this.loads || this.disposed) {
       return;
     }
     this.display(object);
     this.fit();
+  }
+
+  /**
+   * One parse of a GLB at a time, whatever asks for it: callers that arrive while a URL is in
+   * flight are handed that same promise, and the entry is forgotten as soon as it settles — a
+   * load that failed must be retryable, and one that succeeded is in the cache from then on.
+   */
+  private load(url: string): Promise<Object3D> {
+    const already = this.loading.get(url);
+    if (already !== undefined) {
+      return already;
+    }
+    const loading = this.loader
+      .loadAsync(url)
+      .then((gltf) => gltf.scene)
+      .finally(() => {
+        this.loading.delete(url);
+      });
+    this.loading.set(url, loading);
+    return loading;
   }
 
   /** The wireframe toggle of the «Вход» mode's viewport (A §7.3). */
@@ -295,6 +323,9 @@ export class FragmentViewer {
       disposeObject(object);
     }
     this.cache.clear();
+    // A load still in flight is not waited for; it resolves into `remember`, which disposes of
+    // what it was handed once `disposed` is set.
+    this.loading.clear();
     this.current = null;
     this.renderer.dispose();
     // Without this the context lingers until the garbage collector feels like it, and a browser

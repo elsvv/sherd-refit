@@ -338,9 +338,16 @@ export default function InputLeft({ view }: { view: WorkspaceView }) {
         // The keys are taken here and not on each cell: the selection moves between cells that
         // may not be drawn, so one handler over the whole list is the only place it can live.
         onKeyDown={onKeyDown}
+        // And the container itself is a tab stop, because the cell that would otherwise be the
+        // only one is virtualised away as soon as it scrolls out of the window: a keyboard user
+        // who scrolled the list would then Tab straight past the collection with no way back
+        // into it. Focused here, the arrow keys work exactly as they do from a cell.
+        tabIndex={0}
         role="group"
         aria-label={t("input.list")}
-        className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto"
+        // Its own ring and not `FOCUS_RING`: drawn inside, as the selected cell's outline is,
+        // because a ring on the edge of a scroll container is clipped by the container.
+        className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
       >
         {shown.length === 0 ? (
           rows.length === 0 ? null : (

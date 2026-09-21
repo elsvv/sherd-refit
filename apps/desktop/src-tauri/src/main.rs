@@ -4,6 +4,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::ffi::OsStr;
+
 mod commands;
 mod error;
 mod jobs;
@@ -13,13 +15,23 @@ mod state;
 /// The argument that makes this process the engine.
 pub const ENGINE_WORKER: &str = "--engine-worker";
 
+/// What the window role logs when `RUST_LOG` says nothing: the engine crates and the shell at
+/// `info`, and none of Tauri's or wry's own chatter.
+const DEFAULT_LOG: &str = "sherd=info,sherd_desktop=info";
+
 fn main() {
     // Before anything of Tauri's: the worker must not initialise a GUI toolkit it never shows.
-    // `serve_stdio` also installs the process's only `tracing` subscriber, so nothing may set one
-    // ahead of this branch.
-    if std::env::args().nth(1).as_deref() == Some(ENGINE_WORKER) {
+    // `serve_stdio` installs the worker role's own `tracing` subscriber — the only one that
+    // process gets — so nothing may set one ahead of this branch, and `init_log` below belongs
+    // to the window role alone.
+    //
+    // `args_os`, not `args`: the latter panics on an argument that is not Unicode, and on a
+    // machine where the app is installed under a path the OS keeps in some other encoding every
+    // argument can be one. A process that panics before it has a window has nowhere to say so.
+    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new(ENGINE_WORKER)) {
         std::process::exit(sherd_app_core::worker::serve_stdio());
     }
+    init_log();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -38,4 +50,24 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("the window could not be opened");
+}
+
+/// Gives the window role's `tracing` somewhere to go: stderr, filtered by `RUST_LOG` or by
+/// [`DEFAULT_LOG`].
+///
+/// Without this the shell's own warnings — `recent.rs` failing to write the list, `jobs.rs`
+/// failing to file an assembly — are formatted and then dropped on the floor, because `tracing`
+/// with no subscriber records nothing at all. A §10 asks the app to be able to say why something
+/// did not work; a log that exists only in the source is not an answer.
+///
+/// A failure to install one is reported and shrugged off: it can only mean a subscriber is
+/// already there, and the window is worth more than its log.
+fn init_log() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG));
+    if let Err(error) =
+        tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).try_init()
+    {
+        eprintln!("sherd-refit: the log could not be set up: {error}");
+    }
 }

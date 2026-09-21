@@ -115,6 +115,19 @@ function held(): WorkspaceView | null {
   return world.view;
 }
 
+/**
+ * The refusal the shell gives for opening, creating or closing a workspace while a worker is
+ * writing into one, or `null` when nothing is running.
+ *
+ * The mock refuses it too, and not out of pedantry: a `busy` that only the real shell gives is a
+ * path nothing can be looked at, and the window's handling of it — the banner, the disabled
+ * buttons of A §10 — would first be exercised on a user's machine.
+ */
+function busy(): Promise<never> | null {
+  const view = held();
+  return view !== null && view.job !== null ? refuse("busy", "ядро занято другой задачей") : null;
+}
+
 /** Puts a changed view in and hands it back, the way a command returns the view it just made. */
 function put(view: WorkspaceView): Promise<WorkspaceView> {
   world.view = view;
@@ -229,10 +242,14 @@ export const mockApi: Api = {
       { path: "/mock/workspaces/slab", name: "slab", opened_at: "2026-09-18T09:30:00+03:00", available: false },
     ]),
 
-  workspaceCreate: (path) => put(fresh(path)),
-  workspaceOpen: (path) => put(fresh(path)),
+  workspaceCreate: (path) => busy() ?? put(fresh(path)),
+  workspaceOpen: (path) => busy() ?? put(fresh(path)),
 
   workspaceClose: () => {
+    const refusal = busy();
+    if (refusal !== null) {
+      return refusal;
+    }
     clearTimers();
     world.view = null;
     return Promise.resolve();

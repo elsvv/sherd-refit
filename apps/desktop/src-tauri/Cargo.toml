@@ -24,6 +24,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
 tracing = "0.1.44"
+# The window role's subscriber: the worker installs its own inside `serve_stdio`, and this crate's
+# own `tracing::warn!`s would otherwise go nowhere at all.
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 # The root workspace's two profile decisions, repeated because profiles are per workspace — and
 # one more: the engine itself is optimised in dev, or `tauri dev` on a real collection would match

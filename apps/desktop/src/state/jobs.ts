@@ -129,15 +129,24 @@ export const useJobs = create<JobsState>()((set) => ({
       startedAt: null,
       lastFailure: "Failed" in outcome ? { kind: outcome.Failed.kind, message: outcome.Failed.message } : null,
     });
-    if (payload.view !== null) {
+    if (payload.view === null) {
+      // The shell could not build one — the workspace was closed under the job, or its input
+      // folder would not be read. Keeping what we have would leave a view whose `job` is still
+      // set: a window stuck on «идёт подготовка» over a job that has just ended. Ask instead.
+      void useWorkspace.getState().refresh();
+    } else {
       useWorkspace.getState().setView(payload.view);
     }
   },
 }));
 
 /**
- * Subscribes the store to the shell's two event names. Called once, when the window mounts; the
- * returned function undoes both, which is what a React effect's cleanup needs in StrictMode.
+ * Subscribes the store to the shell's two event names, and to the one thing about the workspace
+ * this store has to know. Called once, when the window mounts; the returned function undoes all
+ * three, which is what a React effect's cleanup needs in StrictMode.
+ *
+ * The workspace store is *watched* from here rather than told from there: the direction stays
+ * one-way, and nothing in `workspace.ts` has to know that jobs exist.
  */
 export async function listenToEngine(): Promise<Unlisten> {
   const offEvent = await api.onEngineEvent((payload) => {
@@ -146,8 +155,18 @@ export async function listenToEngine(): Promise<Unlisten> {
   const offFinished = await api.onEngineFinished((payload) => {
     useJobs.getState().applyFinished(payload);
   });
+  // A failure belongs to the workspace it happened in (A §10: the banner names a run of *this*
+  // collection). Opening another workspace, creating one or closing this one must not leave it
+  // standing over a workspace that never saw it — and it is by `root` and not by identity,
+  // because every command hands back a fresh view of the same workspace many times a minute.
+  const offWorkspace = useWorkspace.subscribe((state, previous) => {
+    if (state.view?.root !== previous.view?.root) {
+      useJobs.setState({ lastFailure: null });
+    }
+  });
   return () => {
     offEvent();
     offFinished();
+    offWorkspace();
   };
 }

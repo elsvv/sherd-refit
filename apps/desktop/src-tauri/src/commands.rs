@@ -187,15 +187,25 @@ pub(crate) fn job_cancel(state: State<'_, AppState>) -> Result<(), CommandError>
 
 /// Opening a workspace, whichever door it came through.
 ///
-/// The order matters and is A §4's: the previous workspace is let go of first, because dropping
-/// it is what releases its lock and the folder being opened may be that same one; the runs left
-/// `running` by a crash are marked before any worker of ours exists, so a `running` on disk can
-/// only be nobody's; and the asset protocol is widened to the new root before the window is given
-/// a view naming files under it (A §2.1 — the window is given nothing outside the workspace).
+/// **The workspace the user has is not let go of until the new one is in hand.** A path typed
+/// wrong, a folder on a disk that has been unplugged, a workspace another window of the app is
+/// holding (A §10's lock) — each of those is a refusal the user should be able to read with their
+/// own workspace still on screen behind it. Letting go first and opening second turns every one
+/// of them into «you now have nothing open», which is a worse answer than the error itself.
+///
+/// The folder that *is* open is therefore answered before anything is opened at all: its own lock
+/// would refuse a second [`Workspace::open`] on it, and «open what I already have» means «show me
+/// what I have» — not `locked`.
+///
+/// The rest of the order is A §4's: the runs left `running` by a crash are marked before any
+/// worker of ours exists, so a `running` on disk can only be nobody's; and the asset protocol is
+/// widened to the new root before the window is given a view naming files under it (A §2.1 — the
+/// window is given nothing outside the workspace). The old workspace is dropped, and its lock
+/// released, by the assignment at the end, once nothing can fail any more.
 ///
 /// The job slot is *held* for all of it, and not merely read: let go of after the check, it
 /// leaves a gap in which `prepare_start` can fill the slot and spawn a worker on the workspace
-/// that `*held = None` below is about to drop — releasing A §10's `sherd-workspace.lock` under a
+/// that the assignment below is about to drop — releasing A §10's `sherd-workspace.lock` under a
 /// live worker of ours, and letting `run::mark_interrupted` write `interrupted` over a run that
 /// is still being written. Job first, then the workspace, as [`crate::state`] requires.
 fn open_with(
@@ -209,16 +219,34 @@ fn open_with(
         return Err(CommandError::busy());
     }
     let mut held = state.workspace()?;
-    *held = None;
+    if let Some(open_already) = held.as_ref()
+        && same_folder(open_already.root(), path)
+    {
+        // No job: nothing was running, and the slot is still held here.
+        return Ok(view::build(open_already, None)?);
+    }
     let ws = open(path)?;
     let now = run::timestamp(chrono::Local::now());
     run::mark_interrupted(&ws.runs_dir(), &now)?;
     app.asset_protocol_scope().allow_directory(ws.root(), true)?;
     recent::touch(&config_dir(app)?, ws.root(), &now);
-    // No job: nothing was running, and the slot is still held here, so nothing may have started.
+    // No job, as above.
     let view = view::build(&ws, None)?;
+    // And here the previous workspace is dropped — the one point in the function after which
+    // nothing can go wrong, so the one point at which it is safe to lose it.
     *held = Some(ws);
     Ok(view)
+}
+
+/// Whether two paths name the same folder.
+///
+/// Resolved first, so that a symlink and its target, `/var` and `/private/var` on macOS, and a
+/// path with a `.` or a trailing separator in it are one folder and not two. A path that does not
+/// resolve — the folder `workspace_create` is about to make — is compared as it was written,
+/// which cannot match an open workspace's root, which does.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    let resolve = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    resolve(a) == resolve(b)
 }
 
 /// Where the app keeps what is not a workspace's (A §4): the recent list, and later the GPU

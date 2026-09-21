@@ -113,6 +113,56 @@ impl From<&Outcome> for OutcomeDto {
     }
 }
 
+/// Empties the job slot when the job thread ends, however it ends.
+///
+/// The normal path frees the slot itself, in [`finish`], *before* `engine:finished` goes out — the
+/// order the window depends on (A §5: a `prepare_start` issued from its own `finished` handler
+/// must not meet a `busy`). This guard is for the other path: a panic inside [`host::drive`] or
+/// inside the closure it calls unwinds the job thread, and a slot left full there would say
+/// «ядро занято» for the rest of the session, with no job to cancel and nothing but a restart to
+/// clear it. Unwinding runs `Drop`, so the slot is freed either way.
+///
+/// It is therefore idempotent on purpose: [`disarm`](Self::disarm) marks the work already done,
+/// and a second free is a no-op rather than a second `None` written over a job that has since
+/// started.
+#[derive(Debug)]
+struct SlotGuard {
+    /// Where the slot is; the guard lives on the job thread and the state does not.
+    app: AppHandle,
+    /// Whether the slot still has to be emptied by this guard.
+    armed: bool,
+}
+
+impl SlotGuard {
+    /// Arms a guard for the job about to be driven. Takes no lock: the slot it will free is
+    /// filled by `start`'s caller *after* this thread is spawned, under a lock it still holds.
+    fn new(app: AppHandle) -> Self {
+        Self { app, armed: true }
+    }
+
+    /// Says the slot is already empty, so `Drop` leaves it alone.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SlotGuard {
+    /// Nothing here can fail loudly — it may be running inside an unwind, where a panic would
+    /// abort the process. A poisoned slot stays as it is; the window is already being told that
+    /// something went wrong.
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        if let Some(state) = self.app.try_state::<AppState>()
+            && let Ok(mut slot) = state.job()
+        {
+            *slot = None;
+        }
+    }
+}
+
 /// How to start the engine: this very executable, with the one argument that makes it the worker
 /// (A §2.1). One binary and two roles means the window and the engine can never be two different
 /// builds of sherd-refit, which is what the `Hello` check exists to catch when they are.
@@ -169,6 +219,9 @@ pub(crate) fn start_prepare(app: &AppHandle, state: &AppState) -> Result<(), Com
     std::thread::Builder::new()
         .name(THREAD.to_owned())
         .spawn(move || {
+            // Armed before the drive and disarmed by `finish`: whatever happens between those
+            // two lines, this thread does not leave the app «busy» behind it.
+            let mut guard = SlotGuard::new(app.clone());
             let outcome = host::drive(&mut worker, |event| {
                 let payload =
                     EngineEvent { job: JobKind::Prepare, run_id: None, event: event.clone() };
@@ -176,7 +229,7 @@ pub(crate) fn start_prepare(app: &AppHandle, state: &AppState) -> Result<(), Com
                 // ended by dropping it, not by an event that could not be delivered.
                 let _ = app.emit(EVENT, payload);
             });
-            finish(&app, JobKind::Prepare, None, &outcome);
+            finish(&app, &mut guard, JobKind::Prepare, None, &outcome);
         })
         // Nothing to undo: the worker was moved into the closure, and dropping a `Worker` kills
         // and reaps the process it holds.
@@ -211,14 +264,23 @@ pub(crate) fn cancel(state: &AppState) -> Result<(), CommandError> {
 ///
 /// Nothing here can fail loudly: this runs on the job thread, where there is nobody to return an
 /// error to. A poisoned lock or an unreadable input folder simply means no view travels with the
-/// outcome, and the window asks again.
-fn finish(app: &AppHandle, job: JobKind, run_id: Option<String>, outcome: &Outcome) {
-    let view = app.try_state::<AppState>().and_then(|state| {
-        let mut slot = state.job().ok()?;
+/// outcome, and the window asks again — and the `guard` then has the slot to empty, because the
+/// one line that would have emptied it was never reached.
+fn finish(
+    app: &AppHandle,
+    guard: &mut SlotGuard,
+    job: JobKind,
+    run_id: Option<String>,
+    outcome: &Outcome,
+) {
+    let mut view = None;
+    if let Some(state) = app.try_state::<AppState>()
+        && let Ok(mut slot) = state.job()
+    {
         *slot = None;
-        let held = state.workspace().ok()?;
-        view::build(held.as_ref()?, None).ok()
-    });
+        guard.disarm();
+        view = state.workspace().ok().and_then(|held| view::build(held.as_ref()?, None).ok());
+    }
     let payload = EngineFinished { job, run_id, outcome: outcome.into(), view };
     let _ = app.emit(FINISHED, payload);
 }

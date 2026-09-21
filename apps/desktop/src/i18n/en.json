@@ -88,8 +88,7 @@
     "input": "Input",
     "assembly": "Assembly",
     "review": "Review",
-    "locked": "Appears after the first assembly",
-    "soon": "Comes in a later version"
+    "locked": "Appears after the first assembly"
   },
   "pane": {
     "left": "Left pane",
@@ -257,7 +256,9 @@
     "excluded_other": "{{count}} excluded",
     "groups_one": "{{count}} group",
     "groups_other": "{{count}} groups",
-    "unpaired": "{{n}} unpaired"
+    "unpaired": "{{n}} unpaired",
+    "review": "{{n}} of {{total}}",
+    "review_title": "{{n}} of {{total}} probable joins still to decide"
   },
   "job": {
     "elapsed": "elapsed {{time}}"
@@ -315,6 +316,7 @@
     "stale_included_other": "{{count}} brought back",
     "job_failed": "Preparation failed.",
     "run_unreadable": "This run's files cannot be read.",
+    "review_unavailable": "Review is not available for this run. Regenerate the assembly.",
     "dismiss": "Dismiss"
   },
   "drop": {
@@ -382,6 +384,32 @@
     "field_backend": "compute",
     "field_duration": "duration",
     "no_counts": "This run left no numbers."
+  },
+  "review": {
+    "queue_title": "Queue · best score first",
+    "bands": "Candidate band",
+    "band_probable": "Probable {{n}}",
+    "band_confirmed": "Confirmed {{n}}",
+    "band_rejected": "Rejected by the engine",
+    "band_empty": "Nothing in this band",
+    "row_accepted": "✓ accepted",
+    "row_rejected": "✕ rejected",
+    "accept_all": "Accept every remaining probable join",
+    "accept_all_hint": "The assembly resolves conflicts by score on its own; whatever would not fit comes back in a list with its reason. One action undoes all of it.",
+    "toolbar": "What to show",
+    "view_pair": "Pair",
+    "view_assembly": "In the assembly",
+    "seam": "Seam: distances",
+    "legend_tight": "tight",
+    "legend_gap": "within the gap limit",
+    "legend_far": "beyond",
+    "actions": "Decide this join",
+    "skip": "Skip",
+    "reject": "Reject",
+    "accept": "Accept",
+    "loading": "Loading the match…",
+    "no_pair": "No join selected",
+    "inspector_soon": "The scores against their limits, and why the engine did not confirm this join, will appear here."
   },
   "reason": {
     "tight": "contact {{value}} where {{limit}} is needed",

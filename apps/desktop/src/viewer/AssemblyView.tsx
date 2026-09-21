@@ -2,9 +2,26 @@ import { type Ref, useEffect, useImperativeHandle, useMemo, useRef, useState } f
 import { useTranslation } from "react-i18next";
 
 import type { AssemblyDto } from "../ipc/bindings/AssemblyDto";
+import type { PairDetailDto } from "../ipc/bindings/PairDetailDto";
 import Meter from "../ui/Meter";
 import type { ColourMode, LayoutMode } from "./AssemblyViewer";
 import { AssemblyViewer } from "./AssemblyViewer";
+
+/** One candidate as the «Ревью» centre asks for it: A at the identity, B at `pose` (R §0). */
+export interface PairView {
+  a: string;
+  b: string;
+  pose: number[][];
+}
+
+/** A translucent copy of `name` where a candidate would put it, hung on a placed `anchor`. */
+export interface GhostView {
+  name: string;
+  anchor: string;
+  pose: number[][];
+  /** Whether the candidate names the two fragments the other way round (`pose⁻¹`). */
+  flip: boolean;
+}
 
 /** The two things a pane around the viewer cannot ask for with a prop, because both answer back. */
 export interface AssemblyViewHandle {
@@ -36,6 +53,17 @@ export interface AssemblyViewProps {
   onSelect: (name: string | null) => void;
   /** `useFitSignal`'s counter: every increment is one press of `F` or of «Вписать» (A §7.1). */
   fitSignal: number;
+  /**
+   * «Пара» (A §8.3): one candidate alone in the viewport instead of the assembly. `null` — the
+   * default — is the assembly, and leaving pair mode puts it back exactly as it was.
+   */
+  pair?: PairView | null | undefined;
+  /** The seam of that candidate, or `null` while «Шов: расстояния» is off (A §8.3). */
+  pairDetail?: PairDetailDto | null | undefined;
+  /** «Разъединить» for a pair, 0…1 — B pushed off A along the line between their centroids. */
+  separation?: number | undefined;
+  /** Where a candidate would put a fragment that is not placed with its partner (A §7.2). */
+  ghost?: GhostView | null | undefined;
   ref?: Ref<AssemblyViewHandle> | undefined;
 }
 
@@ -66,6 +94,7 @@ const TIP_ROOM = 200;
 export default function AssemblyView(props: AssemblyViewProps) {
   const { fragments, assembly, colourMode, layout, group, hidden, unassembled } = props;
   const { explode, labels, selected, onSelect, fitSignal, ref } = props;
+  const { pair = null, pairDetail = null, separation = 0, ghost = null } = props;
   const { t } = useTranslation();
   const host = useRef<HTMLDivElement | null>(null);
   const [viewer, setViewer] = useState<AssemblyViewer | null>(null);
@@ -172,6 +201,36 @@ export default function AssemblyView(props: AssemblyViewProps) {
       viewer?.fit();
     }
   }, [viewer, fitSignal]);
+
+  // A §8.3's pair, its seam and the ghost. The three are keyed by their *content* — the pane
+  // above builds a fresh object on every render, and a dependency on identity would re-frame the
+  // camera and rebuild two point clouds on every keystroke elsewhere in the window. The values
+  // themselves are read from refs at the moment of the call, as `assembly` is above.
+  const pairKey = pair === null ? "" : `${pair.a}\u0000${pair.b}\u0000${JSON.stringify(pair.pose)}`;
+  const chosen = useRef(pair);
+  chosen.current = pair;
+  useEffect(() => {
+    viewer?.showPair(chosen.current);
+    // `pairKey` stands for the content of `pair`, which is what decides whether this is a new one.
+  }, [viewer, pairKey]);
+
+  useEffect(() => {
+    viewer?.setPairDetail(pairDetail);
+  }, [viewer, pairDetail]);
+
+  useEffect(() => {
+    viewer?.setPairSeparation(separation);
+  }, [viewer, separation]);
+
+  const ghostKey = ghost === null ? "" : `${ghost.name}\u0000${ghost.anchor}\u0000${String(ghost.flip)}\u0000${JSON.stringify(ghost.pose)}`;
+  const hung = useRef(ghost);
+  hung.current = ghost;
+  useEffect(() => {
+    viewer?.setGhost(hung.current);
+    // As `pairKey` above: the ghost's content, not the object the render happened to build.
+    // `assembly` and `pairKey` are in there because both move the ghost's anchor — a reassembly
+    // gives it a new world matrix, and leaving «Пара» is what lets there be a ghost at all.
+  }, [viewer, ghostKey, assembly, pairKey]);
 
   useImperativeHandle(
     ref,

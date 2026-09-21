@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import type { WorkspaceView } from "../ipc/bindings/WorkspaceView";
 import { useJobs } from "../state/jobs";
+import { useReview } from "../state/review";
 import type { Status } from "../state/status";
 import Meter from "../ui/Meter";
 
@@ -62,6 +63,21 @@ export default function StatusLine({ view, status }: { view: WorkspaceView; stat
   // A run has A §6's card over the viewport, which says the stage, the counts and the bar in full;
   // repeating all three down here would be the same fact twice on one screen, a second apart.
   const overlaid = status.kind === "running";
+
+  // A §8: a review session is a job in the shell's eyes and nothing the user waits on — no strip,
+  // no «Отменить», no clock (it may be open all afternoon between two clicks). The one thing it
+  // owes them is that the engine is not answering *yet*: loading a collection's `match.state`
+  // takes a few seconds, and until `ready` every key on the screen is dead.
+  //
+  // And nothing else: the `stage` a session leaves in the jobs store is the one it announced
+  // while it was loading, and it stands there for the rest of the session — a status line
+  // reading «Предобработка сканов» over a screen that has been answering for ten minutes. What
+  // «Уточнить позы» should say while it runs is the draft line's question, not this one's.
+  // Asked of the review store and not of `view.job`: `review_open` answers with nothing and the
+  // window does not ask for a fresh view afterwards, so the session shows up in the view only
+  // when something else has refreshed it. The store knows the moment the mode was entered.
+  const session = useReview((state) => state.runId !== null) || view.job?.kind === "review";
+  const waiting = useReview((state) => state.runId !== null && !state.ready);
   const stageProgress = stage === null ? undefined : progress[stage];
   const stageName = stage === null ? null : t(`stage.${stage}`, { defaultValue: stage });
 
@@ -71,7 +87,9 @@ export default function StatusLine({ view, status }: { view: WorkspaceView; stat
     <footer className="flex h-[26px] shrink-0 items-center gap-3 border-t border-border bg-panel-2 px-3 text-xs text-muted">
       <span className="shrink-0 text-text">{t(`status.${status.kind}`)}</span>
 
-      {running && !overlaid && stageName !== null ? (
+      {waiting ? <span className="truncate">{t("review.loading")}</span> : null}
+
+      {running && !session && !overlaid && stageName !== null ? (
         <>
           <span className="truncate">{stageName}</span>
           {stageProgress === undefined ? null : (
@@ -84,7 +102,9 @@ export default function StatusLine({ view, status }: { view: WorkspaceView; stat
           )}
         </>
       ) : null}
-      {running ? <span className="shrink-0 tabular-nums">{t("job.elapsed", { time: elapsedText(elapsed) })}</span> : null}
+      {running && !session ? (
+        <span className="shrink-0 tabular-nums">{t("job.elapsed", { time: elapsedText(elapsed) })}</span>
+      ) : null}
 
       <span className="flex-1" />
 

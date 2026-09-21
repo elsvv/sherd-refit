@@ -1,13 +1,16 @@
 import clsx from "clsx";
 import { ChevronDown, PanelLeft, PanelRight } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { api } from "../ipc";
 import { toCommandError } from "../ipc/api";
 import type { RunFile } from "../ipc/bindings/RunFile";
 import type { WorkspaceView } from "../ipc/bindings/WorkspaceView";
+import { queueRows } from "../modes/review/queue";
+import { useAssembly } from "../state/assembly";
 import { useJobs } from "../state/jobs";
+import { useReview } from "../state/review";
 import type { Status } from "../state/status";
 import type { Language, Mode, Theme } from "../state/ui";
 import { useUi } from "../state/ui";
@@ -38,19 +41,21 @@ export function assembledRun(view: WorkspaceView, selectedRunId: string | null):
 }
 
 /**
- * Which modes can be entered. «Ревью» is milestone 5's and stays disabled; «Сборка» is enabled
- * exactly while there is a finished run selected. A disabled tab is drawn rather than hidden:
- * the frame is the same frame throughout (A §7.1), and hiding them would make the window look
- * like a different app once they arrive.
+ * Which modes can be entered: «Сборка» and «Ревью» exactly while there is a finished run
+ * selected. A disabled tab is drawn rather than hidden: the frame is the same frame throughout
+ * (A §7.1), and hiding them would make the window look like a different app once they arrive.
+ *
+ * Whether the run kept a `match.state` a session can be opened over is not known here — it is a
+ * file in the run's folder, and asking after it for every render of the top bar would be a read
+ * per frame. A run that has none refuses `review_open` and A §10's banner says so (`Frame`).
  */
 export function modeEnabled(mode: Mode, assembled: boolean): boolean {
   switch (mode) {
     case "input":
       return true;
     case "assembly":
-      return assembled;
     case "review":
-      return false;
+      return assembled;
   }
 }
 
@@ -266,6 +271,15 @@ export default function TopBar({
   const assembled = assembledRun(view, selectedRunId);
   const groups = assembled?.counts?.groups ?? null;
 
+  // And what the «Ревью» tab is about (A §8.3): how many of the run's probable pairs still want
+  // a decision, out of all of them. Counted over the pairs of the queue and not over the rows of
+  // `candidates.json`, because that is what the reviewer will be asked — a pair with four poses
+  // is one question — and read off the same two stores the queue itself is built from.
+  const candidates = useAssembly((state) => state.candidates);
+  const decisions = useReview((state) => state.decisions);
+  const probable = useMemo(() => queueRows(candidates, "probable", decisions), [candidates, decisions]);
+  const undecided = probable.filter((row) => row.verdict === null).length;
+
   const pickInput = () => {
     pickAndLinkInput(t("action.pick_input_title"));
   };
@@ -340,19 +354,26 @@ export default function TopBar({
                 // vessels the selected run came to.
                 candidate === "assembly" && groups !== null
                 ? `${t("mode.assembly")} · ${t("counts.groups", { count: groups })}`
-                : t(`mode.${candidate}`);
-          // Why a tab cannot be entered, and the two answers are different: «Сборка» is waiting
-          // for a run to finish, «Ревью» for a version of the app. Saying «появится после первой
-          // сборки» over «Ревью» beside an enabled «Сборка · 3 группы» would be plainly false.
-          const locked = candidate === "review" ? t("mode.soon") : t("mode.locked");
+                : candidate === "review" && enabled && probable.length > 0
+                  ? `${t("mode.review")} · ${t("counts.review", { n: undecided, total: probable.length })}`
+                  : t(`mode.${candidate}`);
+          // A tab that cannot be entered says why; the «Ревью · 36 из 39» that can says what its
+          // two numbers are, because «36 из 39» on its own could as easily be the joins already
+          // decided as the ones still waiting.
+          const explain =
+            candidate === "review" && enabled && probable.length > 0
+              ? t("counts.review_title", { n: undecided, total: probable.length })
+              : enabled
+                ? undefined
+                : t("mode.locked");
           return (
             // The tooltip is on the wrapper as well as on the chip: it is the whole content of a
             // disabled tab, and a disabled button gets no mouse events of its own in every engine.
-            <span key={candidate} title={enabled ? undefined : locked}>
+            <span key={candidate} title={explain}>
               <Chip
                 active={mode === candidate}
                 disabled={!enabled}
-                title={enabled ? undefined : locked}
+                title={explain}
                 onClick={() => {
                   useUi.getState().setMode(candidate);
                 }}

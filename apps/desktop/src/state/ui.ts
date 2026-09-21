@@ -1,5 +1,6 @@
 import { create } from "zustand";
 
+import type { CandidateRow } from "../ipc/bindings/CandidateRow";
 import type { ColourMode, LayoutMode } from "../viewer/AssemblyViewer";
 
 /** The three modes of A §7.3, as the top bar's tabs name them. */
@@ -81,6 +82,19 @@ export interface UiState {
    */
   assemblyFly: { name: string; n: number } | null;
 
+  /**
+   * Which band of `candidates.json` the «Ревью» queue is showing (A §8.3's filter chips). Not
+   * kept per run, unlike the assembly's arrangement above: a band is a way of working through a
+   * review — «сначала вероятные, потом проверю подтверждённые» — and not a fact about one run.
+   */
+  reviewBand: CandidateRow["tier"];
+  /** «Пара» ↔ «В сборке»: the candidate alone in the viewport, or the assembly around it. */
+  reviewInAssembly: boolean;
+  /** «Разъединить» for that pair, 0…1 — B pushed off A so that the seam can be looked into. */
+  reviewSeparation: number;
+  /** «Шов: расстояния»: B's fracture samples coloured by how far they stand off A (A §8.3). */
+  reviewSeam: boolean;
+
   setMode(mode: Mode): void;
   toggleLeft(): void;
   toggleRight(): void;
@@ -124,6 +138,11 @@ export interface UiState {
   flyToFragment(name: string): void;
   /** Called by the viewport once it has flown, so the next request is seen as a new one. */
   clearFly(): void;
+
+  setReviewBand(band: CandidateRow["tier"]): void;
+  setReviewInAssembly(on: boolean): void;
+  setReviewSeparation(amount: number): void;
+  setReviewSeam(on: boolean): void;
 }
 
 /** What the «Сборка» mode looks like before anyone has arranged it (A §7.2's defaults). */
@@ -235,6 +254,12 @@ export const useUi = create<UiState>()((set) => ({
   language: initialLanguage(),
   assemblyRunId: null,
   ...freshAssembly(),
+  // The «вероятные» band is where a review starts: it is the whole point of the screen (A §8),
+  // and the seam colouring is on because it is what the pair is being looked at *for*.
+  reviewBand: "probable",
+  reviewInAssembly: false,
+  reviewSeparation: 0,
+  reviewSeam: true,
 
   setMode: (mode) => {
     set({ mode });
@@ -333,6 +358,20 @@ export const useUi = create<UiState>()((set) => ({
   },
   clearFly: () => {
     set({ assemblyFly: null });
+  },
+
+  setReviewBand: (band) => {
+    set({ reviewBand: band });
+  },
+  setReviewInAssembly: (on) => {
+    set({ reviewInAssembly: on });
+  },
+  setReviewSeparation: (amount) => {
+    // As `setAssemblyExplode`: the slider is the user's, but a look script calls this too.
+    set({ reviewSeparation: Number.isFinite(amount) ? Math.min(Math.max(amount, 0), 1) : 0 });
+  },
+  setReviewSeam: (on) => {
+    set({ reviewSeam: on });
   },
 }));
 

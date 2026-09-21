@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { api } from "../ipc";
-import type { Unlisten } from "../ipc/api";
+import type { CommandError, Unlisten } from "../ipc/api";
 import { toCommandError } from "../ipc/api";
 import type { RunSpec } from "../ipc/bindings/RunSpec";
 import type { StaleDiff } from "../ipc/bindings/StaleDiff";
@@ -16,8 +16,12 @@ import AssemblyRight from "../modes/assembly/AssemblyRight";
 import InputCentre from "../modes/input/InputCentre";
 import InputLeft from "../modes/input/InputLeft";
 import InputRight from "../modes/input/InputRight";
+import ReviewCentre from "../modes/review/ReviewCentre";
+import ReviewLeft from "../modes/review/ReviewLeft";
+import ReviewRight from "../modes/review/ReviewRight";
 import { useAssembly } from "../state/assembly";
 import { useJobs } from "../state/jobs";
+import { useReview } from "../state/review";
 import type { Status } from "../state/status";
 import { deriveStatus, hasUnrefinedGroups } from "../state/status";
 import type { Mode } from "../state/ui";
@@ -30,7 +34,7 @@ import LaunchSheet from "./LaunchSheet";
 import LogDrawer from "./LogDrawer";
 import RunOverlay from "./RunOverlay";
 import StatusLine from "./StatusLine";
-import TopBar, { assembledRun, pickAndLinkInput } from "./TopBar";
+import TopBar, { assembledRun, modeEnabled, pickAndLinkInput } from "./TopBar";
 
 /** What the active mode puts in the three places of the frame (A §7.3). */
 interface Panes {
@@ -46,13 +50,6 @@ interface Panes {
 function leftWidth(mode: Mode): string {
   return mode === "input" ? "w-[360px]" : "w-[300px]";
 }
-
-/**
- * What a mode supplies until it supplies something. «Ревью» is milestone 5's and is drawn as a
- * disabled tab that cannot be entered, so its panes stay empty rather than pretending to be a
- * screen (A §7.3).
- */
-const NO_PANES: Panes = { left: null, centre: null, right: null };
 
 /** What the chosen mode puts in the three places. */
 function panesOf(mode: Mode, view: WorkspaceView): Panes {
@@ -70,7 +67,11 @@ function panesOf(mode: Mode, view: WorkspaceView): Panes {
         right: <AssemblyRight view={view} />,
       };
     case "review":
-      return NO_PANES;
+      return {
+        left: <ReviewLeft />,
+        centre: <ReviewCentre view={view} />,
+        right: <ReviewRight />,
+      };
   }
 }
 
@@ -165,17 +166,49 @@ export default function Frame({ view }: { view: WorkspaceView }) {
   const draft = useAssembly((state) => hasUnrefinedGroups(state.assembly));
   const status: Status = deriveStatus(view, selectedRunId, draft);
 
-  // The «Сборка» mode is only a mode while there is a finished run to show. A run deleted, or a
-  // selection cleared, takes its tab away — and leaving the window standing on a mode whose tab
-  // is disabled would be three empty panes with no way back but the keyboard.
+  // «Сборка» and «Ревью» are only modes while there is a finished run to show. A run deleted, or
+  // a selection cleared, takes both tabs away — and leaving the window standing on a mode whose
+  // tab is disabled would be three empty panes with no way back but the keyboard.
   const assembled = assembledRun(view, selectedRunId) !== null;
   useEffect(() => {
-    if (!assembled && useUi.getState().mode === "assembly") {
+    if (!modeEnabled(useUi.getState().mode, assembled)) {
       useUi.getState().setMode("input");
     }
   }, [assembled]);
 
-  const panes: Panes = panesOf(assembled || mode !== "assembly" ? mode : "input", view);
+  const panes: Panes = panesOf(modeEnabled(mode, assembled) ? mode : "input", view);
+
+  // A §8: the «Ревью» mode *is* the session. Entering it over a finished run opens one — the
+  // shell answers instantly for the run that is already open, so this needs no guard of its own
+  // — and leaving it, for another mode, another run or another workspace, gives the engine's
+  // three gigabytes back. The draft is not lost with it: every reassembly is filed over the run's
+  // `assembly.json` and every decision over its `decisions.json` before the answer comes back.
+  const reviewing = mode === "review" && assembled ? selectedRunId : null;
+  useEffect(() => {
+    if (reviewing === null) {
+      void useReview.getState().close();
+    } else {
+      // A fresh attempt is not the old one's failure: the banner below goes with the try that
+      // put it up, and the user asking again is them saying they have read it.
+      setReviewFailed(null);
+      void useReview.getState().open(reviewing);
+    }
+  }, [reviewing]);
+
+  // A §10: a session that never got as far as `ready` — a run with no saved `match.state`, a
+  // collection that has moved under it, a worker a run took away — is the end of the mode and not
+  // a refusal to dismiss and try again. The refusal is copied out of the store because leaving
+  // the mode closes the session and blanks it.
+  const reviewError = useReview((state) => state.error);
+  const reviewReady = useReview((state) => state.ready);
+  const [reviewFailed, setReviewFailed] = useState<CommandError | null>(null);
+  useEffect(() => {
+    if (mode !== "review" || reviewError === null || reviewReady) {
+      return;
+    }
+    setReviewFailed(reviewError);
+    useUi.getState().setMode(assembled ? "assembly" : "input");
+  }, [mode, reviewError, reviewReady, assembled]);
 
   /** A §5's «Показать лог»: the pull-up panel, never closed by an action that says «show». */
   const showLog = (): void => {
@@ -286,6 +319,31 @@ export default function Frame({ view }: { view: WorkspaceView }) {
       detail: runError.message,
       onDismiss: () => {
         useAssembly.getState().dismissError();
+      },
+    });
+  }
+  // A §10's «Ревью для этого прогона недоступно», with the shell's own sentence underneath it.
+  // The mode has already been left by the effect above; this says why.
+  if (reviewFailed !== null) {
+    banners.push({
+      tone: "danger",
+      text: t("banner.review_unavailable"),
+      detail: reviewFailed.message,
+      onDismiss: () => {
+        setReviewFailed(null);
+      },
+    });
+  }
+  // And a refusal *inside* a session that is up — a decision the shell would not file, a seam the
+  // worker could not compute. The session goes on serving, so this is dismissible and the mode
+  // stays; only the reviewer has to know that what they just did did not happen.
+  if (mode === "review" && reviewReady && reviewError !== null) {
+    banners.push({
+      tone: "danger",
+      text: t(`error.${reviewError.kind}`, { defaultValue: t("error.unknown") }),
+      detail: reviewError.message,
+      onDismiss: () => {
+        useReview.getState().dismissError();
       },
     });
   }

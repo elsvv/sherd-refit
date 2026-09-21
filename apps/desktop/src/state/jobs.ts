@@ -234,7 +234,14 @@ export const useJobs = create<JobsState>()((set) => ({
       progress: {},
       samples: [],
       startedAt: null,
-      lastFailure: "Failed" in outcome ? { kind: outcome.Failed.kind, message: outcome.Failed.message } : null,
+      // A §8: how a review session ended is the review store's to report — A §10's «Ревью для
+      // этого прогона недоступно» is its banner, and a second danger banner twenty pixels below
+      // it saying «Подготовка не удалась» about the same worker reads as a fault in the window.
+      // A session that ends well is not a reason to clear a run's failure either: it was never
+      // the job that failed.
+      ...(payload.job === "review"
+        ? {}
+        : { lastFailure: "Failed" in outcome ? { kind: outcome.Failed.kind, message: outcome.Failed.message } : null }),
     });
     if (payload.view === null) {
       // The shell could not build one — the workspace was closed under the job, or its input

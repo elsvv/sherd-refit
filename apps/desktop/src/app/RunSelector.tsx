@@ -39,8 +39,11 @@ const DOT: Record<RunStatus["state"], string> = {
  * a webview's ICU data is not the same on every machine, and the selector's rows have to line up
  * in a column. A `created` that will not parse is shown as it stands rather than as «Invalid
  * Date»: it came off the disk and the window does not get to refuse it (A §2.1).
+ *
+ * Exported because the «Сборка» mode's inspector heads its run summary with the same date, and
+ * two ways of writing one moment in one window is one too many.
  */
-function when(created: string): string {
+export function when(created: string): string {
   const at = new Date(created);
   if (Number.isNaN(at.getTime())) {
     return created;
@@ -53,8 +56,11 @@ function when(created: string): string {
  * How long a run took — `finished − created`, as `17:46` under the hour and «1 ч 20 мин» over it.
  * `null` while it is still going (the overlay counts that one) and for a run whose two timestamps
  * do not make a span.
+ *
+ * Exported for the same reason as [`when`]: the «Сборка» inspector's summary says «длительность»
+ * and the history says it in its column, and they must agree to the second.
  */
-function took(run: RunFile, t: TFunction): string | null {
+export function took(run: RunFile, t: TFunction): string | null {
   if (run.finished === null) {
     return null;
   }

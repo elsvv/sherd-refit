@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+import type { ColourMode, LayoutMode } from "../viewer/AssemblyViewer";
+
 /** The three modes of A §7.3, as the top bar's tabs name them. */
 export type Mode = "input" | "assembly" | "review";
 /** Which fragments the «Вход» list shows (the mock-up's «Все · С предупреждениями · Исключённые»). */
@@ -14,6 +16,10 @@ export type FragmentView = "scan" | "seg";
  * after a failure came for.
  */
 export type LogLevel = "all" | "problems";
+/** «Цвет: скан / фрагменты / группы» and «Все группы / Одна группа», in the words of A §7.2. */
+export type { ColourMode, LayoutMode };
+/** The order the `C` key walks the three colour modes in. */
+const COLOURS: readonly ColourMode[] = ["scan", "fragment", "group"];
 /** `system` follows the OS; the other two override it. */
 export type Theme = "system" | "light" | "dark";
 /** Russian is the primary wording; English is the translation. */
@@ -41,6 +47,40 @@ export interface UiState {
   theme: Theme;
   language: Language;
 
+  /**
+   * Which run the «Сборка» arrangement below belongs to. Every one of those fields names groups
+   * by their index in *that* run's `assembly.json`, and two runs of one collection need not have
+   * assembled the same groups in the same order — so the arrangement is thrown away when the run
+   * changes, and only then ([`UiState.showRun`]).
+   */
+  assemblyRunId: string | null;
+  /** «Цвет: скан / фрагменты / группы» (`C` cycles). */
+  assemblyColour: ColourMode;
+  /** «Все группы» ↔ «Одна группа». */
+  assemblyLayout: LayoutMode;
+  /** Which group «Одна группа» shows; `null` before one has been asked for. */
+  assemblySingle: number | null;
+  /** The groups whose members the tree is showing; [`UNPAIRED`] is the «Без пары» section. */
+  assemblyOpen: ReadonlySet<number>;
+  /** The groups whose eye is off — the inverse of what the viewer's `setGroupVisible` takes. */
+  assemblyHidden: ReadonlySet<number>;
+  /** Whether the tray of fragments that found no partner is in the viewport (off by default). */
+  assemblyUnpaired: boolean;
+  /** «Разъединить», 0…1. */
+  assemblyExplode: number;
+  /** «Подписи» (`L`). */
+  assemblyLabels: boolean;
+  /** What the left pane's search box holds; empty is «everything». */
+  assemblyQuery: string;
+  /** The group the inspector is about, when a group's row rather than a fragment is chosen. */
+  assemblyGroup: number | null;
+  /**
+   * The last «покажи мне этот фрагмент» (A §7.2's «double click flies to»), which the inspector's
+   * partner rows also ask for. A counter beside the name, because asking twice for the same
+   * fragment is two requests and the camera has to move both times; the viewport clears it.
+   */
+  assemblyFly: { name: string; n: number } | null;
+
   setMode(mode: Mode): void;
   toggleLeft(): void;
   toggleRight(): void;
@@ -55,6 +95,74 @@ export interface UiState {
   setLogLevel(level: LogLevel): void;
   setTheme(theme: Theme): void;
   setLanguage(language: Language): void;
+
+  /**
+   * Says which run the «Сборка» mode is now showing. A no-op while it is the same one, so that
+   * leaving the mode and coming back keeps the arrangement the user made; a different run — or
+   * none — starts from the defaults, since its group numbers mean something else.
+   */
+  showRun(runId: string | null): void;
+  setAssemblyColour(mode: ColourMode): void;
+  /** The `C` key and the «Цвет: …» chip: scan → фрагменты → группы → scan. */
+  cycleAssemblyColour(): void;
+  /** «Одна группа» carries which one; «Все группы» leaves the last choice where it was. */
+  setAssemblyLayout(mode: LayoutMode, group?: number): void;
+  /** The chevron of a tree row. */
+  toggleAssemblyOpen(index: number): void;
+  /** Opening one that may already be open — how a fragment chosen in the viewport is revealed. */
+  openAssemblyGroup(index: number): void;
+  /** The eye of a tree row. */
+  toggleAssemblyHidden(index: number): void;
+  setAssemblyUnpaired(on: boolean): void;
+  setAssemblyExplode(amount: number): void;
+  setAssemblyLabels(on: boolean): void;
+  toggleAssemblyLabels(): void;
+  setAssemblyQuery(query: string): void;
+  /** Chooses a group for the inspector; a group and a fragment are never both chosen. */
+  selectGroup(index: number | null): void;
+  /** Asks the viewport to put one fragment in the middle of itself. */
+  flyToFragment(name: string): void;
+  /** Called by the viewport once it has flown, so the next request is seen as a new one. */
+  clearFly(): void;
+}
+
+/** What the «Сборка» mode looks like before anyone has arranged it (A §7.2's defaults). */
+function freshAssembly(): Pick<
+  UiState,
+  | "assemblyColour"
+  | "assemblyLayout"
+  | "assemblySingle"
+  | "assemblyOpen"
+  | "assemblyHidden"
+  | "assemblyUnpaired"
+  | "assemblyExplode"
+  | "assemblyLabels"
+  | "assemblyQuery"
+  | "assemblyGroup"
+  | "assemblyFly"
+> {
+  return {
+    assemblyColour: "scan",
+    assemblyLayout: "spread",
+    assemblySingle: null,
+    assemblyOpen: new Set<number>(),
+    assemblyHidden: new Set<number>(),
+    assemblyUnpaired: false,
+    assemblyExplode: 0,
+    assemblyLabels: false,
+    assemblyQuery: "",
+    assemblyGroup: null,
+    assemblyFly: null,
+  };
+}
+
+/** A set with one member added or taken out — zustand compares by identity, so never in place. */
+function toggled(set: ReadonlySet<number>, index: number): ReadonlySet<number> {
+  const next = new Set(set);
+  if (!next.delete(index)) {
+    next.add(index);
+  }
+  return next;
 }
 
 const THEME_KEY = "sherd.theme";
@@ -125,6 +233,8 @@ export const useUi = create<UiState>()((set) => ({
   logLevel: "all",
   theme: initialTheme(),
   language: initialLanguage(),
+  assemblyRunId: null,
+  ...freshAssembly(),
 
   setMode: (mode) => {
     set({ mode });
@@ -136,7 +246,9 @@ export const useUi = create<UiState>()((set) => ({
     set((state) => ({ rightOpen: !state.rightOpen }));
   },
   selectFragment: (name) => {
-    set({ selectedFragment: name });
+    // A fragment and a group are one choice with two shapes: the inspector shows whichever was
+    // made last, and leaving the other one set would make «nothing is selected» unreachable.
+    set({ selectedFragment: name, assemblyGroup: null });
   },
   setInputFilter: (filter) => {
     set({ inputFilter: filter });
@@ -167,6 +279,60 @@ export const useUi = create<UiState>()((set) => ({
   setLanguage: (language) => {
     set({ language });
     remember(LANGUAGE_KEY, language);
+  },
+
+  showRun: (runId) => {
+    set((state) => (state.assemblyRunId === runId ? state : { assemblyRunId: runId, ...freshAssembly() }));
+  },
+  setAssemblyColour: (mode) => {
+    set({ assemblyColour: mode });
+  },
+  cycleAssemblyColour: () => {
+    set((state) => {
+      const at = COLOURS.indexOf(state.assemblyColour);
+      return { assemblyColour: COLOURS[(at + 1) % COLOURS.length] ?? "scan" };
+    });
+  },
+  setAssemblyLayout: (mode, group) => {
+    set((state) => ({
+      assemblyLayout: mode,
+      assemblySingle: mode === "single" ? (group ?? state.assemblySingle ?? 0) : state.assemblySingle,
+    }));
+  },
+  toggleAssemblyOpen: (index) => {
+    set((state) => ({ assemblyOpen: toggled(state.assemblyOpen, index) }));
+  },
+  openAssemblyGroup: (index) => {
+    set((state) => (state.assemblyOpen.has(index) ? state : { assemblyOpen: new Set(state.assemblyOpen).add(index) }));
+  },
+  toggleAssemblyHidden: (index) => {
+    set((state) => ({ assemblyHidden: toggled(state.assemblyHidden, index) }));
+  },
+  setAssemblyUnpaired: (on) => {
+    set({ assemblyUnpaired: on });
+  },
+  setAssemblyExplode: (amount) => {
+    // The slider is the user's, but this is also what a look script and milestone 5 will call.
+    const want = Number.isFinite(amount) ? Math.min(Math.max(amount, 0), 1) : 0;
+    set({ assemblyExplode: want });
+  },
+  setAssemblyLabels: (on) => {
+    set({ assemblyLabels: on });
+  },
+  toggleAssemblyLabels: () => {
+    set((state) => ({ assemblyLabels: !state.assemblyLabels }));
+  },
+  setAssemblyQuery: (query) => {
+    set({ assemblyQuery: query });
+  },
+  selectGroup: (index) => {
+    set({ assemblyGroup: index, selectedFragment: null });
+  },
+  flyToFragment: (name) => {
+    set((state) => ({ assemblyFly: { name, n: (state.assemblyFly?.n ?? 0) + 1 } }));
+  },
+  clearFly: () => {
+    set({ assemblyFly: null });
   },
 }));
 

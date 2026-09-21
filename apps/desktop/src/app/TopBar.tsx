@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import { api } from "../ipc";
 import { toCommandError } from "../ipc/api";
+import type { RunFile } from "../ipc/bindings/RunFile";
 import type { WorkspaceView } from "../ipc/bindings/WorkspaceView";
 import { useJobs } from "../state/jobs";
 import type { Status } from "../state/status";
@@ -22,12 +23,35 @@ import RunSelector from "./RunSelector";
 export const MODES: readonly Mode[] = ["input", "assembly", "review"];
 
 /**
- * Which modes can be entered. Milestone 3 has no assembly and no review, so their tabs are drawn
- * disabled with a tooltip rather than hidden: the frame is the same frame throughout (A §7.1),
- * and hiding them would make the window look like a different app once they arrive.
+ * The run whose assembly the «Сборка» mode would show: the selected one, once it has finished.
+ *
+ * A run that failed, was cancelled or is still going has assembled nothing to look at (A §4: a
+ * run that died young leaves an empty folder), so the mode has no content and its tab stays
+ * disabled with the same tooltip it wore before there were any runs at all.
  */
-export function modeEnabled(mode: Mode): boolean {
-  return mode === "input";
+export function assembledRun(view: WorkspaceView, selectedRunId: string | null): RunFile | null {
+  if (selectedRunId === null) {
+    return null;
+  }
+  const found = view.runs.find((row) => row.run.id === selectedRunId)?.run;
+  return found?.status.state === "done" ? found : null;
+}
+
+/**
+ * Which modes can be entered. «Ревью» is milestone 5's and stays disabled; «Сборка» is enabled
+ * exactly while there is a finished run selected. A disabled tab is drawn rather than hidden:
+ * the frame is the same frame throughout (A §7.1), and hiding them would make the window look
+ * like a different app once they arrive.
+ */
+export function modeEnabled(mode: Mode, assembled: boolean): boolean {
+  switch (mode) {
+    case "input":
+      return true;
+    case "assembly":
+      return assembled;
+    case "review":
+      return false;
+  }
 }
 
 /**
@@ -236,6 +260,12 @@ export default function TopBar({
 
   const warnings = view.fragments.filter((fragment) => fragment.warnings.length > 0).length;
 
+  // What the «Сборка» tab is about: the finished run the window is showing, and the number of
+  // vessels it came to (`null` for a run of an older build that filed no counts).
+  const selectedRunId = useWorkspace((state) => state.selectedRunId);
+  const assembled = assembledRun(view, selectedRunId);
+  const groups = assembled?.counts?.groups ?? null;
+
   const pickInput = () => {
     pickAndLinkInput(t("action.pick_input_title"));
   };
@@ -302,20 +332,27 @@ export default function TopBar({
 
       <nav className="flex items-center gap-1" aria-label={t("topbar.modes")}>
         {MODES.map((candidate) => {
-          const enabled = modeEnabled(candidate);
+          const enabled = modeEnabled(candidate, assembled !== null);
           const label =
             candidate === "input" && view.input.linked
               ? `${t("mode.input")} · ${String(view.files.length)}${warnings > 0 ? ` · ${t("counts.warnings", { n: warnings })}` : ""}`
-              : t(`mode.${candidate}`);
+              : // A §7.1: each tab carries its own status, and the assembly's is how many
+                // vessels the selected run came to.
+                candidate === "assembly" && groups !== null
+                ? `${t("mode.assembly")} · ${t("counts.groups", { count: groups })}`
+                : t(`mode.${candidate}`);
+          // Why a tab cannot be entered, and the two answers are different: «Сборка» is waiting
+          // for a run to finish, «Ревью» for a version of the app. Saying «появится после первой
+          // сборки» over «Ревью» beside an enabled «Сборка · 3 группы» would be plainly false.
+          const locked = candidate === "review" ? t("mode.soon") : t("mode.locked");
           return (
-            // The tooltip is on the wrapper as well as on the chip: «Появится после первой
-            // сборки» is the whole content of a disabled tab, and a disabled button gets no
-            // mouse events of its own in every engine.
-            <span key={candidate} title={enabled ? undefined : t("mode.locked")}>
+            // The tooltip is on the wrapper as well as on the chip: it is the whole content of a
+            // disabled tab, and a disabled button gets no mouse events of its own in every engine.
+            <span key={candidate} title={enabled ? undefined : locked}>
               <Chip
                 active={mode === candidate}
                 disabled={!enabled}
-                title={enabled ? undefined : t("mode.locked")}
+                title={enabled ? undefined : locked}
                 onClick={() => {
                   useUi.getState().setMode(candidate);
                 }}

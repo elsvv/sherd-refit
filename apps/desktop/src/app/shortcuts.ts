@@ -2,7 +2,8 @@ import { useEffect } from "react";
 import { create } from "zustand";
 
 import { useUi } from "../state/ui";
-import { MODES, modeEnabled } from "./TopBar";
+import { useWorkspace } from "../state/workspace";
+import { assembledRun, MODES, modeEnabled } from "./TopBar";
 
 /**
  * The «вписать в экран» request, as a number that only ever goes up (A §7.1's `F`). The viewer is
@@ -37,10 +38,17 @@ function typing(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
 }
 
+/** Whether the «Сборка» mode can be entered right now — the tab's own rule, asked of the stores. */
+function assemblyReady(): boolean {
+  const state = useWorkspace.getState();
+  return state.view !== null && assembledRun(state.view, state.selectedRunId) !== null;
+}
+
 /**
  * The frame's keys (A §7.1): `Mod+B` and `Mod+Alt+B` collapse the two side panes, `Mod+J` pulls
- * the engine log up and back down, `1` `2` `3` choose a mode, `F` fits the viewer. They are
- * matched on `event.code`, the physical key, and not
+ * the engine log up and back down, `1` `2` `3` choose a mode, `F` fits the viewer, and in the
+ * «Сборка» mode `L` turns the names over the fragments on and off and `C` walks the three colour
+ * modes. They are matched on `event.code`, the physical key, and not
  * on `event.key`: the window's own language is Russian, and on a Russian layout `F` types «а».
  */
 export function useShortcuts(): void {
@@ -79,7 +87,7 @@ export function useShortcuts(): void {
         case "Digit2":
         case "Digit3": {
           const mode = MODES[Number(e.code.slice(-1)) - 1];
-          if (mode !== undefined && modeEnabled(mode)) {
+          if (mode !== undefined && modeEnabled(mode, assemblyReady())) {
             e.preventDefault();
             useUi.getState().setMode(mode);
           }
@@ -88,6 +96,20 @@ export function useShortcuts(): void {
         case "KeyF":
           e.preventDefault();
           useFitSignal.getState().requestFit();
+          break;
+        // Both belong to the assembly's viewport (A §7.2) and mean nothing anywhere else, so
+        // they are not taken from the rest of the window while it is on another mode.
+        case "KeyL":
+          if (useUi.getState().mode === "assembly") {
+            e.preventDefault();
+            useUi.getState().toggleAssemblyLabels();
+          }
+          break;
+        case "KeyC":
+          if (useUi.getState().mode === "assembly") {
+            e.preventDefault();
+            useUi.getState().cycleAssemblyColour();
+          }
           break;
         default:
           break;

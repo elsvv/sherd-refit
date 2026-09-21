@@ -247,6 +247,12 @@ export const useJobs = create<JobsState>()((set) => ({
     if (payload.run_id !== null) {
       useWorkspace.getState().selectRun(payload.run_id);
     }
+    // And a run that assembled something is what the user pressed «Собрать» to see, so the
+    // window goes there by itself (A §7.3). Only for a run, and only for one that finished: a
+    // preparation has nothing to show, and a run that failed is reported where the user is.
+    if (payload.job === "run" && "Done" in outcome) {
+      useUi.getState().setMode("assembly");
+    }
   },
 }));
 

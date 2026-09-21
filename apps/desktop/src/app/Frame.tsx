@@ -10,6 +10,9 @@ import { toCommandError } from "../ipc/api";
 import type { RunSpec } from "../ipc/bindings/RunSpec";
 import type { StaleDiff } from "../ipc/bindings/StaleDiff";
 import type { WorkspaceView } from "../ipc/bindings/WorkspaceView";
+import AssemblyCentre from "../modes/assembly/AssemblyCentre";
+import AssemblyLeft from "../modes/assembly/AssemblyLeft";
+import AssemblyRight from "../modes/assembly/AssemblyRight";
 import InputCentre from "../modes/input/InputCentre";
 import InputLeft from "../modes/input/InputLeft";
 import InputRight from "../modes/input/InputRight";
@@ -26,7 +29,7 @@ import LaunchSheet from "./LaunchSheet";
 import LogDrawer from "./LogDrawer";
 import RunOverlay from "./RunOverlay";
 import StatusLine from "./StatusLine";
-import TopBar, { pickAndLinkInput } from "./TopBar";
+import TopBar, { assembledRun, pickAndLinkInput } from "./TopBar";
 
 /** What the active mode puts in the three places of the frame (A §7.3). */
 interface Panes {
@@ -44,9 +47,9 @@ function leftWidth(mode: Mode): string {
 }
 
 /**
- * What a mode supplies until it supplies something. Milestone 3 has only «Вход»; «Сборка» and
- * «Ревью» are drawn as disabled tabs and cannot be entered, so their panes stay empty rather
- * than pretending to be screens (A §7.3).
+ * What a mode supplies until it supplies something. «Ревью» is milestone 5's and is drawn as a
+ * disabled tab that cannot be entered, so its panes stay empty rather than pretending to be a
+ * screen (A §7.3).
  */
 const NO_PANES: Panes = { left: null, centre: null, right: null };
 
@@ -60,6 +63,11 @@ function panesOf(mode: Mode, view: WorkspaceView): Panes {
         right: <InputRight view={view} />,
       };
     case "assembly":
+      return {
+        left: <AssemblyLeft />,
+        centre: <AssemblyCentre view={view} />,
+        right: <AssemblyRight view={view} />,
+      };
     case "review":
       return NO_PANES;
   }
@@ -152,7 +160,18 @@ export default function Frame({ view }: { view: WorkspaceView }) {
 
   // Milestone 3 loads no assembly, so no group of one can be waiting for refinement (A §8.4).
   const status: Status = deriveStatus(view, selectedRunId, false);
-  const panes: Panes = panesOf(mode, view);
+
+  // The «Сборка» mode is only a mode while there is a finished run to show. A run deleted, or a
+  // selection cleared, takes its tab away — and leaving the window standing on a mode whose tab
+  // is disabled would be three empty panes with no way back but the keyboard.
+  const assembled = assembledRun(view, selectedRunId) !== null;
+  useEffect(() => {
+    if (!assembled && useUi.getState().mode === "assembly") {
+      useUi.getState().setMode("input");
+    }
+  }, [assembled]);
+
+  const panes: Panes = panesOf(assembled || mode !== "assembly" ? mode : "input", view);
 
   /** A §5's «Показать лог»: the pull-up panel, never closed by an action that says «show». */
   const showLog = (): void => {

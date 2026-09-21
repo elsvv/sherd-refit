@@ -350,8 +350,14 @@ pub(crate) fn start(
             if let Some(file) = run_file.as_mut() {
                 close_run(&app, file, &outcome);
             }
-            notify(&app, job, lang, &outcome);
             finish(&app, &mut guard, job, id, &outcome);
+            // **After** `finish`, never between the job's end and the window being told about
+            // it: showing a notification takes a round trip to the OS's own service, and one
+            // that is slow — or a desktop that puts a dialog up for the permission — would hold
+            // the window in «Идёт сборка…» for as long as it lasts, with the run already over and
+            // the slot already free. The user reading the window must see it end first; the one
+            // who is not looking is being written to precisely because a moment does not matter.
+            notify(&app, job, lang, &outcome);
         })
         // Nothing to undo: the worker was moved into the closure, and dropping a `Worker` kills
         // and reaps the process it holds.

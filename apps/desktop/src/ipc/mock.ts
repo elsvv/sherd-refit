@@ -314,7 +314,10 @@ const STANDARD_SPEC: RunSpec = {
   seed: 0,
   target_faces: 200000,
   tiers: true,
-  agree_seeds: 1,
+  // The engine's own default, and the one thing «Стандарт» must not differ from it in: agreement
+  // is a flag «Тщательно» raises (`tiers::Thresholds::agree_seeds` is `0`, never a default), and
+  // a mock that says `1` here shows the sheet a «Стандарт» that no run of the engine would make.
+  agree_seeds: 0,
   thick_ratio: 2.5,
   min_tight: 0.25,
   max_gap: 0.03,
@@ -378,9 +381,13 @@ function runFile(
 }
 
 /**
- * The history the mock starts with: one run that worked, one the GPU gave up on and one the user
- * stopped — so that every row of A §5's table, and every colour of the run selector, can be
- * looked at without waiting ten seconds for a mocked run first.
+ * The history «karas» carries: one run that worked, one the GPU gave up on, one the user stopped
+ * and one a crash left behind — so that every row of A §5's table, and every colour of the run
+ * selector, can be looked at without waiting ten seconds for a mocked run first.
+ *
+ * It belongs to that one workspace and not to the mock at large: a folder the user has just made
+ * has no runs in it, and a mock that hands four to every new workspace hides the one state A §5
+ * opens on.
  */
 function seededRuns(): RunFile[] {
   const failed: RunStatus = {
@@ -392,6 +399,9 @@ function seededRuns(): RunFile[] {
     runFile("2026-09-20_1412", "2026-09-20T14:12:00+03:00", "2026-09-20T14:29:02+03:00", { state: "done" }, COUNTS),
     runFile("2026-09-19_1806", "2026-09-19T18:06:00+03:00", "2026-09-19T18:11:37+03:00", failed, null),
     runFile("2026-09-18_0930", "2026-09-18T09:30:00+03:00", "2026-09-18T09:44:10+03:00", { state: "cancelled" }, null),
+    // A §4: a run the app died under is marked `interrupted` the next time the folder is opened.
+    // Nobody can reach that state by clicking, so the mock has to hold one.
+    runFile("2026-09-17_1540", "2026-09-17T15:40:00+03:00", null, { state: "interrupted" }, null),
   ];
 }
 
@@ -419,7 +429,7 @@ function staleOf(run: RunFile, view: WorkspaceView): StaleDiff {
   };
 }
 
-/** The workspace as it is right after it is created: no input, nothing prepared, a history. */
+/** The workspace as it is right after it is created: no input, nothing prepared, no runs. */
 function fresh(path: string): WorkspaceView {
   const name = path.split("/").filter(Boolean).at(-1) ?? path;
   return {
@@ -436,6 +446,29 @@ function fresh(path: string): WorkspaceView {
   };
 }
 
+/**
+ * Opening a workspace: «karas» is the one the recent list points at and the one that has been
+ * worked in — its scans linked, its cache built and its four runs behind it — and every other
+ * path is a folder made a moment ago (A §5's empty state).
+ *
+ * The distinction is the mock's whole history: `world.runs` is set here and nowhere else, so a
+ * «Создать воркспейс» cannot come up with somebody else's runs in it.
+ */
+function opened(path: string): WorkspaceView {
+  if (path !== WORKSPACE_PATH) {
+    world.runs = [];
+    return fresh(path);
+  }
+  world.runs = seededRuns();
+  return {
+    ...fresh(path),
+    input: { linked: true, path: INPUT_PATH, available: true },
+    files: ALL.map(stamp),
+    fragments: ALL,
+    prepared: true,
+  };
+}
+
 /** The mock's whole world. */
 const world: {
   view: WorkspaceView | null;
@@ -448,7 +481,7 @@ const world: {
   dropsWired: boolean;
 } = {
   view: null,
-  runs: seededRuns(),
+  runs: [],
   timers: [],
   events: new Set(),
   finished: new Set(),
@@ -689,6 +722,18 @@ function isCorrupt(file: "assembly" | "candidates"): boolean {
   return asked === file || asked === "both";
 }
 
+/**
+ * Whether the dev URL carries `?nocal`: the machine has finished no run, so A §6's sheet says an
+ * estimate will appear rather than giving one.
+ *
+ * A flag and not a click, for the reason `?corrupt` is one: it is the state of a file in the
+ * app's config folder, nothing on any screen reaches it, and it has a sentence of its own that
+ * `tools/look.mjs` has to be able to open.
+ */
+function noCalibration(): boolean {
+  return new URLSearchParams(window.location.search).has("nocal");
+}
+
 /** A few lines of `tracing`, with the `WARN` and `ERROR` tokens A §10's level filter looks for. */
 function engineLog(run: RunFile | null): string {
   const id = run?.id ?? "prepare";
@@ -721,8 +766,8 @@ export const mockApi: Api = {
       { path: "/mock/workspaces/slab", name: "slab", opened_at: "2026-09-18T09:30:00+03:00", available: false },
     ]),
 
-  workspaceCreate: (path) => busy() ?? put(fresh(path)),
-  workspaceOpen: (path) => busy() ?? put(fresh(path)),
+  workspaceCreate: (path) => busy() ?? put(opened(path)),
+  workspaceOpen: (path) => busy() ?? put(opened(path)),
 
   workspaceClose: () => {
     const refusal = busy();
@@ -830,6 +875,15 @@ export const mockApi: Api = {
     const ratios = { tiers: 0.033, refine: 0.015, output: 0.016 };
     const pairSeconds = 0.0898;
     const total = Object.values(ratios).reduce((sum, ratio) => sum + ratio, 0);
+    if (noCalibration()) {
+      // Nothing measured yet: A §6 has the shell answer `null` rather than invent a figure, and
+      // `pair_seconds` is `0` because no run has said what one costs here.
+      return Promise.resolve({
+        calibration: { version: 1, runs: 0, pair_seconds: 0, ratios },
+        pairs_upper_bound: pairs,
+        estimate_seconds: null,
+      });
+    }
     return Promise.resolve({
       calibration: { version: 1, runs: 3, pair_seconds: pairSeconds, ratios },
       pairs_upper_bound: pairs,
@@ -870,13 +924,8 @@ export const mockApi: Api = {
     return put(view);
   },
 
-  engineInfo: () =>
-    Promise.resolve({
-      backends: [
-        "cpu, gpu (wgpu 30.0.1, 1 adapter; R §5.2's coarse score and R §5.4's stage-1 ICP rungs on the device, R §5.6's stage 2 and R §6's two methods on the CPU (policy; D §12's 2c struck))",
-        "  [0] Metal Apple M2 Pro (IntegratedGpu)",
-      ],
-    }),
+  // What the shell hands over once it has parsed the engine's `info`: the card, not the prose.
+  engineInfo: () => Promise.resolve({ adapters: ["Metal Apple M2 Pro"], gpu: true }),
 
   pickFolder: () => Promise.resolve(INPUT_PATH),
 

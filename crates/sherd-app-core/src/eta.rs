@@ -35,6 +35,15 @@ const MATCHING: &str = "matching";
 /// of the pairs nor a stable fraction of matching: it is left out of the ratios on purpose.
 const PREPROCESS: &str = "preprocess";
 
+/// What is left of a stage's ratio after a run that did not report it at all.
+///
+/// A half — the same weight the average itself uses, and for the same reason. The set of stages
+/// is not fixed: «Тщательно» matches twice and reports `tier_agree`, `screen` appears with a
+/// pre-filter, and a stage recorded once would otherwise be added to every estimate for the rest
+/// of the machine's life. A run that does not report a stage is evidence about that stage, so it
+/// is met half way, exactly as a run that reports a different number for one is.
+const DECAY: f64 = 0.5;
+
 /// What the last runs on this machine measured — enough to say how long the next one will take.
 ///
 /// Derived data, cheap to relearn: nothing here is the user's, and A §6 lets a damaged or missing
@@ -79,8 +88,9 @@ impl Calibration {
     /// rather than poison every later estimate.
     ///
     /// The first run is taken whole; every run after it counts for half against everything known
-    /// before. A stage missing from `timings` keeps whatever was known about it: the run simply
-    /// says nothing about that stage.
+    /// before. A stage missing from `timings` is halved ([`DECAY`]) rather than kept: the set of
+    /// stages depends on the sheet, and a `tier_agree` measured once under «Тщательно» would
+    /// otherwise be added to every «Стандарт» estimate the machine ever makes.
     pub fn learn(&mut self, counts: &RunCounts) {
         let Some(matching) = counts
             .timings
@@ -104,6 +114,7 @@ impl Calibration {
         };
 
         self.pair_seconds = blend(self.pair_seconds, matching / pairs);
+        let mut reported: Vec<&str> = Vec::new();
         for timing in &counts.timings {
             if timing.stage == MATCHING || timing.stage == PREPROCESS {
                 continue;
@@ -111,9 +122,18 @@ impl Calibration {
             if !timing.seconds.is_finite() || timing.seconds < 0.0 {
                 continue;
             }
+            reported.push(timing.stage.as_str());
             let measured = timing.seconds / matching;
             let known = self.ratios.entry(timing.stage.clone()).or_insert(measured);
             *known = blend(*known, measured);
+        }
+        // And what this run did not report fades — see `DECAY`. Nothing is ever removed from the
+        // map: a stage that comes back is then blended from a small number rather than believed
+        // whole, which is what a machine that alternates between two sheets should do.
+        for (stage, ratio) in &mut self.ratios {
+            if !reported.contains(&stage.as_str()) {
+                *ratio *= DECAY;
+            }
         }
         self.runs = self.runs.saturating_add(1);
     }
@@ -236,28 +256,58 @@ mod tests {
         assert!((calibration.pair_seconds - 0.089_84).abs() < 1e-4, "{calibration:?}");
         assert!((calibration.ratios["tiers"] - 0.033_3).abs() < 1e-4, "{calibration:?}");
         assert!((calibration.ratios["refine"] - 15.3 / 996.9).abs() < 1e-9, "{calibration:?}");
-        // a stage the run never reported keeps what A §6 published about `karas`
-        assert!((calibration.ratios["output"] - 0.016).abs() < 1e-12, "{calibration:?}");
+        // a stage the run never reported fades by half rather than staying at A §6's published
+        // `karas` figure for the rest of this machine's life
+        assert!((calibration.ratios["output"] - 0.008).abs() < 1e-12, "{calibration:?}");
     }
 
     /// The average is exponential at weight ½, so a machine that has become twice as slow is met
     /// half way rather than ignored or believed outright.
+    ///
+    /// Three runs, because two cannot tell the two averages apart: the arithmetic mean of a pair
+    /// and the exponential average at ½ are the same number.
     #[test]
-    fn a_second_run_moves_the_average_half_way_towards_it() {
+    fn a_later_run_moves_the_average_half_way_towards_it() {
+        let scaled = |factor: f64| {
+            let mut counts = karas();
+            for timing in &mut counts.timings {
+                timing.seconds *= factor;
+            }
+            counts
+        };
         let mut calibration = Calibration::default();
         calibration.learn(&karas());
         let first = calibration.pair_seconds;
+        calibration.learn(&scaled(2.0));
+        calibration.learn(&scaled(4.0));
 
-        let mut slow = karas();
-        for timing in &mut slow.timings {
-            timing.seconds *= 2.0;
-        }
-        calibration.learn(&slow);
-
-        assert_eq!(calibration.runs, 2);
-        assert!((calibration.pair_seconds - f64::midpoint(first, first * 2.0)).abs() < 1e-12);
+        assert_eq!(calibration.runs, 3);
+        // x, then (x + 2x)/2 = 1.5x, then (1.5x + 4x)/2 = 2.75x — and not the mean, 2.333…x.
+        let want = f64::midpoint(f64::midpoint(first, first * 2.0), first * 4.0);
+        assert!((calibration.pair_seconds - want).abs() < 1e-12, "{calibration:?}");
+        let mean = (first + first * 2.0 + first * 4.0) / 3.0;
+        assert!((calibration.pair_seconds - mean).abs() > 1e-3 * first, "{calibration:?}");
         // the ratios are unchanged: every stage doubled with matching
-        assert!((calibration.ratios["tiers"] - 33.2 / 996.9).abs() < 1e-12);
+        assert!((calibration.ratios["tiers"] - 33.2 / 996.9).abs() < 1e-12, "{calibration:?}");
+    }
+
+    /// A §6: «Тщательно» reports a stage «Стандарт» never does, and the estimate for a standard
+    /// run must not carry it for ever — it halves with every run that does not report it.
+    #[test]
+    fn a_stage_a_run_did_not_report_fades() {
+        let mut thorough = karas();
+        thorough.timings.push(StageTime { stage: "tier_agree".to_owned(), seconds: 498.45 });
+
+        let mut calibration = Calibration::default();
+        calibration.learn(&thorough);
+        assert!((calibration.ratios["tier_agree"] - 0.5).abs() < 1e-3, "{calibration:?}");
+
+        calibration.learn(&karas());
+        assert!((calibration.ratios["tier_agree"] - 0.25).abs() < 1e-3, "{calibration:?}");
+        calibration.learn(&karas());
+        assert!((calibration.ratios["tier_agree"] - 0.125).abs() < 1e-3, "{calibration:?}");
+        // and the stages the runs do report are untouched by the fading
+        assert!((calibration.ratios["tiers"] - 33.2 / 996.9).abs() < 1e-12, "{calibration:?}");
     }
 
     /// A §6: no estimate before the first run; after it, the pairs at the measured rate plus what

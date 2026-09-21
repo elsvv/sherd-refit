@@ -373,30 +373,54 @@ pub(crate) fn run_delete(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<WorkspaceView, CommandError> {
-    // Job slot first, then the workspace, as `crate::state` requires — and held to the end, not
-    // sampled: let go of after the check, it leaves a gap in which a run starts on the very
-    // folder about to be moved away.
-    let slot = state.job()?;
-    if slot.as_ref().is_some_and(|job| job.run_id.as_deref() == Some(run_id.as_str())) {
-        return Err(CommandError::busy());
-    }
-    let job = slot.as_ref().map(JobSlot::view);
-    let held = state.workspace()?;
-    let ws = held.as_ref().ok_or_else(CommandError::no_workspace)?;
-    let dir = run_dir_of(ws, &run_id)?;
+    // The folder is resolved under both locks — job slot first, then the workspace, as
+    // `crate::state` requires — and **both are let go of before the trash is asked to take it**.
+    // `trash::delete` is a call into the desktop's own trash service and takes as long as the
+    // disk does: a folder on a network share that has gone to sleep can hold it for a minute, and
+    // with the job slot held that minute is one in which every command the window makes waits —
+    // «Отменить» among them. No lock of this app is held across a file operation of unbounded
+    // time.
+    //
+    // What the gap can hold is a job started between the check and the delete, and it is not the
+    // job this check is about: `host::start_run` names a new run after the current minute and
+    // never after a folder that already exists, so the run being moved away cannot become the one
+    // being written. The run that *is* being written is refused above, under the lock.
+    let dir = {
+        let slot = state.job()?;
+        if slot.as_ref().is_some_and(|job| job.run_id.as_deref() == Some(run_id.as_str())) {
+            return Err(CommandError::busy());
+        }
+        let held = state.workspace()?;
+        let ws = held.as_ref().ok_or_else(CommandError::no_workspace)?;
+        run_dir_of(ws, &run_id)?
+    };
     trash::delete(&dir).map_err(|source| {
         let why = format!("the run could not be moved to the trash: {source}");
         AppError::io(&dir, std::io::Error::other(why))
     })?;
+    // And the view is read again afterwards, in the same order, so that it describes the
+    // workspace as the delete left it and not as it was before.
+    let slot = state.job()?;
+    let job = slot.as_ref().map(JobSlot::view);
+    let held = state.workspace()?;
+    let ws = held.as_ref().ok_or_else(CommandError::no_workspace)?;
     Ok(view::build(ws, job)?)
 }
 
-/// What this build can run on (A §7.4's «Вычисления»), as the launch sheet lists it under the
+/// What this build can run on (A §7.4's «Вычисления»), as the launch sheet says it under the
 /// backend choice.
+///
+/// The names and not the engine's lines. `sherd-refit-rs info` writes for an operator reading a
+/// terminal — «cpu, gpu (wgpu 30.0.1, 1 adapter; R §5.2's coarse score and R §5.4's stage-1 ICP
+/// rungs on the device, …)» — and A §7.4 asks the sheet for one thing: which card a run would go
+/// to. Everything else in those lines is the app talking to its own developers.
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct EngineInfoView {
-    /// One line per executor, in the engine's own words.
-    pub(crate) backends: Vec<String>,
+    /// Every adapter the engine offered, by name: «Metal Apple M2 Pro». Empty when it found none.
+    pub(crate) adapters: Vec<String>,
+    /// Whether A §7.4's «GPU» is a real choice on this machine — a fact the window branches on,
+    /// rather than the length of a list it would have to know the meaning of.
+    pub(crate) gpu: bool,
 }
 
 /// What the engine can run on. Asked of a worker once and kept (A §2.1: only the engine's own
@@ -408,11 +432,18 @@ pub(crate) struct EngineInfoView {
 /// answer twice, which is a wasted process and not a wrong one — the alternative is a lock held
 /// across a spawn, which [`crate::state`] does not allow.
 ///
+/// **`async`, and not for the sake of an `await`.** A plain `#[tauri::command]` runs on the main
+/// thread, and this one spawns a process and drives it to its end: opening a GPU instance and
+/// enumerating its adapters is tens of milliseconds on a warm machine and can be a second on a
+/// cold driver, and all of it would be a window that does not repaint. `(async)` puts the call on
+/// Tauri's pool instead; nothing inside it is held across a suspension point, because there is
+/// none.
+///
 /// # Errors
 ///
 /// [`CommandError`] of kind `worker` when the engine process cannot be started or says it
 /// failed.
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn engine_info(state: State<'_, AppState>) -> Result<EngineInfoView, CommandError> {
     {
         let cached = state.engine_info()?;
@@ -440,9 +471,49 @@ fn ask_engine_info() -> Result<EngineInfoView, CommandError> {
         }
     });
     match outcome {
-        Outcome::Done { .. } => Ok(EngineInfoView { backends }),
+        Outcome::Done { .. } => {
+            let adapters = adapter_names(&backends);
+            Ok(EngineInfoView { gpu: !adapters.is_empty(), adapters })
+        }
         Outcome::Failed { message, .. } => Err(AppError::Worker(message).into()),
     }
+}
+
+/// The adapters named in `sherd-refit-rs info`'s backend lines, in enumeration order.
+///
+/// The engine writes one summary line and then one **indented** line per adapter, which is
+/// `sherd_gpu::AdapterEntry`'s own `Display`: `  [0] Metal Apple M2 Pro (IntegratedGpu)`, with a
+/// ` driver=… …` tail where the platform has one. A build with no adapter, and a build without
+/// the GPU feature at all, write the summary line and nothing else — so no adapter lines is the
+/// honest «none», and not a parse that failed.
+fn adapter_names(lines: &[String]) -> Vec<String> {
+    lines.iter().filter_map(|line| adapter_name(line)).collect()
+}
+
+/// One adapter line as a name, or `None` for anything that is not one.
+///
+/// The indentation is the test, then a bracketed number: a summary line is not indented, and a
+/// line some later build adds under one is not `[0] …`. What comes off the end is the developer's
+/// half — the device type and the driver — because the sheet's sentence is «Видеокарта: Metal
+/// Apple M2 Pro» and A §7.4 asks for which card and nothing more.
+fn adapter_name(line: &str) -> Option<String> {
+    if !line.starts_with([' ', '\t']) {
+        return None;
+    }
+    let (index, tail) = line.trim().strip_prefix('[')?.split_once("] ")?;
+    index.parse::<usize>().ok()?;
+    let named = match tail.split_once(" driver=") {
+        Some((head, _)) => head,
+        None => tail,
+    };
+    // `(IntegratedGpu)` last, after the driver tail is off: an adapter's own name may hold
+    // brackets («AMD Radeon (TM) Graphics»), and it is the final group that is the device type.
+    let named = match named.trim_end().strip_suffix(')').and_then(|body| body.rsplit_once(" (")) {
+        Some((name, _type)) => name,
+        None => named,
+    };
+    let named = named.trim();
+    (!named.is_empty()).then(|| named.to_owned())
 }
 
 /// The folder of the run `run_id` names, on the open workspace.
@@ -581,7 +652,37 @@ fn config_dir(app: &AppHandle) -> Result<PathBuf, CommandError> {
 
 #[cfg(test)]
 mod tests {
-    use super::tail;
+    use super::{adapter_names, tail};
+
+    /// A §7.4: the sheet says which card a run would go to, and the engine's `info` says a great
+    /// deal more than that. What it says is parsed, not shown.
+    #[test]
+    fn the_sheet_is_given_the_adapters_and_none_of_the_prose() {
+        let lines = [
+            "cpu, gpu (wgpu 30.0.1, 2 adapters; R §5.2's coarse score and R §5.4's stage-1 ICP \
+             rungs on the device, R §5.6's stage 2 and R §6's two methods on the CPU (policy; D \
+             §12's 2c struck))",
+            "  [0] Metal Apple M2 Pro (IntegratedGpu)",
+            "  [1] Vulkan AMD Radeon (TM) Graphics (DiscreteGpu) driver=amdvlk 2024.Q3.1",
+        ]
+        .map(str::to_owned);
+        assert_eq!(
+            adapter_names(&lines),
+            ["Metal Apple M2 Pro", "Vulkan AMD Radeon (TM) Graphics"]
+        );
+
+        // A build that found no adapter, and a build without the GPU feature, each say so in one
+        // unindented line: no adapters, and nothing mistaken for one.
+        let none = ["cpu; gpu built in (wgpu 30.0.1) but no Metal, Vulkan or DX12 adapter found"]
+            .map(str::to_owned);
+        assert!(adapter_names(&none).is_empty());
+        let no_feature = ["cpu (built without the `gpu` feature)".to_owned()];
+        assert!(adapter_names(&no_feature).is_empty());
+
+        // And a line the engine may add under a backend that is not an adapter is not one.
+        let other = ["  limits: maxBufferSize 2 GiB".to_owned(), "  [x] nonsense".to_owned()];
+        assert!(adapter_names(&other).is_empty());
+    }
 
     /// A §10's «Показать лог» shows the end of a log and not the whole of one, and the end of a
     /// log is the part a reviewer needs: the lines around what went wrong, last.

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { api } from "../ipc";
-import type { CalibrationView } from "../ipc/api";
+import type { CalibrationView, EngineInfoView } from "../ipc/api";
 import type { BackendChoice } from "../ipc/bindings/BackendChoice";
 import type { Preset } from "../ipc/bindings/Preset";
 import type { RunSpec } from "../ipc/bindings/RunSpec";
@@ -60,7 +60,7 @@ export default function LaunchSheet({ view, patch, onClose }: LaunchSheetProps) 
   const language = useUi((state) => state.language);
   const [draft, setDraft] = useState<Draft>(() => initial(view, patch));
   const [calibration, setCalibration] = useState<CalibrationView | null>(null);
-  const [backends, setBackends] = useState<readonly string[]>([]);
+  const [engine, setEngine] = useState<EngineInfoView | null>(null);
 
   useEffect(() => {
     let gone = false;
@@ -77,11 +77,11 @@ export default function LaunchSheet({ view, patch, onClose }: LaunchSheetProps) 
     void api.engineInfo().then(
       (answer) => {
         if (!gone) {
-          setBackends(answer.backends);
+          setEngine(answer);
         }
       },
       () => {
-        // The three buttons are what the user chooses between; the lines under them are a note.
+        // The three buttons are what the user chooses between; the line under them is a note.
       },
     );
     return () => {
@@ -111,8 +111,11 @@ export default function LaunchSheet({ view, patch, onClose }: LaunchSheetProps) 
       count: calibration.pairs_upper_bound,
       n: formatCount(calibration.pairs_upper_bound, language),
     });
+    // One sentence either way. A §6's «оценка появится через минуту» carries the pair count
+    // inside it and not as a second, verbless sentence after it: «… на этой машине. до 66 пар.»
+    // reads as a line that was cut in half.
     if (calibration.estimate_seconds === null) {
-      return `${t("sheet.estimate_none")} ${pairs}.`;
+      return t("sheet.estimate_none", { pairs });
     }
     return t("sheet.estimate", { time: formatDuration(calibration.estimate_seconds, t), pairs });
   })();
@@ -215,15 +218,23 @@ export default function LaunchSheet({ view, patch, onClose }: LaunchSheetProps) 
             setDraft({ ...draft, backend });
           }}
         />
-        {backends.length === 0 ? null : (
+        {/*
+          Which card a run would go to, and nothing else. The engine's own `info` lines are
+          written for an operator reading a terminal — the wgpu version, which of R §6's methods
+          have kernels — and A §7.4 asks this corner of the sheet for one thing only. A machine
+          with no adapter is told what that means for the run it is about to start.
+        */}
+        {engine === null ? null : (
           <ul className="mt-1.5">
-            {backends.map((line) => (
-              // The engine's own words, indentation included: the adapter lines under a backend
-              // are indented by two spaces, and reflowing them loses which adapter belongs where.
-              <li key={line} className="font-mono text-[10px] leading-snug break-words whitespace-pre-wrap text-muted">
-                {line}
-              </li>
-            ))}
+            {engine.adapters.length === 0 ? (
+              <li className="text-[11px] leading-snug text-muted">{t("sheet.no_adapter")}</li>
+            ) : (
+              engine.adapters.map((name) => (
+                <li key={name} className="text-[11px] leading-snug break-words text-muted">
+                  {t("sheet.adapter", { name })}
+                </li>
+              ))
+            )}
           </ul>
         )}
       </div>

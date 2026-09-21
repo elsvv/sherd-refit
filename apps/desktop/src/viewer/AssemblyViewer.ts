@@ -474,9 +474,7 @@ export class AssemblyViewer {
   /** Everything one load put in the scene, out of it and off the GPU. */
   private clear(): void {
     for (const member of this.order) {
-      if (member.object !== null) {
-        this.release(member.object);
-      }
+      this.release(member);
       member.holder.removeFromParent();
     }
     for (const group of this.groups) {
@@ -490,8 +488,25 @@ export class AssemblyViewer {
     this.hovered = null;
   }
 
-  /** A loaded scene's geometries, their bounds trees and their materials. */
-  private release(object: Object3D): void {
+  /**
+   * One fragment's geometries, their bounds trees and the materials **its own GLB brought** —
+   * back to the GPU.
+   *
+   * The palette's are not its own. `paint` hangs one shared `MeshStandardMaterial` per colour and
+   * emphasis on every mesh of every fragment, and those live as long as the viewer does; freeing
+   * them here would free them once per mesh — a dozen times over for one material — and, worse,
+   * leave the next assembly wearing a material whose GPU program has already been given back.
+   * So the GLB's own material goes on again first, and the palette is disposed exactly once, in
+   * [`dispose`](AssemblyViewer.dispose).
+   */
+  private release(member: Member): void {
+    const object = member.object;
+    if (object === null) {
+      return;
+    }
+    for (const skin of member.skins) {
+      skin.mesh.material = skin.scan;
+    }
     object.traverse((child) => {
       if (isMesh(child)) {
         child.geometry.disposeBoundsTree();
@@ -499,6 +514,8 @@ export class AssemblyViewer {
     });
     disposeObject(object);
     object.removeFromParent();
+    member.object = null;
+    member.skins = [];
   }
 
   /** One fragment's mesh has arrived: hang it, index it for picking, and show it at once. */

@@ -72,9 +72,14 @@ export interface CalibrationView {
   estimate_seconds: number | null;
 }
 
-/** What this build can run on (A §7.4's «Вычисления»), one line per executor in the engine's words. */
+/**
+ * What this build can run on (A §7.4's «Вычисления»). The shell parses the engine's `info` lines
+ * and hands over the part the sheet says out loud: which cards a run could go to — «Metal Apple
+ * M2 Pro» — and whether «GPU» is a real choice here at all.
+ */
 export interface EngineInfoView {
-  backends: string[];
+  adapters: string[];
+  gpu: boolean;
 }
 
 /** Undoes one subscription. */
@@ -125,7 +130,7 @@ export interface Api {
   runLog(runId: string | null, maxLines: number): Promise<string>;
   /** Moves a run's folder to the OS trash (A §4) and hands back the workspace without it. */
   runDelete(runId: string): Promise<WorkspaceView>;
-  /** What the engine can run on; asked of a worker once and kept by the shell. */
+  /** Which cards the engine sees; asked of a worker once and kept by the shell. */
   engineInfo(): Promise<EngineInfoView>;
   pickFolder(title: string): Promise<string | null>;
   /** A URL the window can fetch for a file inside the open workspace. */

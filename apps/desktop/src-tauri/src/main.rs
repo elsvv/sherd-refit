@@ -46,6 +46,8 @@ fn main() {
             commands::input_link,
             commands::fragment_exclude,
             commands::prepare_start,
+            commands::run_start,
+            commands::calibration,
             commands::job_cancel,
         ])
         .run(tauri::generate_context!())

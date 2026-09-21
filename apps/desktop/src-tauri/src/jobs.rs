@@ -3,17 +3,26 @@
 //!
 //! Nothing of the engine runs in the window's process — that is the whole point of the two roles
 //! (A §2.1): a 3 GB match and a GPU device live in a child that can be killed, and the window
-//! stays answerable while it works. So [`start_prepare`] returns as soon as the worker is on its
-//! way, and everything after that reaches the frontend as two events: `engine:event` for each
-//! line the worker wrote, and `engine:finished` once, carrying the whole [`WorkspaceView`] the
-//! window should now be showing (A §5: one shape, so the window never keeps a second opinion).
+//! stays answerable while it works. So [`start`] returns as soon as the worker is on its way, and
+//! everything after that reaches the frontend as two events: `engine:event` for each line the
+//! worker wrote, and `engine:finished` once, carrying the whole [`WorkspaceView`] the window
+//! should now be showing (A §5: one shape, so the window never keeps a second opinion).
+//!
+//! Both kinds of job go through one function, because everything around them is the same: the one
+//! slot, the one thread, the two events. What a run adds is what the host owns and the worker may
+//! not touch (A §2.1) — `assembly.json` the moment the groups are reported, `run.json` closed when
+//! it is over, and what it measured taught to A §6's calibration.
+
+use std::path::PathBuf;
 
 use serde::Serialize;
 use sherd_app_core::AppError;
+use sherd_app_core::eta::{self, Calibration};
 use sherd_app_core::host::{self, Outcome, Worker, WorkerCommand};
 use sherd_app_core::protocol::{Event, RunSpec};
-use sherd_app_core::run::{EngineInfo, FailKind, RunCounts};
+use sherd_app_core::run::{EngineInfo, FailKind, RunCounts, RunFile};
 use sherd_app_core::view::{self, JobKind, WorkspaceView};
+use sherd_app_core::workspace::{WORKSPACE_FILE, Workspace};
 use sherd_core::Params;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -177,43 +186,79 @@ pub(crate) fn worker_command() -> Result<WorkerCommand, CommandError> {
     Ok(WorkerCommand { program, args: vec![ENGINE_WORKER.to_owned()] })
 }
 
-/// Starts a `Prepare` on the open workspace (A §5: the preprocessing every run needs anyway, and
-/// the thumbnails, display meshes and warnings fall out of it).
+/// Which job to put on the worker. The two kinds differ only in what the host files around them
+/// (A §2.1), which is why one function starts both.
+#[derive(Clone, Debug)]
+pub(crate) enum JobStart {
+    /// Preprocess the collection into the workspace's cache (A §5).
+    Prepare,
+    /// One run of the pipeline, on this launch sheet (A §7.4).
+    Run {
+        /// What the user launched.
+        spec: RunSpec,
+    },
+}
+
+/// What [`start`] has in hand once the worker is on its way and before the job thread is spawned.
+#[derive(Debug)]
+struct Started {
+    /// Which kind of job it is, for the slot and for every event the window is sent.
+    job: JobKind,
+    /// The worker, to be driven on the job thread.
+    worker: Worker,
+    /// A run's `run.json` as it was opened, and the folder it lives in; `None` for a `Prepare`.
+    ///
+    /// Both are taken here, under the workspace lock, because the job thread may not hold that
+    /// lock while it drives a worker for an hour — and both are all it needs until the end.
+    run: Option<(RunFile, PathBuf)>,
+}
+
+/// Starts a job on the open workspace and returns as soon as its worker is on its way: the new
+/// run's id for a [`JobStart::Run`], `None` for a [`JobStart::Prepare`].
 ///
 /// The job slot is taken first and held until the worker is in it. That is deliberate: two
 /// «Подготовить» a millisecond apart would otherwise both pass the `busy` check and put two
 /// workers on the same `cache/`. The workspace lock is taken and released inside that, in the
-/// order [`crate::state`] documents, and neither is held while the worker runs.
+/// order [`crate::state`] documents, and **neither is held while the worker runs** — an hour of
+/// matching with the workspace locked would block every command the window makes in the meantime.
+/// What the thread needs from the workspace is therefore taken before it starts ([`Started::run`])
+/// and the lock is taken again, briefly, in [`close_run`] and [`finish`].
 ///
 /// # Errors
 ///
 /// [`CommandError`] of kind `busy` when a job is already on the worker, `no_workspace` when none
-/// is open, `worker` when the engine process or its thread cannot be started, and `io`/`engine`
-/// when the input folder cannot be read.
-pub(crate) fn start_prepare(app: &AppHandle, state: &AppState) -> Result<(), CommandError> {
+/// is open, `worker` when the engine process or its thread cannot be started, `io`/`json` when
+/// `sherd-workspace.json` or `run.json` cannot be written, and `io`/`engine` when the input folder
+/// cannot be read.
+pub(crate) fn start(
+    app: &AppHandle,
+    state: &AppState,
+    kind: JobStart,
+) -> Result<Option<String>, CommandError> {
     let mut slot = state.job()?;
     if slot.is_some() {
         return Err(CommandError::busy());
     }
-    let (job, log) = {
-        let held = state.workspace()?;
-        let ws = held.as_ref().ok_or_else(CommandError::no_workspace)?;
-        // A §7.4: the sheet the user last launched decides `target_faces`, the seed and the
-        // budgets, so the cache a `Prepare` leaves is the cache that run would have wanted.
-        // Anything else on disk — an older app's sheet, a hand edit — falls back to the defaults
-        // rather than refusing to prepare: the sheet is a convenience, not the user's work.
-        let spec = ws
-            .file()
-            .last_spec
-            .clone()
-            .and_then(|sheet| serde_json::from_value::<RunSpec>(sheet).ok())
-            .unwrap_or_default();
-        (host::prepare_job(ws, &spec)?, ws.root().join(PREPARE_LOG))
+    let command = worker_command()?;
+    let Started { job, mut worker, run } = {
+        let mut held = state.workspace()?;
+        let ws = held.as_mut().ok_or_else(CommandError::no_workspace)?;
+        match kind {
+            JobStart::Prepare => prepare(ws, &command)?,
+            JobStart::Run { spec } => open_run(ws, &command, &spec)?,
+        }
     };
-    let mut worker = Worker::spawn(&worker_command()?, &job, Some(&log))?;
     let canceller = worker.canceller();
+    let run_id = run.as_ref().map(|(file, _)| file.id.clone());
+    // Split, so that the drive closure can borrow the folder while the file itself is written
+    // afterwards.
+    let (mut run_file, run_dir) = match run {
+        Some((file, dir)) => (Some(file), Some(dir)),
+        None => (None, None),
+    };
 
     let app = app.clone();
+    let id = run_id.clone();
     // The thread is started before the slot is filled, and cannot get ahead of it: its first act
     // after the run is to take this same lock, which is still held here.
     std::thread::Builder::new()
@@ -223,19 +268,106 @@ pub(crate) fn start_prepare(app: &AppHandle, state: &AppState) -> Result<(), Com
             // two lines, this thread does not leave the app «busy» behind it.
             let mut guard = SlotGuard::new(app.clone());
             let outcome = host::drive(&mut worker, |event| {
-                let payload =
-                    EngineEvent { job: JobKind::Prepare, run_id: None, event: event.clone() };
-                // A window that has gone away is not a reason to stop preparing; the worker is
+                // A §2.1: `assembly.json` is the host's file, not the worker's, and it is written
+                // the moment the groups are reported rather than at the end — a run that dies
+                // after assembling still leaves the window something to draw. Failing to write it
+                // does not stop the run: the log says so, and the run's own files are unharmed.
+                if let Event::Assembly(assembly) = event
+                    && let Some(dir) = run_dir.as_deref()
+                    && let Err(error) = host::save_assembly(dir, assembly)
+                {
+                    tracing::error!(
+                        path = %dir.display(),
+                        %error,
+                        "the run's assembly could not be filed; the run goes on without it"
+                    );
+                }
+                let payload = EngineEvent { job, run_id: id.clone(), event: event.clone() };
+                // A window that has gone away is not a reason to stop the job; the worker is
                 // ended by dropping it, not by an event that could not be delivered.
                 let _ = app.emit(EVENT, payload);
             });
-            finish(&app, &mut guard, JobKind::Prepare, None, &outcome);
+            // Before the slot is freed: `finish` is the line after which another job may start,
+            // and `run.json` must be closed and the calibration taught before that happens.
+            if let Some(file) = run_file.as_mut() {
+                close_run(&app, file, &outcome);
+            }
+            finish(&app, &mut guard, job, id, &outcome);
         })
         // Nothing to undo: the worker was moved into the closure, and dropping a `Worker` kills
         // and reaps the process it holds.
         .map_err(|e| AppError::Worker(format!("the job's thread could not be started: {e}")))?;
-    *slot = Some(JobSlot { kind: JobKind::Prepare, run_id: None, canceller });
+    *slot = Some(JobSlot { kind: job, run_id: run_id.clone(), canceller });
+    Ok(run_id)
+}
+
+/// Starts a `Prepare` (A §5: the preprocessing every run needs anyway, and the thumbnails, display
+/// meshes and warnings fall out of it).
+///
+/// # Errors
+///
+/// As [`start`].
+pub(crate) fn start_prepare(app: &AppHandle, state: &AppState) -> Result<(), CommandError> {
+    start(app, state, JobStart::Prepare)?;
     Ok(())
+}
+
+/// Starts a run and answers with its id (A §7), which is the folder under `runs/` the window will
+/// be asking about from here on.
+///
+/// # Errors
+///
+/// As [`start`].
+pub(crate) fn start_run(
+    app: &AppHandle,
+    state: &AppState,
+    spec: RunSpec,
+) -> Result<String, CommandError> {
+    // `start` answers `Some` for every `JobStart::Run` — the id comes from the `run.json` it has
+    // just written — so this is unreachable rather than a case the window has to handle. It is an
+    // error and not an `expect` because a panic on the command thread poisons the job slot for
+    // the rest of the session, and there is nothing here worth that.
+    start(app, state, JobStart::Run { spec })?.ok_or_else(|| {
+        AppError::Worker("the run was started without an id of its own".to_owned()).into()
+    })
+}
+
+/// The `Prepare` job and a worker on it.
+fn prepare(ws: &Workspace, command: &WorkerCommand) -> Result<Started, CommandError> {
+    // A §7.4: the sheet the user last launched decides `target_faces`, the seed and the budgets,
+    // so the cache a `Prepare` leaves is the cache that run would have wanted. Anything else on
+    // disk — an older app's sheet, a hand edit — falls back to the defaults rather than refusing
+    // to prepare: the sheet is a convenience, not the user's work.
+    let spec = ws
+        .file()
+        .last_spec
+        .clone()
+        .and_then(|sheet| serde_json::from_value::<RunSpec>(sheet).ok())
+        .unwrap_or_default();
+    let job = host::prepare_job(ws, &spec)?;
+    // A `Prepare` has no run folder, so its log sits beside `sherd-workspace.json` (A §4).
+    let worker = Worker::spawn(command, &job, Some(&ws.root().join(PREPARE_LOG)))?;
+    Ok(Started { job: JobKind::Prepare, worker, run: None })
+}
+
+/// Opens a run: the sheet remembered for the next `Prepare` (A §7.4), `run.json` written as
+/// `running` before anything can go wrong (A §4), and a worker on the job.
+///
+/// The constraints and the run carried from are `None` here: A §8.5's «продолжить с решениями» is
+/// milestone 5's, and a run started from the launch sheet carries nobody's decisions.
+fn open_run(
+    ws: &mut Workspace,
+    command: &WorkerCommand,
+    spec: &RunSpec,
+) -> Result<Started, CommandError> {
+    // Serialising a `RunSpec` cannot fail in practice — it is fifteen numbers and three enums —
+    // but the sheet is on its way into a file, so its failure is that file's, not a panic.
+    let sheet = serde_json::to_value(spec)
+        .map_err(|source| AppError::Json { path: ws.root().join(WORKSPACE_FILE), source })?;
+    ws.set_last_spec(sheet)?;
+    let (file, worker) = host::start_run(ws, command, spec, None, None, chrono::Local::now())?;
+    let dir = ws.run_dir(&file.id);
+    Ok(Started { job: JobKind::Run, worker, run: Some((file, dir)) })
 }
 
 /// Asks the running job to stop (A §2.2's «Отменить»); no job is no error, because the button and
@@ -253,6 +385,68 @@ pub(crate) fn cancel(state: &AppState) -> Result<(), CommandError> {
         canceller.cancel();
     }
     Ok(())
+}
+
+/// Closes a run once its worker is gone: `run.json` says how it ended and what it found (A §4),
+/// and what it measured is taught to this machine's calibration (A §6).
+///
+/// Runs on the job thread, where there is nobody to return an error to, so everything here is
+/// logged and shrugged off: a `run.json` that could not be rewritten still describes a run whose
+/// files are on disk, and the next open marks it `interrupted` rather than losing it.
+///
+/// The workspace is locked again here and let go of before [`finish`] takes the job slot — the
+/// order [`crate::state`] requires is job first then workspace, and this holds only the second.
+/// It cannot have been closed under us (`workspace_close` and `open_with` both refuse while the
+/// slot is full), which is a reason to expect a workspace and not a reason to `unwrap` one.
+fn close_run(app: &AppHandle, run: &mut RunFile, outcome: &Outcome) {
+    if let Some(state) = app.try_state::<AppState>()
+        && let Ok(held) = state.workspace()
+        && let Some(ws) = held.as_ref()
+    {
+        if let Err(error) = host::finish_run(ws, run, outcome, chrono::Local::now()) {
+            tracing::error!(run = %run.id, %error, "the run's run.json could not be finished");
+        }
+    } else {
+        tracing::error!(
+            run = %run.id,
+            "the workspace is no longer held by this process; run.json stays «running» until the \
+             folder is opened again"
+        );
+    }
+    // Only a run that finished has anything to teach: a cancelled or failed one measured a part
+    // of a matching, and A §6's average is of whole runs.
+    if let Outcome::Done { counts: Some(counts), .. } = outcome {
+        learn(app, counts);
+    }
+}
+
+/// Takes what a finished run measured into this machine's calibration (A §6).
+///
+/// The launch sheet's «≈ 11 мин» is this file and nothing else — the same collection on a laptop
+/// and on a workstation are an hour apart, and only what *this* machine did last time can say
+/// which one it is. It lives in the app's config folder and not in the workspace, because it is a
+/// property of the computer and follows no folder anywhere.
+///
+/// Derived data on the side (A §2.1: host-side, written atomically): a config folder that cannot
+/// be found or written costs the next estimate its accuracy and nothing else, so it is logged
+/// rather than turned into a run that failed after it had succeeded.
+fn learn(app: &AppHandle, counts: &RunCounts) {
+    let path = match app.path().app_config_dir() {
+        Ok(dir) => dir.join(eta::CALIBRATION_FILE),
+        Err(error) => {
+            tracing::error!(%error, "this machine has no config folder; nothing is calibrated");
+            return;
+        }
+    };
+    let mut calibration = Calibration::load(&path);
+    calibration.learn(counts);
+    if let Err(error) = calibration.save(&path) {
+        tracing::error!(
+            path = %path.display(),
+            %error,
+            "the calibration could not be written; the next estimate is the one before it"
+        );
+    }
 }
 
 /// Empties the job slot and tells the window how the job ended.

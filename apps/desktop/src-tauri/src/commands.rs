@@ -8,9 +8,11 @@
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use sherd_app_core::run;
+use sherd_app_core::eta::{self, Calibration};
+use sherd_app_core::protocol::RunSpec;
 use sherd_app_core::view::{self, WorkspaceView};
 use sherd_app_core::workspace::Workspace;
+use sherd_app_core::{run, snapshot};
 use tauri::{AppHandle, Manager, State};
 
 use crate::error::CommandError;
@@ -171,6 +173,80 @@ pub(crate) fn prepare_start(
     state: State<'_, AppState>,
 ) -> Result<(), CommandError> {
     jobs::start_prepare(&app, state.inner())
+}
+
+/// Starts a run on the open workspace (A §7) and answers with its id — the folder under `runs/`
+/// the window asks about from here on. Returns as soon as the worker is on its way: everything
+/// the run says arrives as `engine:event`, and its end, with `run.json` already closed and a
+/// fresh view, as `engine:finished`.
+///
+/// The sheet is remembered before the run starts, so the next «Подготовить» prepares the cache
+/// *this* run would have wanted (A §7.4).
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `busy`, `no_workspace`, `worker`, `io`, `json` or `engine`; see
+/// [`jobs::start`].
+#[tauri::command]
+pub(crate) fn run_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    spec: RunSpec,
+) -> Result<String, CommandError> {
+    jobs::start_run(&app, state.inner(), spec)
+}
+
+/// What a run of this collection will take, for the launch sheet's «≈ 11 мин» (A §6).
+///
+/// Three things and not one, because the sheet shows all three: what this machine has measured,
+/// how many pairs the collection can make at most — A §7.4's «до N пар» — and the seconds those
+/// pairs come to. The estimate is `None` until a run has finished on this machine; A §6 asks the
+/// sheet to say so rather than to invent a figure.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct CalibrationView {
+    /// What the last runs on this machine measured (A §6).
+    pub(crate) calibration: Calibration,
+    /// `n·(n−1)/2` over the scans a run would take in. An upper bound: R §4.1's wall-ratio filter
+    /// skips pairs whose thicknesses cannot belong together, and how many is not known until
+    /// matching has started.
+    pub(crate) pairs_upper_bound: usize,
+    /// Seconds those pairs will take, or `None` before the first finished run.
+    pub(crate) estimate_seconds: Option<f64>,
+}
+
+/// [`CalibrationView`] for the open workspace.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `no_workspace`, `io` when this machine has no config directory, or
+/// `io`/`engine` when the input folder is there and cannot be listed.
+#[tauri::command]
+pub(crate) fn calibration(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<CalibrationView, CommandError> {
+    let calibration = Calibration::load(&config_dir(&app)?.join(eta::CALIBRATION_FILE));
+    let pairs = eta::pairs_upper_bound(included_scans(state.inner())?);
+    Ok(CalibrationView {
+        estimate_seconds: calibration.estimate(pairs),
+        calibration,
+        pairs_upper_bound: pairs,
+    })
+}
+
+/// How many scans a run would take in: the input folder as it stands, less A §5.1's exclusions.
+///
+/// An input folder that cannot be reached is no scans rather than an error — A §5 gives «вход
+/// недоступен» its own row and the sheet is not reachable from it, but an estimate asked for
+/// anyway should say «0 пар» and not fail. The job slot is not read: the answer does not depend
+/// on what is running, and the sheet asks for this while a run is on as well as before one.
+fn included_scans(state: &AppState) -> Result<usize, CommandError> {
+    let held = state.workspace()?;
+    let ws = held.as_ref().ok_or_else(CommandError::no_workspace)?;
+    let Some(input) = ws.input() else { return Ok(0) };
+    let excluded = &ws.file().excluded;
+    let scans = snapshot::scan(&input, excluded)?;
+    Ok(scans.files.iter().filter(|file| !excluded.contains(&file.name)).count())
 }
 
 /// «Отменить» (A §2.2). Asks the job to stop; it ends at its next unit of work and reports

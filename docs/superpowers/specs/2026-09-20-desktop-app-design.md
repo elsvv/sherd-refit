@@ -1,6 +1,8 @@
 # sherd-refit — desktop app: foundation and join review
 
-**Date:** 2026-09-20. **Status:** design, no code. Implements the `app` row of D §12
+**Date:** 2026-09-20. **Status:** implemented, milestones 1–6 (§13) — with the two manual
+acceptance runs on `karas` of §11 and the first run of the Blender script inside Blender still
+open; nothing is signed, notarised or published. Implements the `app` row of D §12
 (`2026-09-06-rust-core-design.md`, cited as `D`; the algorithm reference is cited as `R`). This is
 sub-project 1+2 of four; §12 names the other two and what is deliberately left to them.
 

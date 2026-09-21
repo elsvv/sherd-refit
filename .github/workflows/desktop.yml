@@ -1,0 +1,139 @@
+name: desktop
+
+# The window and its shell (A §0: macOS and Windows are the targets; Linux must keep building but
+# is not bundled). Separate from `rust.yml` because the two have almost nothing in common: this one
+# needs Node and pnpm, and its expensive job is a bundle, not a test matrix. It runs when the app
+# or any crate under it changes — `sherd-app-core` is the app's half of the engine, `sherd-backend`
+# and `sherd-core` are what it is built on. (GitHub Actions does not expand YAML anchors, hence the
+# two copies of the path list.)
+on:
+  push:
+    branches: [main, desktop-app]
+    paths:
+      - "apps/desktop/**"
+      - "crates/sherd-app-core/**"
+      - "crates/sherd-backend/**"
+      - "crates/sherd-core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/desktop.yml"
+  pull_request:
+    paths:
+      - "apps/desktop/**"
+      - "crates/sherd-app-core/**"
+      - "crates/sherd-backend/**"
+      - "crates/sherd-core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/desktop.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The window on its own: no Rust, no Tauri. `pnpm test` is Vitest over the pure logic
+  # (A §11: no component tests, no Playwright), and `pnpm build` is `tsc --noEmit` plus the Vite
+  # bundle the shell embeds — the same command `tauri build` runs as its `beforeBuildCommand`.
+  frontend:
+    name: lint + typecheck + test + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      # The pnpm version is the one `packageManager` pins (9.12.1); there is no package.json at
+      # the repository root, so the action has to be told where the app's is.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: apps/desktop/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+  # A §2.2: the wire contract has one source and it is the Rust. `ts-rs` writes the window's types
+  # out of the engine's own structs, and they are committed so that the frontend job above needs no
+  # cargo at all — which only holds while the committed copy is the current one. This job is what
+  # says so: regenerate, and the working tree must not move.
+  bindings:
+    name: bindings in step
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - name: Regenerate the window's types from the Rust
+        run: TS_RS_EXPORT_DIR="$PWD/apps/desktop/src/ipc/bindings" cargo test -p sherd-app-core --features ts --lib --locked
+      - name: They must match what is committed
+        run: |
+          if [ -n "$(git status --porcelain apps/desktop/src/ipc/bindings)" ]; then
+            echo "::error::The generated bindings differ from the committed ones. Run:"
+            echo '  TS_RS_EXPORT_DIR="$PWD/apps/desktop/src/ipc/bindings" cargo test -p sherd-app-core --features ts --lib'
+            echo "and commit the result."
+            git status --porcelain apps/desktop/src/ipc/bindings
+            git --no-pager diff -- apps/desktop/src/ipc/bindings
+            exit 1
+          fi
+
+  # The bundle, unsigned, on the two platforms A §0 names. Nothing here is signed, notarised or
+  # published — that is sub-project 4 (A §12); this job exists to prove the packaging still works
+  # and, for Windows, that the app builds there at all, since nobody has run it on Windows yet.
+  # No Linux bundle: it is not a target, and `cargo build` on Linux is `rust.yml`'s business.
+  bundle:
+    name: bundle (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: apps/desktop/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show active-toolchain
+      # `apps/desktop/src-tauri` is a cargo workspace of its own with its own `Cargo.lock`, and its
+      # `.cargo/config.toml` points `target-dir` back at the repository's `target/` — one build of
+      # the engine, not one per workspace. The cache has to be told both halves of that.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> ../../../target
+      - name: Install the window's dependencies
+        working-directory: apps/desktop
+        run: pnpm install --frozen-lockfile
+      # `pnpm build` runs first as the config's `beforeBuildCommand`; everything after `--` goes to
+      # cargo. `--ci` keeps the CLI from prompting for anything on a runner with no terminal.
+      - name: Build the bundle
+        working-directory: apps/desktop
+        run: pnpm tauri build --ci -- --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sherd-refit-${{ matrix.os }}
+          path: target/release/bundle/**
+          if-no-files-found: error
+          retention-days: 14

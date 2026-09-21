@@ -529,6 +529,7 @@ function fresh(path: string): WorkspaceView {
 function opened(path: string): WorkspaceView {
   // Another workspace's runs are another workspace's drafts: both go with the history.
   world.filed = {};
+  world.decisions = {};
   if (path !== WORKSPACE_PATH) {
     world.runs = [];
     return fresh(path);
@@ -572,6 +573,12 @@ const world: {
    * the session is closed and what the next session starts from.
    */
   filed: Record<string, AssemblyDto>;
+  /**
+   * And `decisions.json` the same way (A §8.1): the shell files the whole list before it is sent,
+   * so leaving the «Ревью» mode and coming back finds the verdicts where they were, the «Сборка»
+   * inspector shows them, and A §8.5's «Перенести решения ревью (N)» has an N.
+   */
+  decisions: Record<string, Decision[]>;
 } = {
   view: null,
   runs: [],
@@ -582,6 +589,7 @@ const world: {
   dropsWired: false,
   review: { runId: null, baseline: ASSEMBLY, assembly: ASSEMBLY },
   filed: {},
+  decisions: {},
 };
 
 /** Refuses the way the shell refuses: a plain `{ kind, message }`, never an `Error`. */
@@ -1325,9 +1333,9 @@ export const mockApi: Api = {
     return isCorrupt("candidates") ? corrupted(runId, "candidates.json") : Promise.resolve(CANDIDATES);
   },
 
-  // Nobody has reviewed a mocked run: an empty file is what the shell answers for one, and what
-  // A §8.5's «Перенести решения ревью (N)» counts to nothing from.
-  runDecisions: () => Promise.resolve({ version: 1, decisions: [] }),
+  // What was filed for this run, or the empty file the shell answers for a run nobody has
+  // reviewed — never a refusal, as `DecisionsFile::load_or_default` never is.
+  runDecisions: (runId) => Promise.resolve({ version: 1, decisions: world.decisions[runId] ?? [] }),
 
   reviewOpen: (runId) => {
     const view = held();
@@ -1371,8 +1379,10 @@ export const mockApi: Api = {
     }
     const { assembly, dropped } = reassembled(decisions.decisions);
     world.review = { ...world.review, assembly };
-    // A §2.1: the host files every assembly a session answers over the run's own `assembly.json`.
+    // A §2.1: the host files every assembly a session answers over the run's own `assembly.json`,
+    // and the list itself over its `decisions.json` — before it is sent, as `review_apply` does.
     world.filed[runId] = assembly;
+    world.decisions[runId] = decisions.decisions;
     at(REVIEW_APPLY_MS, () => {
       // What could not come along is said first, so the notice is up before the assembly the
       // reviewer will be looking at (the order the worker sends them in).

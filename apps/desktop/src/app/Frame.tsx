@@ -196,6 +196,20 @@ export default function Frame({ view }: { view: WorkspaceView }) {
     }
   }, [reviewing]);
 
+  // A §7.3's decisions from the «Сборка» inspector open a session too, and that pane has no
+  // «leaving» of its own to close it on: a click on «Подтвердить» is the last thing that happens
+  // there. So the frame gives the engine's three gigabytes back when what the session is a
+  // session *about* goes away — another run chosen, another workspace, or a mode that can use
+  // neither. Runs after the effect above, so a session that has just been opened over the newly
+  // selected run is not closed by the very change that opened it.
+  const usable = (mode === "review" || mode === "assembly") && assembled ? selectedRunId : null;
+  useEffect(() => {
+    const open = useReview.getState().runId;
+    if (open !== null && open !== usable) {
+      void useReview.getState().close();
+    }
+  }, [usable]);
+
   // A §10: a session that never got as far as `ready` — a run with no saved `match.state`, a
   // collection that has moved under it, a worker a run took away — is the end of the mode and not
   // a refusal to dismiss and try again. The refusal is copied out of the store because leaving
@@ -338,7 +352,11 @@ export default function Frame({ view }: { view: WorkspaceView }) {
   // And a refusal *inside* a session that is up — a decision the shell would not file, a seam the
   // worker could not compute. The session goes on serving, so this is dismissible and the mode
   // stays; only the reviewer has to know that what they just did did not happen.
-  if (mode === "review" && reviewReady && reviewError !== null) {
+  //
+  // In «Сборка» every refusal is this one, ready or not: a decision made in the inspector
+  // (A §7.3) has no mode to be thrown out of, so a session that would not even open has to say
+  // so here or the two buttons would simply do nothing.
+  if (reviewError !== null && (mode === "assembly" || (mode === "review" && reviewReady))) {
     banners.push({
       tone: "danger",
       text: t(`error.${reviewError.kind}`, { defaultValue: t("error.unknown") }),

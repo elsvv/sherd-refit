@@ -10,6 +10,7 @@ import type { WorkspaceView } from "../ipc/bindings/WorkspaceView";
 import { formatCount } from "../modes/input/format";
 import { useJobs } from "../state/jobs";
 import { useUi } from "../state/ui";
+import { useWorkspace } from "../state/workspace";
 import Button from "../ui/Button";
 import Dialog from "../ui/Dialog";
 import NumberField, { SwitchField } from "../ui/NumberField";
@@ -58,9 +59,38 @@ function initial(view: WorkspaceView, patch: Partial<RunSpec>): Draft {
 export default function LaunchSheet({ view, patch, onClose }: LaunchSheetProps) {
   const { t } = useTranslation();
   const language = useUi((state) => state.language);
+  const selectedRunId = useWorkspace((state) => state.selectedRunId);
   const [draft, setDraft] = useState<Draft>(() => initial(view, patch));
   const [calibration, setCalibration] = useState<CalibrationView | null>(null);
   const [engine, setEngine] = useState<EngineInfoView | null>(null);
+  /** How many decisions the selected run carries (A §8.5); 0 is «there is nothing to carry». */
+  const [decided, setDecided] = useState(0);
+  const [carry, setCarry] = useState(true);
+
+  // A §8.5's «Перенести решения ревью (N)». From the run's own `decisions.json` and not from the
+  // review store, because the store is blanked when the session closes and the file is what the
+  // shell will read when this run is named as the one to carry from — a count off the screen and
+  // a constraint set off the disk must be the same thing.
+  useEffect(() => {
+    if (selectedRunId === null) {
+      return undefined;
+    }
+    let gone = false;
+    void api.runDecisions(selectedRunId).then(
+      (file) => {
+        if (!gone) {
+          setDecided(file.decisions.length);
+        }
+      },
+      () => {
+        // A run whose file will not be read has nothing to offer here; the sheet still starts a
+        // run, and the «Ревью» mode is where that failure is worth a sentence.
+      },
+    );
+    return () => {
+      gone = true;
+    };
+  }, [selectedRunId]);
 
   useEffect(() => {
     let gone = false;
@@ -189,7 +219,10 @@ export default function LaunchSheet({ view, patch, onClose }: LaunchSheetProps) 
                 return;
               }
               onClose();
-              void useJobs.getState().startRun(spec);
+              // A §8.5: the run the decisions come from is the one being looked at, and the
+              // shell reads its `decisions.json` itself — accepted pairs are pinned and not
+              // matched again, rejected ones are skipped before matching.
+              void useJobs.getState().startRun(spec, carry && decided > 0 ? selectedRunId : null);
             }}
           >
             {t("sheet.submit")}
@@ -238,6 +271,24 @@ export default function LaunchSheet({ view, patch, onClose }: LaunchSheetProps) 
           </ul>
         )}
       </div>
+
+      {/* A §7.4's «перенести решения», and only over a run that has some: an offer to carry
+          nothing over would be a control that does nothing, and every run before the first
+          review is one of those. */}
+      {decided === 0 ? null : (
+        <section className="mt-3">
+          <h3 className="mb-1.5 text-[10px] tracking-wide text-muted uppercase">{t("sheet.carry_title")}</h3>
+          <div className="rounded-md border border-border">
+            <SwitchField
+              label={t("sheet.carry", { n: formatCount(decided, language) })}
+              hint={t("sheet.carry_hint")}
+              value={carry}
+              defaultValue
+              onChange={setCarry}
+            />
+          </div>
+        </section>
+      )}
 
       {draft.preset === "custom" ? (
         <section className="mt-3">

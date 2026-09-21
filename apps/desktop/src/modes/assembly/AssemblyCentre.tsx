@@ -52,6 +52,7 @@ export default function AssemblyCentre({ view }: { view: WorkspaceView }) {
   const explode = useUi((state) => state.assemblyExplode);
   const labels = useUi((state) => state.assemblyLabels);
   const selected = useUi((state) => state.selectedFragment);
+  const ghost = useUi((state) => state.assemblyGhost);
   const fly = useUi((state) => state.assemblyFly);
   const fitSignal = useFitSignal((state) => state.signal);
 
@@ -148,6 +149,10 @@ export default function AssemblyCentre({ view }: { view: WorkspaceView }) {
           useUi.getState().selectFragment(name);
         }}
         fitSignal={fitSignal}
+        // A §7.3: the inspector's candidate rows hang a translucent partner where the candidate
+        // would put it, for as long as the cursor is on the row. The viewer draws nothing when
+        // the anchor is hidden or the pose will not invert, so no row can leave a wrong ghost.
+        ghost={ghost}
       />
 
       {/* Bounded on the right as well as on the left, so that a narrow window wraps the chips

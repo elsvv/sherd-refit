@@ -330,9 +330,12 @@ export default function TopBar({
       case "interrupted":
         return { label: t("action.repeat"), variant: "primary", run: onAssemble };
       case "draft":
-        // «Уточнить позы» is milestone 5's: it refines the poses of the assembly the review has
-        // changed, and there is no review yet.
-        return null;
+        // A §5's own action for this row is «Уточнить позы», and it lives in the draft line
+        // under the «Ревью» mode instead (A §8.4), beside the numbers it is about. What the top
+        // bar keeps is the one thing the draft line has no room for and A §8.5 needs: the next
+        // full run, whose sheet is where the decisions are carried over. In the second voice,
+        // as for `current` — the run is still the current one, with a draft on top of it.
+        return { label: t("action.regenerate"), variant: "ghost", run: onAssemble };
     }
   })();
 

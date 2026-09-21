@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import type { CandidateRow } from "../ipc/bindings/CandidateRow";
+import type { GhostView } from "../viewer/AssemblyView";
 import type { ColourMode, LayoutMode } from "../viewer/AssemblyViewer";
 
 /** The three modes of A §7.3, as the top bar's tabs name them. */
@@ -81,6 +82,13 @@ export interface UiState {
    * fragment is two requests and the camera has to move both times; the viewport clears it.
    */
   assemblyFly: { name: string; n: number } | null;
+  /**
+   * Where a candidate of the inspector's list would put the partner of the chosen fragment
+   * (A §7.2's ghost, A §7.3's «навели — партнёр встаёт призраком»). It lives here and not in the
+   * inspector because the two panes that need it are siblings: the right pane knows which row
+   * the cursor is on, and only the centre can draw anything.
+   */
+  assemblyGhost: GhostView | null;
 
   /**
    * Which band of `candidates.json` the «Ревью» queue is showing (A §8.3's filter chips). Not
@@ -138,6 +146,8 @@ export interface UiState {
   flyToFragment(name: string): void;
   /** Called by the viewport once it has flown, so the next request is seen as a new one. */
   clearFly(): void;
+  /** Hangs a ghost of a candidate's partner in the viewport, or takes it away with `null`. */
+  setAssemblyGhost(ghost: GhostView | null): void;
 
   setReviewBand(band: CandidateRow["tier"]): void;
   setReviewInAssembly(on: boolean): void;
@@ -159,6 +169,7 @@ function freshAssembly(): Pick<
   | "assemblyQuery"
   | "assemblyGroup"
   | "assemblyFly"
+  | "assemblyGhost"
 > {
   return {
     assemblyColour: "scan",
@@ -172,6 +183,7 @@ function freshAssembly(): Pick<
     assemblyQuery: "",
     assemblyGroup: null,
     assemblyFly: null,
+    assemblyGhost: null,
   };
 }
 
@@ -358,6 +370,9 @@ export const useUi = create<UiState>()((set) => ({
   },
   clearFly: () => {
     set({ assemblyFly: null });
+  },
+  setAssemblyGhost: (ghost) => {
+    set({ assemblyGhost: ghost });
   },
 
   setReviewBand: (band) => {

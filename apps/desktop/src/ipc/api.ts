@@ -1,3 +1,4 @@
+import type { Language } from "../state/ui";
 import type { Event as EngineEvent } from "./bindings/Event";
 import type { JobKind } from "./bindings/JobKind";
 import type { Outcome } from "./bindings/Outcome";
@@ -72,7 +73,12 @@ export interface Api {
   workspaceView(): Promise<WorkspaceView>;
   inputLink(path: string): Promise<WorkspaceView>;
   fragmentExclude(name: string, excluded: boolean): Promise<WorkspaceView>;
-  prepareStart(): Promise<void>;
+  /**
+   * Starts preparing the input. `lang` is the language the window is being read in: the shell
+   * carries it to the end of the job so that A §6's notification, which the OS shows when the
+   * window is behind something else, is worded in it.
+   */
+  prepareStart(lang: Language): Promise<void>;
   jobCancel(): Promise<void>;
   pickFolder(title: string): Promise<string | null>;
   /** A URL the window can fetch for a file inside the open workspace. */

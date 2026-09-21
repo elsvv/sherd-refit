@@ -30,8 +30,10 @@ export const tauriApi: Api = {
   workspaceView: () => invoke<WorkspaceView>("workspace_view"),
   inputLink: (path) => invoke<WorkspaceView>("input_link", { path }),
   fragmentExclude: (name, excluded) => invoke<WorkspaceView>("fragment_exclude", { name, excluded }),
-  prepareStart: async () => {
-    await invoke("prepare_start");
+  // `lang` is a required argument of the command (`jobs::Lang`), so it goes in the payload under
+  // the very name the Rust parameter has — Tauri refuses the call outright without it.
+  prepareStart: async (lang) => {
+    await invoke("prepare_start", { lang });
   },
   jobCancel: async () => {
     await invoke("job_cancel");

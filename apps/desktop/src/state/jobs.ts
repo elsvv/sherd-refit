@@ -6,6 +6,7 @@ import { toCommandError } from "../ipc/api";
 import type { Event as EngineEvent } from "../ipc/bindings/Event";
 import type { FailKind } from "../ipc/bindings/FailKind";
 import type { FragmentInfo } from "../ipc/bindings/FragmentInfo";
+import { useUi } from "./ui";
 import { useWorkspace } from "./workspace";
 
 /** How far one stage has got. */
@@ -39,7 +40,11 @@ export interface JobsState {
   /** The last `Failed`, for A §10's sentence and its «Показать лог». */
   lastFailure: Failure | null;
 
-  /** Asks the shell to prepare the input, and clears what the last job left behind. */
+  /**
+   * Asks the shell to prepare the input, and clears what the last job left behind. The UI's
+   * language goes with it: the shell's end-of-job notification (A §6) is written where the job
+   * ends, by which time the window may be behind another one.
+   */
   start(): Promise<void>;
   /** Stops the running job; a no-op when none is. */
   cancel(): Promise<void>;
@@ -71,7 +76,7 @@ export const useJobs = create<JobsState>()((set) => ({
   start: async () => {
     set({ stage: null, progress: {}, startedAt: Date.now(), lastFailure: null });
     try {
-      await api.prepareStart();
+      await api.prepareStart(useUi.getState().language);
     } catch (e) {
       set({ startedAt: null });
       useWorkspace.getState().setError(toCommandError(e));

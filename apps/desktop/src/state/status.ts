@@ -1,3 +1,4 @@
+import type { AssemblyDto } from "../ipc/bindings/AssemblyDto";
 import type { FailKind } from "../ipc/bindings/FailKind";
 import type { StaleDiff } from "../ipc/bindings/StaleDiff";
 import type { WorkspaceView } from "../ipc/bindings/WorkspaceView";
@@ -32,6 +33,20 @@ function unchanged(diff: StaleDiff): boolean {
     diff.excluded_added.length === 0 &&
     diff.excluded_removed.length === 0
   );
+}
+
+/**
+ * Whether the assembly on the screen is a **draft** — A §5's `draft` row, and what the «Ревью»
+ * mode's draft line is about (A §8.4).
+ *
+ * «Refined» is a property of a group: a reassembly after a decision hands back R §8's unrefined
+ * poses for every group whose members and joins moved, and only «Уточнить позы» puts R §9 back
+ * over them. A group of one has no join to refine and is never counted — the engine writes it
+ * `refined: false` for want of anything truer, and a workspace of singletons would otherwise
+ * read as a permanent draft.
+ */
+export function hasUnrefinedGroups(assembly: AssemblyDto | null): boolean {
+  return assembly !== null && assembly.groups.some((group) => group.members.length > 1 && !group.refined);
 }
 
 /**

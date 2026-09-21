@@ -19,7 +19,7 @@ import InputRight from "../modes/input/InputRight";
 import { useAssembly } from "../state/assembly";
 import { useJobs } from "../state/jobs";
 import type { Status } from "../state/status";
-import { deriveStatus } from "../state/status";
+import { deriveStatus, hasUnrefinedGroups } from "../state/status";
 import type { Mode } from "../state/ui";
 import { useUi } from "../state/ui";
 import { useWorkspace } from "../state/workspace";
@@ -160,8 +160,10 @@ export default function Frame({ view }: { view: WorkspaceView }) {
   // A §10's «Повторить на CPU» next — and only one of them may be up at a time.
   const [sheet, setSheet] = useState<Partial<RunSpec> | null>(null);
 
-  // Milestone 3 loads no assembly, so no group of one can be waiting for refinement (A §8.4).
-  const status: Status = deriveStatus(view, selectedRunId, false);
+  // A §5's «draft» row: a reassembly the reviewer has not refined yet, straight from the
+  // assembly the window is showing (A §8.4).
+  const draft = useAssembly((state) => hasUnrefinedGroups(state.assembly));
+  const status: Status = deriveStatus(view, selectedRunId, draft);
 
   // The «Сборка» mode is only a mode while there is a finished run to show. A run deleted, or a
   // selection cleared, takes its tab away — and leaving the window standing on a mode whose tab

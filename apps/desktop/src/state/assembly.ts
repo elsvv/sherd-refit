@@ -38,6 +38,14 @@ export interface AssemblyState {
   /** Reads a run's two files. The last call wins, however the earlier ones finish. */
   load(runId: string): Promise<void>;
   /**
+   * Puts an assembly the window was *told* about on the screen, without reading anything: a
+   * review session answers every decision with one (A §8.4), and the shell has already filed it
+   * over `assembly.json`, so a re-read would be the same bytes a moment later.
+   *
+   * The candidates are left alone — a reassembly changes what is placed, never what was scored.
+   */
+  show(assembly: AssemblyDto): void;
+  /**
    * Puts the banner away without touching the run (A §10: a `CommandError` is the one thing the
    * user may dismiss). The next [`load`] clears it again on its own.
    */
@@ -101,6 +109,10 @@ export const useAssembly = create<AssemblyState>()((set) => {
         loading: false,
         error: assembly.error ?? candidates.error,
       });
+    },
+
+    show: (assembly) => {
+      set({ assembly, loading: false });
     },
 
     dismissError: () => {

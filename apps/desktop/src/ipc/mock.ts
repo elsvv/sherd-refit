@@ -1,14 +1,19 @@
 import type { AssemblyDto } from "./bindings/AssemblyDto";
 import type { CandidateRow } from "./bindings/CandidateRow";
+import type { Decision } from "./bindings/Decision";
 import type { FileStamp } from "./bindings/FileStamp";
 import type { FragmentInfo } from "./bindings/FragmentInfo";
+import type { GroupDto } from "./bindings/GroupDto";
 import type { JobKind } from "./bindings/JobKind";
+import type { JoinDto } from "./bindings/JoinDto";
+import type { PairDetailDto } from "./bindings/PairDetailDto";
 import type { RunCounts } from "./bindings/RunCounts";
 import type { RunFile } from "./bindings/RunFile";
 import type { RunSpec } from "./bindings/RunSpec";
 import type { RunStatus } from "./bindings/RunStatus";
 import type { RunView } from "./bindings/RunView";
 import type { StaleDiff } from "./bindings/StaleDiff";
+import type { UnplacedDto } from "./bindings/UnplacedDto";
 import type { Warning } from "./bindings/Warning";
 import type { WorkspaceView } from "./bindings/WorkspaceView";
 import type { Api, CommandError, EngineEventPayload, EngineFinishedPayload, Unlisten } from "./api";
@@ -491,6 +496,8 @@ function fresh(path: string): WorkspaceView {
  * «Создать воркспейс» cannot come up with somebody else's runs in it.
  */
 function opened(path: string): WorkspaceView {
+  // Another workspace's runs are another workspace's drafts: both go with the history.
+  world.filed = {};
   if (path !== WORKSPACE_PATH) {
     world.runs = [];
     return fresh(path);
@@ -505,6 +512,18 @@ function opened(path: string): WorkspaceView {
   };
 }
 
+/**
+ * The review session, as the mock keeps it (A §8). `baseline` is the last **refined** assembly,
+ * which is what a reassembled group's poses are taken from when its members and joins have not
+ * moved (A §8.4's `merge_refined`); `assembly` is the last one answered, which is what «Уточнить
+ * позы» refines.
+ */
+interface Session {
+  runId: string | null;
+  baseline: AssemblyDto;
+  assembly: AssemblyDto;
+}
+
 /** The mock's whole world. */
 const world: {
   view: WorkspaceView | null;
@@ -515,6 +534,13 @@ const world: {
   finished: Set<(payload: EngineFinishedPayload) => void>;
   drops: Set<(path: string) => void>;
   dropsWired: boolean;
+  review: Session;
+  /**
+   * `assembly.json` as the **host** has filed it, by run (A §2.1): a review session's every
+   * answer is written over the run's own file, so a draft is what the «Сборка» mode draws after
+   * the session is closed and what the next session starts from.
+   */
+  filed: Record<string, AssemblyDto>;
 } = {
   view: null,
   runs: [],
@@ -523,6 +549,8 @@ const world: {
   finished: new Set(),
   drops: new Set(),
   dropsWired: false,
+  review: { runId: null, baseline: ASSEMBLY, assembly: ASSEMBLY },
+  filed: {},
 };
 
 /** Refuses the way the shell refuses: a plain `{ kind, message }`, never an `Error`. */
@@ -793,6 +821,311 @@ function engineLog(run: RunFile | null): string {
   return lines.join("\n");
 }
 
+/**
+ * A §8's review session, played out of the same twelve fragments the rest of the mock is made
+ * of: a match that takes a moment to load, a reassembly for every decision, a seam for every
+ * placement and a refinement that takes a second and a half.
+ *
+ * It is what makes the «Ревью» screen reviewable at all (A §11): a real session is a worker with
+ * three gigabytes of fragment cache in it over a run that took twenty minutes, and nobody is
+ * going to produce one to look at a queue row's spacing.
+ */
+
+/** How long the mock takes to load a run's match before it says `ready`. */
+const REVIEW_OPEN_MS = 900;
+/** And to answer one decision — A §8.2 asks for «under a second» and this is what that feels like. */
+const REVIEW_APPLY_MS = 150;
+/** And to answer one seam. */
+const REVIEW_PAIR_MS = 120;
+/** And to run R §9 over the groups a draft left unrefined (A §8.4). */
+const REVIEW_REFINE_MS = 1500;
+
+/** How many of B's fracture samples the mock draws; a real pair has five thousand (R §3.5.2). */
+const CONTACT_POINTS = 420;
+/** And how many seam voxel centres; a real pair has a few dozen (R §6.2). */
+const SEAM_POINTS = 48;
+/** The pair's two limits, in the scans' own length unit (R §1.2); the mock's resolution is ~2. */
+const TIGHT_LIMIT = 1.1;
+const GAP_LIMIT = 3.3;
+/** How long the mock's seam is, in the same unit — about the width of one of its slabs. */
+const SEAM_LENGTH = 150;
+
+/** Three numbers in the scans' own frame. */
+type Vec3 = [number, number, number];
+
+/** Whether a pair — a join, a candidate, a decision — is about `a` and `b` (A §8.1: unordered). */
+function samePair(pair: { a: string; b: string }, a: string, b: string): boolean {
+  return (pair.a === a && pair.b === b) || (pair.a === b && pair.b === a);
+}
+
+/** The pair's best-scoring candidate, whichever way round the row names it. */
+function bestRow(a: string, b: string): CandidateRow | undefined {
+  return CANDIDATES.filter((row) => samePair(row, a, b)).sort((x, y) => y.score - x.score)[0];
+}
+
+/**
+ * Union–find over the collection's names, which is how R §8 turns a list of joins into groups.
+ * `union` answers whether the two were in different groups — `false` is a join that closes a
+ * loop, and the greedy assembly refuses those.
+ */
+function forest(): { find: (name: string) => string; union: (a: string, b: string) => boolean } {
+  const parent = new Map<string, string>();
+  const find = (name: string): string => {
+    let root = name;
+    for (;;) {
+      const up = parent.get(root);
+      if (up === undefined || up === root) {
+        return root;
+      }
+      root = up;
+    }
+  };
+  const union = (a: string, b: string): boolean => {
+    const left = find(a);
+    const right = find(b);
+    if (left === right) {
+      return false;
+    }
+    parent.set(right, left);
+    return true;
+  };
+  return { find, union };
+}
+
+/**
+ * The groups a set of joins makes, largest first, each member in the collection's own order —
+ * the order the engine writes and the order [`assemblyDto`] built the run's own groups in.
+ */
+function componentsOf(joins: readonly JoinDto[]): string[][] {
+  const tree = forest();
+  for (const join of joins) {
+    tree.union(join.a, join.b);
+  }
+  const by = new Map<string, string[]>();
+  for (const name of NAMES) {
+    const root = tree.find(name);
+    const members = by.get(root);
+    if (members === undefined) {
+      by.set(root, [name]);
+    } else {
+      members.push(name);
+    }
+  }
+  return [...by.values()].sort((x, y) => y.length - x.length || ((x[0] ?? "") < (y[0] ?? "") ? -1 : 1));
+}
+
+/**
+ * What makes a group *the same group* for A §8.4's «refined stays refined»: its members and the
+ * joins whose both ends are inside it, both in a fixed order. The same key as the shell's
+ * `review::merge_refined` uses, so the mock and the real session agree about what refinement
+ * survives a decision.
+ */
+function groupKey(members: readonly string[], joins: readonly JoinDto[]): string {
+  const inside = new Set(members);
+  const edges = joins
+    .filter((join) => inside.has(join.a) && inside.has(join.b))
+    .map((join) => [join.a, join.b].sort().join("-"))
+    .sort();
+  return `${[...members].sort().join(",")}|${edges.join(",")}`;
+}
+
+/**
+ * R §8's own sentence for a join both of whose fragments are already placed relative to each
+ * other (`Rejection::InconsistentWithAssembled`): the assembly takes joins best score first, and
+ * one that closes a loop disagrees with what is already standing. The two numbers are derived
+ * from the pair's score rather than measured — this is a mock — but the shape is the engine's,
+ * which is what A §8.4's «2 не встали» list is read against.
+ */
+function inconsistent(a: string, b: string): string {
+  const score = bestRow(a, b)?.score ?? 0;
+  const angle = ((score * 4.7) % 30).toFixed(1);
+  const distance = ((score * 0.37) % 1).toFixed(2);
+  return `inconsistent with the assembled poses (${angle} deg, ${distance} t)`;
+}
+
+/**
+ * What `Reassemble` answers (A §8.2): the run's own joins less the rejected pairs, plus the
+ * accepted ones taken best score first, and the groups that fall out of them.
+ *
+ * A group whose members and joins are exactly those of a group of the last **refined** assembly
+ * keeps its poses and stays refined (A §8.4); every other group is laid out afresh and is a
+ * draft. A decision about a fragment the collection no longer has is dropped and reported, as
+ * `to_constraints` drops it — `constraints::resolve` would fail the whole run on an unknown name.
+ */
+function reassembled(decisions: readonly Decision[]): { assembly: AssemblyDto; dropped: Decision[] } {
+  const known = new Set<string>(NAMES);
+  const live = decisions.filter((decision) => known.has(decision.a) && known.has(decision.b));
+  const dropped = decisions.filter((decision) => !known.has(decision.a) || !known.has(decision.b));
+
+  const vetoed = live.filter((decision) => decision.verdict === "reject");
+  const joins: JoinDto[] = ASSEMBLY.joins.filter(
+    (join) => !vetoed.some((decision) => samePair(decision, join.a, join.b)),
+  );
+  const tree = forest();
+  for (const join of joins) {
+    tree.union(join.a, join.b);
+  }
+
+  const unplaced: UnplacedDto[] = [];
+  const wanted = live
+    .filter((decision) => decision.verdict === "accept")
+    .sort((x, y) => (bestRow(y.a, y.b)?.score ?? 0) - (bestRow(x.a, x.b)?.score ?? 0));
+  for (const decision of wanted) {
+    if (joins.some((join) => samePair(join, decision.a, decision.b))) {
+      // A join the run already built with: confirming it changes nothing and is not a refusal.
+      continue;
+    }
+    if (tree.union(decision.a, decision.b)) {
+      joins.push({ a: decision.a, b: decision.b });
+    } else {
+      unplaced.push({ a: decision.a, b: decision.b, reason: inconsistent(decision.a, decision.b) });
+    }
+  }
+
+  const baseline = world.review.baseline;
+  const before = new Map(baseline.groups.map((group) => [groupKey(group.members, baseline.joins), group]));
+  const groups: GroupDto[] = [];
+  const poses: AssemblyDto["poses"] = {};
+  for (const members of componentsOf(joins)) {
+    const was = before.get(groupKey(members, joins));
+    const keeps = members.length > 1 && was?.refined === true;
+    members.forEach((name, i) => {
+      poses[name] = (keeps ? baseline.poses[name] : undefined) ?? fan(i);
+    });
+    groups.push({ members: [...members], refined: keeps });
+  }
+  return { assembly: { groups, poses, joins, unplaced }, dropped };
+}
+
+/** The same assembly with R §9 behind it: every group of two or more is refined (A §8.4). */
+function allRefined(assembly: AssemblyDto): AssemblyDto {
+  return {
+    ...assembly,
+    groups: assembly.groups.map((group) => ({ ...group, refined: group.members.length > 1 })),
+  };
+}
+
+/** `v` at unit length, or `fallback` when it has no length to speak of. */
+function normalized(v: Vec3, fallback: Vec3): Vec3 {
+  const length = Math.hypot(v[0], v[1], v[2]);
+  return length < 1e-9 ? fallback : [v[0] / length, v[1] / length, v[2] / length];
+}
+
+function cross(a: Vec3, b: Vec3): Vec3 {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+
+/**
+ * The seam of one placement (A §2.2's `PairDetail`): a few hundred points along a wavy line
+ * halfway between the two pieces, most of them within the tight limit, some in the gap and a few
+ * beyond it — which is what a real contact map looks like once R §6.1's facing window has thrown
+ * the back of the sherd out.
+ *
+ * Everything is in A's frame, as the real one is, and everything is derived from the pose, so two
+ * different pairs do not draw the same seam in the same place.
+ */
+function pairDetail(a: string, b: string, pose: readonly (readonly number[])[]): PairDetailDto {
+  const cell = (row: number, column: number): number => pose[row]?.[column] ?? 0;
+  const offset: Vec3 = [cell(0, 3), cell(1, 3), cell(2, 3)];
+  const centre: Vec3 = [offset[0] / 2, offset[1] / 2, offset[2] / 2];
+  // A frame on the seam: `along` points from A to B, the other two span the plane between them.
+  const along = normalized(offset, [1, 0, 0]);
+  const across = normalized(cross(along, [0, 0, 1]), [0, 1, 0]);
+  const up = cross(along, across);
+  /** A point of the seam plane at `s` along it, pushed `off` towards B. */
+  const point = (s: number, off: number): [number, number, number] => {
+    const wave = 11 * Math.sin(s * 0.06) + 4 * Math.sin(s * 0.21);
+    return [
+      centre[0] + across[0] * s + up[0] * wave + along[0] * off,
+      centre[1] + across[1] * s + up[1] * wave + along[1] * off,
+      centre[2] + across[2] * s + up[2] * wave + along[2] * off,
+    ];
+  };
+
+  const contact: [number, number, number][] = [];
+  const contactClass: number[] = [];
+  for (let i = 0; i < CONTACT_POINTS; i += 1) {
+    const s = (i / (CONTACT_POINTS - 1) - 0.5) * SEAM_LENGTH;
+    // How far this sample of B stands off A's surface: a gentle wobble, and every so often one
+    // on a face that points away from A, which R §6.1 reports as «beyond» however close it is.
+    const away = Math.abs(0.55 * Math.sin(i * 0.37) + 0.75 * Math.sin(i * 0.11 + 1.3));
+    const distance = away + (i % 11 === 0 ? 3.2 : 0);
+    contact.push(point(s, i % 2 === 0 ? distance : -distance));
+    contactClass.push(distance < TIGHT_LIMIT ? 0 : distance < GAP_LIMIT ? 1 : 2);
+  }
+
+  const seam: [number, number, number][] = [];
+  for (let i = 0; i < SEAM_POINTS; i += 1) {
+    seam.push(point((i / (SEAM_POINTS - 1) - 0.5) * SEAM_LENGTH, 0));
+  }
+
+  return { a, b, contact, contact_class: contactClass, seam, tight: TIGHT_LIMIT, gap: GAP_LIMIT };
+}
+
+/**
+ * What `review_apply` refuses before it files anything (kind `json`): a list that could never be
+ * a `decisions.json`. The window's own store cannot make one, which is the point — a bug there
+ * becomes a visible refusal rather than a corrupt file.
+ */
+function malformed(decisions: readonly Decision[]): string | null {
+  const seen = new Set<string>();
+  for (const decision of decisions) {
+    if (decision.a === "" || decision.b === "") {
+      return "решение без имени фрагмента";
+    }
+    if (decision.a === decision.b) {
+      return `решение о паре ${decision.a} с самим собой`;
+    }
+    const key = [decision.a, decision.b].sort().join("-");
+    if (seen.has(key)) {
+      return `о паре ${decision.a} — ${decision.b} сказано дважды`;
+    }
+    seen.add(key);
+  }
+  return null;
+}
+
+/** The refusal every session request gives when none is open. */
+function noSession(): Promise<never> {
+  return refuse("worker", "нет открытой сессии ревью");
+}
+
+/**
+ * Ends the session, as `jobs::close_session` does: the slot is freed and the window is told with
+ * an `engine:finished`, because that — and not the command's return — is «the session is gone».
+ *
+ * Called by `reviewClose` and by every job that needs the worker: a warm session is a cache over
+ * a run that has already finished, never a reason to refuse a preparation or a run (A §8.4).
+ */
+function closeSession(): void {
+  const runId = world.review.runId;
+  if (runId === null) {
+    return;
+  }
+  clearTimers();
+  world.review = { runId: null, baseline: ASSEMBLY, assembly: ASSEMBLY };
+  const view = held();
+  const freed = view === null ? null : store({ ...view, job: null });
+  finish({
+    job: "review",
+    run_id: runId,
+    outcome: { Done: { counts: null, engine: null, params: null } },
+    view: freed,
+  });
+}
+
+/** Plays the opening of a session: the collection loaded from the cache, then `ready` (A §8). */
+function playReviewOpen(runId: string): void {
+  playStage("review", runId, 0, REVIEW_OPEN_MS, "preprocess", ALL.length);
+  at(REVIEW_OPEN_MS, () => {
+    emit({
+      job: "review",
+      run_id: runId,
+      event: { event: "ready", fragments: ALL.length, candidates: CANDIDATES.length },
+    });
+  });
+}
+
 export const mockApi: Api = {
   appInfo: () => Promise.resolve({ version: "0.1.0", core_version: "0.1.0", commit: "mock" }),
 
@@ -844,6 +1177,12 @@ export const mockApi: Api = {
   },
 
   prepareStart: () => {
+    if (held() === null) {
+      return refuse("no_workspace", "нет открытого воркспейса");
+    }
+    // A §8.4: a review session is closed to make room, never a reason to refuse the work the
+    // user has just asked for. It has to go before `busy`, which counts it as a job.
+    closeSession();
     const view = held();
     if (view === null) {
       return refuse("no_workspace", "нет открытого воркспейса");
@@ -858,6 +1197,10 @@ export const mockApi: Api = {
   },
 
   runStart: (spec) => {
+    if (held() === null) {
+      return refuse("no_workspace", "нет открытого воркспейса");
+    }
+    closeSession();
     const view = held();
     if (view === null) {
       return refuse("no_workspace", "нет открытого воркспейса");
@@ -932,7 +1275,8 @@ export const mockApi: Api = {
     if (run?.status.state !== "done") {
       return unwritten(runId, "assembly.json");
     }
-    return isCorrupt("assembly") ? corrupted(runId, "assembly.json") : Promise.resolve(ASSEMBLY);
+    // What the host last filed for this run — a review's draft, or the run's own assembly.
+    return isCorrupt("assembly") ? corrupted(runId, "assembly.json") : Promise.resolve(world.filed[runId] ?? ASSEMBLY);
   },
 
   runCandidates: (runId) => {
@@ -947,14 +1291,100 @@ export const mockApi: Api = {
   // A §8.5's «Перенести решения ревью (N)» counts to nothing from.
   runDecisions: () => Promise.resolve({ version: 1, decisions: [] }),
 
-  // A §8's session. The mock does not play one yet — M5.6 gives it `ready`, an `assembly` for
-  // every decision, a synthetic seam and a refinement — so these accept the call and answer
-  // nothing, which is what a session that has not been asked anything looks like.
-  reviewOpen: () => Promise.resolve(),
-  reviewApply: () => Promise.resolve(),
-  reviewPair: () => Promise.resolve(),
-  reviewRefine: () => Promise.resolve(),
-  reviewClose: () => Promise.resolve(),
+  reviewOpen: (runId) => {
+    const view = held();
+    if (view === null) {
+      return refuse("no_workspace", "нет открытого воркспейса");
+    }
+    // The shell answers instantly for the run that is already open, so the mode may call this
+    // on every entry without guarding.
+    if (world.review.runId === runId) {
+      return Promise.resolve();
+    }
+    if (view.job !== null && view.job.kind !== "review") {
+      return refuse("busy", "ядро занято другой задачей");
+    }
+    if (runOf(runId)?.status.state !== "done") {
+      // A §10: a run with no saved match stays viewable and review is off; the shell refuses
+      // with the same `io` a missing file gives.
+      return unwritten(runId, "match.state");
+    }
+    closeSession();
+    // A §8.4: the session's baseline is `assembly.json` as it stands — the run's own assembly,
+    // or the draft a reviewer left there last time.
+    const standing = world.filed[runId] ?? ASSEMBLY;
+    world.review = { runId, baseline: standing, assembly: standing };
+    const held_ = held();
+    if (held_ !== null) {
+      store({ ...held_, job: { kind: "review", run_id: runId } });
+    }
+    playReviewOpen(runId);
+    return Promise.resolve();
+  },
+
+  reviewApply: (decisions) => {
+    const runId = world.review.runId;
+    if (runId === null) {
+      return noSession();
+    }
+    const wrong = malformed(decisions.decisions);
+    if (wrong !== null) {
+      return refuse("json", `решения не сохранены: ${wrong}`);
+    }
+    const { assembly, dropped } = reassembled(decisions.decisions);
+    world.review = { ...world.review, assembly };
+    // A §2.1: the host files every assembly a session answers over the run's own `assembly.json`.
+    world.filed[runId] = assembly;
+    at(REVIEW_APPLY_MS, () => {
+      // What could not come along is said first, so the notice is up before the assembly the
+      // reviewer will be looking at (the order the worker sends them in).
+      if (dropped.length > 0) {
+        emit({ job: "review", run_id: runId, event: { event: "dropped", decisions: dropped } });
+      }
+      emit({ job: "review", run_id: runId, event: { event: "assembly", ...assembly } });
+    });
+    return Promise.resolve();
+  },
+
+  reviewPair: (a, b, pose) => {
+    const runId = world.review.runId;
+    if (runId === null) {
+      return noSession();
+    }
+    const missing = [a, b].find((name) => !NAMES.includes(name));
+    at(REVIEW_PAIR_MS, () => {
+      // A request the session cannot answer does not end it: it says so and goes on serving.
+      const event =
+        missing === undefined
+          ? ({ event: "pair_detail", ...pairDetail(a, b, pose) } as const)
+          : ({ event: "request_failed", message: `the collection has no fragment named ${missing}` } as const);
+      emit({ job: "review", run_id: runId, event });
+    });
+    return Promise.resolve();
+  },
+
+  reviewRefine: () => {
+    const runId = world.review.runId;
+    if (runId === null) {
+      return noSession();
+    }
+    const drafts = world.review.assembly.groups.filter((group) => group.members.length > 1 && !group.refined);
+    playStage("review", runId, 0, REVIEW_REFINE_MS, "refine", Math.max(1, drafts.length));
+    at(REVIEW_REFINE_MS, () => {
+      const refined = allRefined(world.review.assembly);
+      // The session's baseline is what it last refined (A §8.4), so a group decided against and
+      // decided for again comes back refined.
+      world.review = { ...world.review, baseline: refined, assembly: refined };
+      world.filed[runId] = refined;
+      emit({ job: "review", run_id: runId, event: { event: "assembly", ...refined } });
+    });
+    return Promise.resolve();
+  },
+
+  reviewClose: () => {
+    closeSession();
+    return Promise.resolve();
+  },
 
   runLog: (runId, maxLines) => {
     const lines = engineLog(runId === null ? null : (runOf(runId) ?? null)).split("\n");

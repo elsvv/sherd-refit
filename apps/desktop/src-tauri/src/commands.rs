@@ -61,7 +61,10 @@ pub(crate) fn recent_list(app: AppHandle) -> Result<Vec<RecentEntry>, CommandErr
 /// # Errors
 ///
 /// As [`workspace_open`], and `io` when the folder cannot be made.
-#[tauri::command]
+///
+/// **`async`** for [`workspace_open`]'s reason: [`open_with`] may have a review session to close
+/// and wait for.
+#[tauri::command(async)]
 pub(crate) fn workspace_create(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -72,12 +75,15 @@ pub(crate) fn workspace_create(
 
 /// Opens the workspace at `path` (A §4).
 ///
+/// **`async`**: a review session over the workspace being left is closed and waited for
+/// ([`open_with`]), and a wait on a command that runs on the main thread is a frozen window.
+///
 /// # Errors
 ///
 /// [`CommandError`] of kind `busy` while a job is running, `not_a_workspace`, `locked` when
 /// another window of the app has it (A §10), `version` for a folder a newer app wrote, `json`,
 /// `io`, `engine`.
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn workspace_open(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -88,12 +94,21 @@ pub(crate) fn workspace_open(
 
 /// Closes the open workspace, releasing its lock; closing none is no error.
 ///
+/// A review session in the job slot is closed first and waited for (A §8.4): it is a cache over
+/// a finished run and never a reason to refuse the user «Закрыть». A `Prepare` or a run is —
+/// the worker is writing into the folder this is about to let go of.
+///
+/// **`async`** for that wait, which on the main thread would be a frozen window.
+///
 /// # Errors
 ///
 /// [`CommandError`] of kind `busy` while a job is running — the worker is writing into the
 /// folder, and letting go of the lock under it is the one thing A §10's lock exists to prevent.
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn workspace_close(state: State<'_, AppState>) -> Result<(), CommandError> {
+    // Before the slot is taken, and with nothing held: the session's own thread takes that very
+    // lock to give the slot back (`jobs::finish`).
+    jobs::close_session(state.inner())?;
     // Held, not sampled — and to the end of the function, for the reason `open_with` gives: a
     // slot let go of after the check leaves a gap in which `prepare_start` starts a worker, and
     // the `None` below would then release the worker's own workspace lock under it.
@@ -790,9 +805,16 @@ pub(crate) fn job_cancel(state: State<'_, AppState>) -> Result<(), CommandError>
 /// own workspace still on screen behind it. Letting go first and opening second turns every one
 /// of them into «you now have nothing open», which is a worse answer than the error itself.
 ///
-/// The folder that *is* open is therefore answered before anything is opened at all: its own lock
-/// would refuse a second [`Workspace::open`] on it, and «open what I already have» means «show me
-/// what I have» — not `locked`.
+/// The folder that *is* open is therefore answered before anything is opened *or closed* at all:
+/// its own lock would refuse a second [`Workspace::open`] on it, and «open what I already have»
+/// means «show me what I have» — not `locked`, and not a warm review session ended for a
+/// workspace that is not changing. Whatever is in the job slot goes into that view, exactly as
+/// [`workspace_view`] builds it.
+///
+/// A review session over the workspace being *left* is then closed and waited for (A §8.4): a
+/// session is a cache over a finished run and never a reason to refuse the user the workspace
+/// they have just asked for. A `Prepare` or a run still is: its worker is writing into the folder
+/// this is about to drop.
 ///
 /// The rest of the order is A §4's: the runs left `running` by a crash are marked before any
 /// worker of ours exists, so a `running` on disk can only be nobody's; and the asset protocol is
@@ -800,8 +822,9 @@ pub(crate) fn job_cancel(state: State<'_, AppState>) -> Result<(), CommandError>
 /// window is given nothing outside the workspace). The old workspace is dropped, and its lock
 /// released, by the assignment at the end, once nothing can fail any more.
 ///
-/// The job slot is *held* for all of it, and not merely read: let go of after the check, it
-/// leaves a gap in which `prepare_start` can fill the slot and spawn a worker on the workspace
+/// From the moment the slot is found empty the job slot is *held*, and not merely read: let go
+/// of after the check, it leaves a gap in which `prepare_start` can fill the slot and spawn a
+/// worker on the workspace
 /// that the assignment below is about to drop — releasing A §10's `sherd-workspace.lock` under a
 /// live worker of ours, and letting `run::mark_interrupted` write `interrupted` over a run that
 /// is still being written. Job first, then the workspace, as [`crate::state`] requires.
@@ -811,17 +834,25 @@ fn open_with(
     path: &Path,
     open: fn(&Path) -> sherd_app_core::Result<Workspace>,
 ) -> Result<WorkspaceView, CommandError> {
+    {
+        // Both locks in [`crate::state`]'s order, and let go of at the end of this block: the
+        // wait below must hold neither.
+        let slot = state.job()?;
+        let held = state.workspace()?;
+        if let Some(open_already) = held.as_ref()
+            && same_folder(open_already.root(), path)
+        {
+            return Ok(view::build(open_already, slot.as_ref().map(JobSlot::view))?);
+        }
+    }
+    // A §8.4, and with nothing held: the session's own thread takes the job lock to give the
+    // slot back (`jobs::finish`), so holding it here would be a deadlock and not a wait.
+    jobs::close_session(state)?;
     let slot = state.job()?;
     if slot.is_some() {
         return Err(CommandError::busy());
     }
     let mut held = state.workspace()?;
-    if let Some(open_already) = held.as_ref()
-        && same_folder(open_already.root(), path)
-    {
-        // No job: nothing was running, and the slot is still held here.
-        return Ok(view::build(open_already, None)?);
-    }
     let ws = open(path)?;
     let now = run::timestamp(chrono::Local::now());
     run::mark_interrupted(&ws.runs_dir(), &now)?;

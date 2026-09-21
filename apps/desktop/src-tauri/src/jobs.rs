@@ -446,6 +446,13 @@ pub(crate) fn start(
 /// No session, or a job that is not one, is nothing to do — and the `busy` check the caller makes
 /// next is what refuses a `Prepare` or a run that is actually running.
 ///
+/// Called by everything that needs the slot or the workspace under it — [`start`], and
+/// `workspace_close` and `open_with` of [`crate::commands`] — because a session is a cache over
+/// a finished run and must never be the reason the user is refused: «Закрыть» and «Открыть
+/// другой…» would otherwise answer «ядро занято другой задачей» for as long as the «Ревью» mode
+/// is on. It is also why a window-side `review_close` is not enough anywhere: that command
+/// returns as soon as the line is written, with the slot still full for a moment after.
+///
 /// **No lock is held while waiting.** The thread that has to empty the slot takes that very lock
 /// to do it ([`finish`]), so holding it here would be a deadlock and not a wait; the slot is
 /// looked at, let go of, and looked at again.
@@ -466,7 +473,7 @@ pub(crate) fn start(
 /// [`CommandError`] of kind `busy` when the slot is still full [`SESSION_KILL_WAIT`] after the
 /// kill — which is no longer a session standing in the way but the job thread itself stuck,
 /// somewhere the window cannot reach — or `worker` when the job slot is poisoned.
-fn close_session(state: &AppState) -> Result<(), CommandError> {
+pub(crate) fn close_session(state: &AppState) -> Result<(), CommandError> {
     let session = {
         let slot = state.job()?;
         slot.as_ref()

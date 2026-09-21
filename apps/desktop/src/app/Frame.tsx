@@ -196,6 +196,19 @@ export default function Frame({ view }: { view: WorkspaceView }) {
     }
   }, [reviewing]);
 
+  // And the frame going away *is* leaving the mode, with no render in between to notice it: the
+  // welcome screen replaces this whole tree the moment «Закрыть» answers (`App`). The shell has
+  // already ended the session by then — `workspace_close` and `workspace_open` close one before
+  // they touch the workspace (A §8.4) — but the store would be left holding its `runId`, and
+  // the next entry into the mode over that same run would find it «already open» and load
+  // nothing. Not in the effect above: its cleanup would also run on every change of the run
+  // being reviewed, closing the session that entry has just opened.
+  useEffect(() => {
+    return () => {
+      void useReview.getState().close();
+    };
+  }, []);
+
   // A §7.3's decisions from the «Сборка» inspector open a session too, and that pane has no
   // «leaving» of its own to close it on: a click on «Подтвердить» is the last thing that happens
   // there. So the frame gives the engine's three gigabytes back when what the session is a

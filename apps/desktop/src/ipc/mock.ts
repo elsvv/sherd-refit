@@ -632,6 +632,17 @@ function busy(): Promise<never> | null {
   return view !== null && view.job !== null ? refuse("busy", "ядро занято другой задачей") : null;
 }
 
+/**
+ * The same refusal for a command that first ends a review session, which is what the shell does
+ * before it opens, creates or closes a workspace (`jobs::close_session`): a session is a cache
+ * over a finished run and never a reason to refuse the user «Закрыть» or «Открыть другой…»
+ * (A §8.4). What is left in the slot after that — a `Prepare`, a run — is refused as before.
+ */
+function freed(): Promise<never> | null {
+  closeSession();
+  return busy();
+}
+
 /** Puts a changed view in and hands it back, the way a command returns the view it just made. */
 function put(view: WorkspaceView): Promise<WorkspaceView> {
   return Promise.resolve(store(view));
@@ -1181,11 +1192,11 @@ export const mockApi: Api = {
       { path: "/mock/workspaces/slab", name: "slab", opened_at: "2026-09-18T09:30:00+03:00", available: false },
     ]),
 
-  workspaceCreate: (path) => busy() ?? put(opened(path)),
-  workspaceOpen: (path) => busy() ?? put(opened(path)),
+  workspaceCreate: (path) => freed() ?? put(opened(path)),
+  workspaceOpen: (path) => freed() ?? put(opened(path)),
 
   workspaceClose: () => {
-    const refusal = busy();
+    const refusal = freed();
     if (refusal !== null) {
       return refusal;
     }

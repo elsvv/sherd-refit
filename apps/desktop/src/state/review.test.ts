@@ -1,8 +1,20 @@
 import { describe, expect, it } from "vitest";
 
+import type { EngineFinishedPayload } from "../ipc/api";
 import type { CandidateRow } from "../ipc/bindings/CandidateRow";
 import type { Decision } from "../ipc/bindings/Decision";
-import { accepted, applyDecision, bulkAccept, clearDecision, decisionOf, recorded, redone, rejected, undone } from "./review";
+import {
+  accepted,
+  applyDecision,
+  bulkAccept,
+  clearDecision,
+  decisionOf,
+  recorded,
+  redone,
+  rejected,
+  undone,
+  useReview,
+} from "./review";
 import type { Undo } from "./review";
 
 /** An identity pose, which is all these tests need of one. */
@@ -162,5 +174,66 @@ describe("the undo stack (A §8.1: the history is the window's)", () => {
     const state = recorded(history([one, two]), []);
     expect(state.decisions).toEqual([]);
     expect(undone(state).decisions).toEqual([one, two]);
+  });
+});
+
+describe("applyFinished (A §8: an ending belongs to the session it ended)", () => {
+  const done: EngineFinishedPayload["outcome"] = { Done: { counts: null, engine: null, params: null } };
+
+  /** The store as it stands a moment after `open` has put the second run in it. */
+  function opened(runId: string, decisions: Decision[]): void {
+    useReview.setState({
+      runId,
+      ready: true,
+      decisions,
+      past: [],
+      future: [],
+      pending: false,
+      refining: false,
+      dropped: [],
+      detail: null,
+      selected: null,
+      error: null,
+    });
+  }
+
+  it("ignores the ending of the session that has just been replaced", () => {
+    const decisions = [accepted(row("A", "B", "probable", 9), AT)];
+    opened("run-b", decisions);
+
+    // Switching runs opens the new session, and the shell closes the old one on the way: its
+    // `engine:finished` arrives with the *previous* run's id, after the store is already on the
+    // new one. Blanking here would throw away the decisions just loaded for run-b, and the next
+    // «Подтвердить» would file a one-entry list over them.
+    useReview.getState().applyFinished({ job: "review", run_id: "run-a", outcome: done, view: null });
+
+    expect(useReview.getState().runId).toBe("run-b");
+    expect(useReview.getState().decisions).toEqual(decisions);
+    expect(useReview.getState().ready).toBe(true);
+  });
+
+  it("ends the mode when it is this run's session that failed (A §10)", () => {
+    opened("run-b", [accepted(row("A", "B", "probable", 9), AT)]);
+
+    useReview.getState().applyFinished({
+      job: "review",
+      run_id: "run-b",
+      outcome: { Failed: { kind: "protocol", message: "match.state не прочитан" } },
+      view: null,
+    });
+
+    expect(useReview.getState().runId).toBeNull();
+    expect(useReview.getState().decisions).toEqual([]);
+    expect(useReview.getState().error).toEqual({ kind: "protocol", message: "match.state не прочитан" });
+  });
+
+  it("is not interested in a run's or a preparation's ending", () => {
+    const decisions = [accepted(row("A", "B", "probable", 9), AT)];
+    opened("run-b", decisions);
+
+    useReview.getState().applyFinished({ job: "run", run_id: "run-b", outcome: done, view: null });
+
+    expect(useReview.getState().runId).toBe("run-b");
+    expect(useReview.getState().decisions).toEqual(decisions);
   });
 });

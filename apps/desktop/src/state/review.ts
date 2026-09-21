@@ -455,7 +455,13 @@ export const useReview = create<ReviewState>()((set, get) => {
     },
 
     applyFinished: (payload) => {
-      if (payload.job !== "review" || get().runId === null) {
+      // The **run**, and not the job kind alone: a session is closed from under the window
+      // whenever another one is opened over another run, a job is started or the workspace is
+      // opened or closed (`jobs::close_session`), and its `engine:finished` carries the run it
+      // was over — which by then is no longer the run this store is on. Ending the mode on it
+      // would blank a session that has just been opened, throwing away the decisions `open` had
+      // loaded for it, and the next «Подтвердить» would file a one-entry list over them.
+      if (payload.job !== "review" || payload.run_id !== get().runId) {
         return;
       }
       const outcome = payload.outcome;

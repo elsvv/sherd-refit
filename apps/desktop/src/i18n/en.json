@@ -320,5 +320,12 @@
   "viewer": {
     "loading": "Loading the model…",
     "failed": "The model could not be loaded: {{message}}"
+  },
+  "assembly": {
+    "loading": "Loading the models: {{done}} of {{total}}",
+    "group": "group {{n}}",
+    "unpaired": "unpaired",
+    "joins_one": "{{count}} join",
+    "joins_other": "{{count}} joins"
   }
 }

@@ -338,5 +338,14 @@
   "viewer": {
     "loading": "Загрузка модели…",
     "failed": "Не удалось загрузить модель: {{message}}"
+  },
+  "assembly": {
+    "loading": "Загружаем модели: {{done}} из {{total}}",
+    "group": "группа {{n}}",
+    "unpaired": "без пары",
+    "joins_one": "{{count}} стык",
+    "joins_few": "{{count}} стыка",
+    "joins_many": "{{count}} стыков",
+    "joins_other": "{{count}} стыка"
   }
 }

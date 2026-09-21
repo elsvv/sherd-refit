@@ -8,24 +8,27 @@
 //! worker wrote, and `engine:finished` once, carrying the whole [`WorkspaceView`] the window
 //! should now be showing (A §5: one shape, so the window never keeps a second opinion).
 //!
-//! Both kinds of job go through one function, because everything around them is the same: the one
-//! slot, the one thread, the two events. What a run adds is what the host owns and the worker may
-//! not touch (A §2.1) — `assembly.json` the moment the groups are reported, `run.json` closed when
-//! it is over, and what it measured taught to A §6's calibration.
+//! All three kinds of job go through one function, because everything around them is the same:
+//! the one slot, the one thread, the two events. What a run adds is what the host owns and the
+//! worker may not touch (A §2.1) — `assembly.json` the moment the groups are reported, `run.json`
+//! closed when it is over, and what it measured taught to A §6's calibration. A review session
+//! (A §8) adds the other half of the slot: a handle the window's questions go down, and the
+//! rule that a `Prepare` or a run closes the session rather than being refused by it.
 //!
-//! Around both kinds sits the machine A §6 asks for, and none of it is the job: the computer is
+//! Around all three sits the machine A §6 asks for, and none of it is the job: the computer is
 //! kept awake while a worker runs, the dock shows how far along it is, and a job that ends behind
 //! another window says so. Each of the three is logged and shrugged off when the OS will not play
 //! along — a run that matched for forty minutes must not be lost to a notification.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use sherd_app_core::AppError;
 use sherd_app_core::eta::{self, Calibration};
-use sherd_app_core::host::{self, Outcome, Worker, WorkerCommand};
-use sherd_app_core::protocol::{Event, RunSpec};
-use sherd_app_core::run::{EngineInfo, FailKind, RunCounts, RunFile};
+use sherd_app_core::host::{self, Carried, Outcome, Worker, WorkerCommand};
+use sherd_app_core::protocol::{Decision, Event, Job, Request, ReviewJob, RunSpec};
+use sherd_app_core::run::{self, EngineInfo, FailKind, RunCounts, RunFile};
 use sherd_app_core::view::{self, JobKind, WorkspaceView};
 use sherd_app_core::workspace::{WORKSPACE_FILE, Workspace};
 use sherd_core::Params;
@@ -58,6 +61,17 @@ const NOTIFICATION_TITLE: &str = "Sherd Refit";
 const AWAKE_REASON: &str = "sherd-refit: a job is running";
 /// Who is holding it.
 const AWAKE_APP: &str = "Sherd Refit";
+/// How long a `Prepare` or a run waits for an open review session to let go of the job slot
+/// (A §8.4: a warm session is a cache, never a reason to refuse work).
+///
+/// Ten seconds is far more than a session needs: idle, it reads `Close` at once and exits; busy,
+/// D §5's flag ends its request at the next unit of work. What the bound is really for is the
+/// case where neither happens — a worker wedged in a driver or a disk — and there «ядро занято»
+/// is the truth, not a refusal to be worked around.
+const SESSION_CLOSE_WAIT: Duration = Duration::from_secs(10);
+/// How often the slot is looked at while waiting for that. Short enough that the usual close is
+/// not noticeable, long enough that ten seconds is five hundred cheap locks and not a spin.
+const SESSION_CLOSE_POLL: Duration = Duration::from_millis(20);
 
 /// The payload of `engine:event`.
 ///
@@ -68,7 +82,8 @@ const AWAKE_APP: &str = "Sherd Refit";
 pub(crate) struct EngineEvent {
     /// Which kind of job said it.
     pub(crate) job: JobKind,
-    /// The run it is writing, for a [`JobKind::Run`]; `None` for a `Prepare`.
+    /// The run it is writing, for a [`JobKind::Run`], or the run being reviewed, for a
+    /// [`JobKind::Review`]; `None` for a `Prepare`.
     pub(crate) run_id: Option<String>,
     /// The line itself, exactly as the protocol carries it (A §2.2).
     pub(crate) event: Event,
@@ -227,8 +242,8 @@ impl Lang {
     }
 }
 
-/// Which job to put on the worker. The two kinds differ only in what the host files around them
-/// (A §2.1), which is why one function starts both.
+/// Which job to put on the worker. The three kinds differ only in what the host files around them
+/// (A §2.1), which is why one function starts all of them.
 #[derive(Clone, Debug)]
 pub(crate) enum JobStart {
     /// Preprocess the collection into the workspace's cache (A §5).
@@ -237,6 +252,15 @@ pub(crate) enum JobStart {
     Run {
         /// What the user launched.
         spec: RunSpec,
+        /// The run whose review this one starts from (A §8.5), or `None` for a run that carries
+        /// nobody's decisions.
+        carry_from: Option<String>,
+    },
+    /// A review session over a finished run (A §8): the worker loads the match once and then
+    /// answers the window's questions until it is closed.
+    Review {
+        /// The run being reviewed.
+        run_id: String,
     },
 }
 
@@ -247,11 +271,22 @@ struct Started {
     job: JobKind,
     /// The worker, to be driven on the job thread.
     worker: Worker,
-    /// A run's `run.json` as it was opened, and the folder it lives in; `None` for a `Prepare`.
+    /// The run this job is about: the one it writes, for a [`JobKind::Run`], or the one it
+    /// reviews; `None` for a `Prepare`.
+    run_id: Option<String>,
+    /// That run's folder, where the host files `assembly.json` the moment the groups are
+    /// reported (A §2.1) — a run's own and a review session's drafts alike.
     ///
-    /// Both are taken here, under the workspace lock, because the job thread may not hold that
-    /// lock while it drives a worker for an hour — and both are all it needs until the end.
-    run: Option<(RunFile, PathBuf)>,
+    /// Taken here, under the workspace lock, because the job thread may not hold that lock while
+    /// it drives a worker for an hour.
+    dir: Option<PathBuf>,
+    /// A run's `run.json` as it was opened, for the thread to close when the run is over; `None`
+    /// for a `Prepare` and for a review session, which reviews a run that has already ended and
+    /// must not rewrite how it ended.
+    run: Option<RunFile>,
+    /// Decisions A §8.5's carry-over could not bring along, to be said once (A §8.5); empty for
+    /// every job that carries nothing.
+    dropped: Vec<Decision>,
 }
 
 /// Starts a job on the open workspace and returns as soon as its worker is on its way: the new
@@ -270,6 +305,11 @@ struct Started {
 /// job: each is logged and shrugged off when the OS will not play along. `lang` is what the
 /// notification is written in; see [`Lang`].
 ///
+/// A review session in the slot is **closed first** and waited for (A §8.4): a warm session is a
+/// cache over a finished run, never a reason to refuse the work the user has just asked for. The
+/// wait is bounded by [`SESSION_CLOSE_WAIT`]; a session that will not go by then is a worker that
+/// is genuinely stuck, and that is `busy`.
+///
 /// # Errors
 ///
 /// [`CommandError`] of kind `busy` when a job is already on the worker, `no_workspace` when none
@@ -282,48 +322,58 @@ pub(crate) fn start(
     kind: JobStart,
     lang: Lang,
 ) -> Result<Option<String>, CommandError> {
+    close_session(state)?;
     let mut slot = state.job()?;
     if slot.is_some() {
         return Err(CommandError::busy());
     }
     let command = worker_command()?;
-    let Started { job, mut worker, run } = {
+    let Started { job, mut worker, run_id, dir: run_dir, run, dropped } = {
         let mut held = state.workspace()?;
         let ws = held.as_mut().ok_or_else(CommandError::no_workspace)?;
         match kind {
             JobStart::Prepare => prepare(ws, &command)?,
-            JobStart::Run { spec } => open_run(ws, &command, &spec)?,
+            JobStart::Run { spec, carry_from } => {
+                open_run(ws, &command, &spec, carry_from.as_deref())?
+            }
+            JobStart::Review { run_id } => open_review(ws, &command, &run_id)?,
         }
     };
     let canceller = worker.canceller();
-    let run_id = run.as_ref().map(|(file, _)| file.id.clone());
-    // Split, so that the drive closure can borrow the folder while the file itself is written
-    // afterwards.
-    let (mut run_file, run_dir) = match run {
-        Some((file, dir)) => (Some(file), Some(dir)),
-        None => (None, None),
-    };
+    // Only a session is ever asked anything; see [`crate::state::JobSlot::requester`].
+    let requester = (job == JobKind::Review).then(|| worker.requester());
+    let mut run_file = run;
 
-    let app = app.clone();
+    let held_by_thread = app.clone();
     let id = run_id.clone();
     // The thread is started before the slot is filled, and cannot get ahead of it: its first act
     // after the run is to take this same lock, which is still held here.
     std::thread::Builder::new()
         .name(THREAD.to_owned())
         .spawn(move || {
+            let app = held_by_thread;
             // Armed before the drive and disarmed by `finish`: whatever happens between those
             // two lines, this thread does not leave the app «busy» behind it.
             let mut guard = SlotGuard::new(app.clone());
             // A §6: a run is 17–80 minutes, and a laptop that goes to sleep in the middle of one
             // loses it. Bound to this thread, so the machine is let go of however the thread ends
             // — including an unwind, where `finish` below is never reached.
-            let _awake = keep_awake();
+            //
+            // Not for a review session: it is idle between two clicks and may be open all
+            // afternoon, and holding a laptop awake through someone's lunch is not what A §6
+            // asks for — the work being protected there is the forty minutes of matching that
+            // would otherwise be lost.
+            let _awake = (job != JobKind::Review).then(keep_awake).flatten();
             let mut dock = DockProgress::of(&app);
             let outcome = host::drive(&mut worker, |event| {
                 // A §2.1: `assembly.json` is the host's file, not the worker's, and it is written
                 // the moment the groups are reported rather than at the end — a run that dies
                 // after assembling still leaves the window something to draw. Failing to write it
                 // does not stop the run: the log says so, and the run's own files are unharmed.
+                //
+                // A review session's answers are filed the same way and for the same reason
+                // (A §8.4): the draft the reviewer is looking at is what the window draws when
+                // the run is opened again, and the session's own baseline is the file it left.
                 if let Event::Assembly(assembly) = event
                     && let Some(dir) = run_dir.as_deref()
                     && let Err(error) = host::save_assembly(dir, assembly)
@@ -362,8 +412,73 @@ pub(crate) fn start(
         // Nothing to undo: the worker was moved into the closure, and dropping a `Worker` kills
         // and reaps the process it holds.
         .map_err(|e| AppError::Worker(format!("the job's thread could not be started: {e}")))?;
-    *slot = Some(JobSlot { kind: job, run_id: run_id.clone(), canceller });
+    *slot = Some(JobSlot { kind: job, run_id: run_id.clone(), canceller, requester });
+    // The slot is let go of here and not at the end of the function: what follows is an emit,
+    // and no lock of this app is held across one ([`crate::state`]).
+    drop(slot);
+    // A §8.5: the decisions the carry-over left behind are said once, and this is the only place
+    // that can say them — the worker knows nothing of a carry, and `run_start` answers an id.
+    // The same line a review session sends for the same thing, so the window reads one shape.
+    if !dropped.is_empty() {
+        let payload = EngineEvent {
+            job,
+            run_id: run_id.clone(),
+            event: Event::Dropped { decisions: dropped },
+        };
+        let _ = app.emit(EVENT, payload);
+    }
     Ok(run_id)
+}
+
+/// Closes an open review session and waits for its thread to give the job slot back (A §8.4).
+///
+/// No session, or a job that is not one, is nothing to do — and the `busy` check the caller makes
+/// next is what refuses a `Prepare` or a run that is actually running.
+///
+/// **No lock is held while waiting.** The thread that has to empty the slot takes that very lock
+/// to do it ([`finish`]), so holding it here would be a deadlock and not a wait; the slot is
+/// looked at, let go of, and looked at again.
+///
+/// Two ways of asking, in this order: `Close`, which an idle session reads at once and answers by
+/// ending well; and then, half way through the budget, D §5's flag, because a session in the
+/// middle of R §9 will not read `Close` until that is over. Whichever ends it, the session's own
+/// thread files nothing and frees the slot exactly as a run's does.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `busy` when the session is still there after [`SESSION_CLOSE_WAIT`],
+/// or `worker` when the job slot is poisoned.
+fn close_session(state: &AppState) -> Result<(), CommandError> {
+    let session = {
+        let slot = state.job()?;
+        slot.as_ref()
+            .filter(|job| job.kind == JobKind::Review)
+            .map(|job| (job.requester.clone(), job.canceller.clone()))
+    };
+    let Some((requester, canceller)) = session else { return Ok(()) };
+    if let Some(requester) = requester.as_ref() {
+        // A session already over is not an error: its thread is on its way to the slot anyway.
+        let _ = requester.send(&Request::Close);
+    }
+    let deadline = Instant::now() + SESSION_CLOSE_WAIT;
+    let mut flagged = false;
+    loop {
+        let freed = { state.job()?.is_none() };
+        if freed {
+            return Ok(());
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        if !flagged && left <= SESSION_CLOSE_WAIT / 2 {
+            flagged = true;
+            canceller.cancel();
+        }
+        std::thread::sleep(SESSION_CLOSE_POLL.min(left));
+    }
+    tracing::warn!("the review session did not close; the worker is not answering");
+    Err(CommandError::busy())
 }
 
 /// Starts a `Prepare` (A §5: the preprocessing every run needs anyway, and the thumbnails, display
@@ -382,7 +497,7 @@ pub(crate) fn start_prepare(
 }
 
 /// Starts a run and answers with its id (A §7), which is the folder under `runs/` the window will
-/// be asking about from here on.
+/// be asking about from here on. `carry_from` names the run whose review it continues (A §8.5).
 ///
 /// # Errors
 ///
@@ -392,14 +507,45 @@ pub(crate) fn start_run(
     state: &AppState,
     spec: RunSpec,
     lang: Lang,
+    carry_from: Option<String>,
 ) -> Result<String, CommandError> {
     // `start` answers `Some` for every `JobStart::Run` — the id comes from the `run.json` it has
     // just written — so this is unreachable rather than a case the window has to handle. It is an
     // error and not an `expect` because a panic on the command thread poisons the job slot for
     // the rest of the session, and there is nothing here worth that.
-    start(app, state, JobStart::Run { spec }, lang)?.ok_or_else(|| {
+    start(app, state, JobStart::Run { spec, carry_from }, lang)?.ok_or_else(|| {
         AppError::Worker("the run was started without an id of its own".to_owned()).into()
     })
+}
+
+/// Opens a review session over a finished run (A §8), or does nothing when that very run is
+/// already open: entering the mode twice must not throw away a loaded match and load it again.
+///
+/// A session over *another* run, or a `Prepare` or a run that has ended, is closed first by
+/// [`start`]; a `Prepare` or a run that is still going is `busy`, because the worker is theirs.
+///
+/// # Errors
+///
+/// As [`start`], plus `io` when the workspace has no such run and `json` when its `run.json`
+/// holds a launch sheet this build cannot read.
+pub(crate) fn start_review(
+    app: &AppHandle,
+    state: &AppState,
+    run_id: String,
+) -> Result<(), CommandError> {
+    let open_already = {
+        let slot = state.job()?;
+        slot.as_ref().is_some_and(|job| {
+            job.kind == JobKind::Review && job.run_id.as_deref() == Some(run_id.as_str())
+        })
+    };
+    if open_already {
+        return Ok(());
+    }
+    // A §6's notification is a job's ending said out loud, and a session's ending is the user
+    // leaving a screen: [`notify`] returns before it ever reads this word.
+    start(app, state, JobStart::Review { run_id }, Lang::Ru)?;
+    Ok(())
 }
 
 /// The `Prepare` job and a worker on it.
@@ -417,27 +563,123 @@ fn prepare(ws: &Workspace, command: &WorkerCommand) -> Result<Started, CommandEr
     let job = host::prepare_job(ws, &spec)?;
     // A `Prepare` has no run folder, so its log sits beside `sherd-workspace.json` (A §4).
     let worker = Worker::spawn(command, &job, Some(&ws.root().join(PREPARE_LOG)))?;
-    Ok(Started { job: JobKind::Prepare, worker, run: None })
+    Ok(Started {
+        job: JobKind::Prepare,
+        worker,
+        run_id: None,
+        dir: None,
+        run: None,
+        dropped: Vec::new(),
+    })
 }
 
-/// Opens a run: the sheet remembered for the next `Prepare` (A §7.4), `run.json` written as
-/// `running` before anything can go wrong (A §4), and a worker on the job.
-///
-/// Nothing is carried here: a run started from the launch sheet alone carries nobody's decisions.
-/// A §8.5's «перенести решения» hands [`host::carry`]'s `Carried` to [`host::start_run`] instead.
+/// Opens a run: the sheet remembered for the next `Prepare` (A §7.4), the last review carried
+/// over when the user asked for it (A §8.5), `run.json` written as `running` before anything can
+/// go wrong (A §4), and a worker on the job.
 fn open_run(
     ws: &mut Workspace,
     command: &WorkerCommand,
     spec: &RunSpec,
+    carry_from: Option<&str>,
 ) -> Result<Started, CommandError> {
     // Serialising a `RunSpec` cannot fail in practice — it is fifteen numbers and three enums —
     // but the sheet is on its way into a file, so its failure is that file's, not a panic.
     let sheet = serde_json::to_value(spec)
         .map_err(|source| AppError::Json { path: ws.root().join(WORKSPACE_FILE), source })?;
     ws.set_last_spec(sheet)?;
-    let (file, worker) = host::start_run(ws, command, spec, None, chrono::Local::now())?;
+    let carried = match carry_from {
+        Some(from) => Some(carry(ws, from)?),
+        None => None,
+    };
+    let dropped = carried.as_ref().map_or_else(Vec::new, |c| c.dropped.clone());
+    let (file, worker) = host::start_run(ws, command, spec, carried, chrono::Local::now())?;
     let dir = ws.run_dir(&file.id);
-    Ok(Started { job: JobKind::Run, worker, run: Some((file, dir)) })
+    Ok(Started {
+        job: JobKind::Run,
+        worker,
+        run_id: Some(file.id.clone()),
+        dir: Some(dir),
+        run: Some(file),
+        dropped,
+    })
+}
+
+/// A §8.5's «перенести решения»: the review of `from_run` as the run about to start.
+///
+/// The names handed over are the collection **after** A §5.1's exclusions, because those are the
+/// fragments the new run will actually match and `constraints::resolve` fails a whole run on a
+/// name it does not know. A decision about an excluded fragment is therefore left behind — and
+/// said, through [`Carried::dropped`].
+fn carry(ws: &Workspace, from_run: &str) -> Result<Carried, CommandError> {
+    if !run::list(&ws.runs_dir())?.iter().any(|run| run.id == from_run) {
+        // As `commands::run_dir_of`: a run id becomes a path, so it is checked against the runs
+        // that exist and never against a list of forbidden characters.
+        let why = std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("the workspace has no run named {from_run:?} to carry decisions from"),
+        );
+        return Err(AppError::io(ws.runs_dir(), why).into());
+    }
+    let input = ws
+        .input()
+        .ok_or_else(|| AppError::Worker("the input folder is not available".to_owned()))?;
+    let names: Vec<String> =
+        sherd_core::collection::discover_excluding(&input, &ws.file().excluded)
+            .map_err(AppError::from)?
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+    Ok(host::carry(ws, from_run, &names, &run::timestamp(chrono::Local::now()))?)
+}
+
+/// Opens a review session over a finished run (A §8): the fragments and `match.state` loaded
+/// once, and then the window's questions answered until it closes.
+///
+/// The run's **own** four preprocessing numbers go into the job, out of its `run.json`. A session
+/// preprocesses through `cache/` exactly as a run does, and a working mesh built at another face
+/// budget or another seed is not the one the match was made on — the session would refuse at
+/// `Ready` with A §10's `protocol`, which is a confusing way to say «the shell sent the wrong
+/// sheet».
+fn open_review(
+    ws: &Workspace,
+    command: &WorkerCommand,
+    run_id: &str,
+) -> Result<Started, CommandError> {
+    let Some(reviewed) = run::list(&ws.runs_dir())?.into_iter().find(|run| run.id == run_id) else {
+        let why = std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("the workspace has no run named {run_id:?}"),
+        );
+        return Err(AppError::io(ws.runs_dir(), why).into());
+    };
+    let dir = ws.run_dir(run_id);
+    let spec: RunSpec = serde_json::from_value(reviewed.spec)
+        .map_err(|source| AppError::Json { path: dir.join(run::RUN_FILE), source })?;
+    let input = ws
+        .input()
+        .ok_or_else(|| AppError::Worker("the input folder is not available".to_owned()))?;
+    let job = Job::Review(ReviewJob {
+        workspace: ws.root().to_owned(),
+        input,
+        run_id: run_id.to_owned(),
+        excluded: ws.file().excluded.clone(),
+        target_faces: spec.target_faces,
+        seed: spec.seed,
+        memory_gb: spec.memory_gb,
+        workers: spec.workers,
+    });
+    // Into the reviewed run's own `engine.log`: a session writes nothing else into that folder
+    // (A §2.1), and A §10's «Показать лог» for this run is where the reviewer will look when a
+    // session fails to open.
+    let worker = Worker::spawn(command, &job, Some(&dir.join(host::ENGINE_LOG)))?;
+    Ok(Started {
+        job: JobKind::Review,
+        worker,
+        run_id: Some(run_id.to_owned()),
+        dir: Some(dir),
+        run: None,
+        dropped: Vec::new(),
+    })
 }
 
 /// Asks the running job to stop (A §2.2's «Отменить»); no job is no error, because the button and
@@ -601,10 +843,15 @@ impl DockProgress {
 /// and the rest report progress too, and letting them through would run the bar to the end four
 /// times over and read as four jobs. A preparation's two are `preprocess` and `display`, which
 /// are the two halves of what it does and between them all of it.
+///
+/// A session's two are the only waits it has: `preprocess` while it loads the collection, and
+/// `refine` while R §9 walks the groups «Уточнить позы» asked about. Its `Reassemble` answers
+/// report nothing and are over in a tenth of a second (A §3), which is why there is no third.
 fn dock_stage(job: JobKind, stage: &str) -> bool {
     match job {
         JobKind::Run => stage == "matching",
         JobKind::Prepare => stage == "preprocess" || stage == "display",
+        JobKind::Review => stage == "preprocess" || stage == "refine",
     }
 }
 
@@ -615,6 +862,12 @@ fn dock_stage(job: JobKind, stage: &str) -> bool {
 /// ask about is a window that is going away. Nothing here can fail a job that has already run:
 /// an OS that refuses to show notifications is logged and that is the end of it.
 fn notify(app: &AppHandle, job: JobKind, lang: Lang, outcome: &Outcome) {
+    // Never for a review session (A §8): nobody is waiting for it to be over — it ends because
+    // the reviewer left the screen, or because the run they started needed the worker — and an
+    // OS notification saying so would be the app announcing its own housekeeping.
+    if job == JobKind::Review {
+        return;
+    }
     let Some(window) = app.get_webview_window(MAIN_WINDOW) else { return };
     // `unwrap_or(true)`: when it cannot be told, say nothing. A stray notification is worse than
     // a missing one — the user is in another app, and the window is one click away regardless.
@@ -649,6 +902,10 @@ fn ended(job: JobKind, lang: Lang, outcome: &Outcome) -> String {
         (Lang::Ru, JobKind::Prepare) => "Подготовка",
         (Lang::En, JobKind::Run) => "Assembly",
         (Lang::En, JobKind::Prepare) => "Preparation",
+        // Never reached: [`notify`] returns before this for a session. Named all the same, so
+        // that a fourth kind of job has to be thought about here rather than defaulted.
+        (Lang::Ru, JobKind::Review) => "Ревью",
+        (Lang::En, JobKind::Review) => "Review",
     };
     let how = match (lang, outcome) {
         (Lang::Ru, Outcome::Done { .. }) => "завершена",

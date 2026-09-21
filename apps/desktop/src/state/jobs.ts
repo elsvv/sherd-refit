@@ -64,8 +64,11 @@ export interface JobsState {
    * Asks the shell for a run of the launch sheet's `spec` (A §7.4), as [`JobsState.start`] does
    * for a preparation. The run's id is not returned: it arrives in the view's `job`, and again
    * with `engine:finished`, and a second copy here would be a second opinion to keep in step.
+   *
+   * `carryFrom` is A §8.5's «Перенести решения ревью»: the run whose decisions this one starts
+   * from, or `null` — the default — for a run that starts from nobody's.
    */
-  startRun(spec: RunSpec): Promise<void>;
+  startRun(spec: RunSpec, carryFrom?: string | null): Promise<void>;
   /** Stops the running job; a no-op when none is. */
   cancel(): Promise<void>;
 
@@ -163,10 +166,10 @@ export const useJobs = create<JobsState>()((set) => ({
     await useWorkspace.getState().refresh();
   },
 
-  startRun: async (spec) => {
+  startRun: async (spec, carryFrom = null) => {
     set(fresh());
     try {
-      await api.runStart(spec, useUi.getState().language);
+      await api.runStart(spec, useUi.getState().language, carryFrom);
     } catch (e) {
       set({ startedAt: null });
       useWorkspace.getState().setError(toCommandError(e));

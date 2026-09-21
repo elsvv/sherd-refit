@@ -52,6 +52,13 @@ pub enum JobKind {
     Prepare,
     /// One run of the pipeline (A §7).
     Run,
+    /// A review session over a finished run (A §8): a worker that sits in the slot answering
+    /// questions rather than working through a job of its own.
+    ///
+    /// The window shows no progress strip for it and no «Отменить»: the session is a cache the
+    /// «Ревью» screen is being served from, and the only thing that ends it is leaving the screen
+    /// — or a `Prepare` or a run needing the worker, which closes it first (A §8.4).
+    Review,
 }
 
 /// The job that is running, if one is (A §5's «preparing» and «running» rows). The host owns this

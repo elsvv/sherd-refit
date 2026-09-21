@@ -185,6 +185,34 @@ function scores(tight: number, gap: number, seam: number, pen: number): Candidat
 }
 
 /**
+ * The tier pass's evidence for one candidate (A §8.3): what «Почему не подтверждён сам» is
+ * written from, and what says why a confirmed join is confirmed.
+ *
+ * `failed` carries the engine's own refusal strings in the shapes `tiers.rs` writes them —
+ * `tight 0.2767 < 0.35`, `no arm: support 0 < 1 and margin 1.00 < 2` — so that the sentences the
+ * window makes of them can be read on a screen without a run behind it.
+ */
+function evidence(failed: readonly string[], arm: string | null, margin: number): CandidateRow["evidence"] {
+  const held = failed.length === 0;
+  return {
+    margin,
+    rival_moved_t: 8.4,
+    placements: held ? 3 : 1,
+    determined_deg: 1e-7,
+    determined_t: 4e-8,
+    slide_t: 1.42,
+    resample_tight_min: held ? 0.39 : 0.24,
+    resample_gap_max: held ? 0.014 : 0.038,
+    resample_accept: held ? 3 : 1,
+    support: arm === "support" ? 2 : 0,
+    // Left out rather than emptied: the engine writes neither key when it has nothing to say,
+    // and a window that read `[]` as «нет причин» would say it of a confirmed join too.
+    ...(held ? {} : { failed: [...failed] }),
+    ...(arm === null ? {} : { arm }),
+  };
+}
+
+/**
  * The rows of `candidates.json` (A §4): the joins the assembly was built from, four pairs that
  * were good enough to look at and were not used, and a few the engine threw out — which is the
  * three bands A §8.3's inspector groups its rows into.
@@ -207,7 +235,7 @@ function candidateRows(): CandidateRow[] {
         scores: scores(tight, 0.012 + (i % 2) * 0.003, seam, 0.0011),
         tier: "confirmed",
         used: true,
-        evidence: { margin: 6.2 + i, agree_seeds: 2, rival: null },
+        evidence: evidence([], "support", 6.2 + i),
       });
     });
   });
@@ -217,6 +245,14 @@ function candidateRows(): CandidateRow[] {
     ["FY234004", "FY234011"],
     ["FY234008", "FY234012"],
     ["FY234003", "FY234010"],
+  ];
+  // One band, four reasons: A §8.3's «Почему не подтверждён сам» has a sentence for each shape
+  // the engine writes, and the mock is where they are read side by side.
+  const held: string[][] = [
+    ["tight 0.2767 < 0.35"],
+    ["gap 0.0358 > 0.015", "cont_n 0.8485 < 0.9"],
+    ["no arm: support 0 < 1 and margin 1.00 < 2"],
+    ["seam 4.0000 < 5", "redraw 1: pen 0.0006 > 0"],
   ];
   probable.forEach(([a, b], i) => {
     const tight = 0.29 + i * 0.02;
@@ -229,7 +265,7 @@ function candidateRows(): CandidateRow[] {
       scores: scores(tight, 0.021 + i * 0.002, seam, 0.0019),
       tier: "probable",
       used: false,
-      evidence: { refusals: ["cont_n"], margin: 1.1 + i * 0.2 },
+      evidence: evidence(held[i] ?? ["tight 0.2767 < 0.35"], null, 1.1 + i * 0.2),
     });
   });
 
@@ -906,6 +942,19 @@ export const mockApi: Api = {
     }
     return isCorrupt("candidates") ? corrupted(runId, "candidates.json") : Promise.resolve(CANDIDATES);
   },
+
+  // Nobody has reviewed a mocked run: an empty file is what the shell answers for one, and what
+  // A §8.5's «Перенести решения ревью (N)» counts to nothing from.
+  runDecisions: () => Promise.resolve({ version: 1, decisions: [] }),
+
+  // A §8's session. The mock does not play one yet — M5.6 gives it `ready`, an `assembly` for
+  // every decision, a synthetic seam and a refinement — so these accept the call and answer
+  // nothing, which is what a session that has not been asked anything looks like.
+  reviewOpen: () => Promise.resolve(),
+  reviewApply: () => Promise.resolve(),
+  reviewPair: () => Promise.resolve(),
+  reviewRefine: () => Promise.resolve(),
+  reviewClose: () => Promise.resolve(),
 
   runLog: (runId, maxLines) => {
     const lines = engineLog(runId === null ? null : (runOf(runId) ?? null)).split("\n");

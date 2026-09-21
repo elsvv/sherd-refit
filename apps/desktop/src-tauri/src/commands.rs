@@ -5,14 +5,16 @@
 //! second opinion about the workspace to hold in step with the first. The window asks; the shell
 //! reads and writes the folder (A §2.1).
 
+use std::collections::BTreeSet;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use sherd_app_core::decisions::{DECISIONS_FILE, DECISIONS_VERSION, DecisionsFile};
 use sherd_app_core::eta::{self, Calibration};
-use sherd_app_core::host::{self, Outcome, Worker};
-use sherd_app_core::protocol::{AssemblyDto, CandidateRow, Event, Job, RunSpec};
-use sherd_app_core::view::{self, WorkspaceView};
+use sherd_app_core::host::{self, Outcome, Requester, Worker};
+use sherd_app_core::protocol::{AssemblyDto, CandidateRow, Event, Job, Request, RunSpec};
+use sherd_app_core::view::{self, JobKind, WorkspaceView};
 use sherd_app_core::workspace::Workspace;
 use sherd_app_core::{AppError, atomic, run, snapshot};
 use tauri::{AppHandle, Manager, State};
@@ -169,11 +171,15 @@ pub(crate) fn fragment_exclude(
 /// it so that A §6's end-of-job notification — written by the shell and shown by the OS, by which
 /// time the window may be behind something else — is in the language the user is reading.
 ///
+/// **`async`, and not for the sake of an `await`.** A review session open over some run holds the
+/// worker, and this command closes it and waits for its thread — bounded, but a wait all the
+/// same (A §8.4). On the main thread that wait would be a window that does not repaint.
+///
 /// # Errors
 ///
 /// [`CommandError`] of kind `busy`, `no_workspace`, `worker`, `io` or `engine`; see
 /// [`jobs::start_prepare`].
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn prepare_start(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -188,20 +194,27 @@ pub(crate) fn prepare_start(
 /// fresh view, as `engine:finished`.
 ///
 /// The sheet is remembered before the run starts, so the next «Подготовить» prepares the cache
-/// *this* run would have wanted (A §7.4). `lang` is as [`prepare_start`]'s.
+/// *this* run would have wanted (A §7.4). `lang` is as [`prepare_start`]'s, and `async` for the
+/// same reason.
+///
+/// `carry_from` is A §8.5's «Перенести решения ревью»: the run whose `decisions.json` this one
+/// starts from — accepted pairs pinned at their pose and not matched again, rejected pairs
+/// skipped. The decisions that could not come along (a fragment removed or excluded since) are
+/// filed nowhere and said once, as an `engine:event` carrying `dropped`.
 ///
 /// # Errors
 ///
 /// [`CommandError`] of kind `busy`, `no_workspace`, `worker`, `io`, `json` or `engine`; see
 /// [`jobs::start`].
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn run_start(
     app: AppHandle,
     state: State<'_, AppState>,
     spec: RunSpec,
     lang: String,
+    carry_from: Option<String>,
 ) -> Result<String, CommandError> {
-    jobs::start_run(&app, state.inner(), spec, Lang::of(&lang))
+    jobs::start_run(&app, state.inner(), spec, Lang::of(&lang), carry_from)
 }
 
 /// What a run of this collection will take, for the launch sheet's «≈ 11 мин» (A §6).
@@ -290,6 +303,195 @@ pub(crate) fn run_candidates(
 ) -> Result<Vec<CandidateRow>, CommandError> {
     let dir = run_dir(state.inner(), &run_id)?;
     Ok(atomic::read_json(&dir.join(sherd_app_core::worker::CANDIDATES_FILE))?)
+}
+
+/// What the reviewer decided about a run (A §8.1), from its own `decisions.json`.
+///
+/// A run nobody has reviewed has no file and is not an error: it answers an empty list, which is
+/// what the «Ревью» screen starts from and what the launch sheet counts for A §8.5's «Перенести
+/// решения ревью (N)».
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `no_workspace`, `io` when there is no such run, `json` when the file
+/// does not parse, or `version` when a newer app wrote it.
+#[tauri::command]
+pub(crate) fn run_decisions(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<DecisionsFile, CommandError> {
+    let dir = run_dir(state.inner(), &run_id)?;
+    Ok(DecisionsFile::load_or_default(&dir)?)
+}
+
+/// Opens a review session over a finished run (A §8): the worker loads the collection and the
+/// run's saved match once, says `ready`, and then answers [`review_apply`], [`review_pair`] and
+/// [`review_refine`] until [`review_close`].
+///
+/// Everything the session says reaches the window as `engine:event`, exactly as a run's does, and
+/// the assembly of every answer is filed by the shell (A §2.1). Opening the run that is already
+/// open does nothing — entering the mode twice must not throw a loaded match away — and a
+/// session over another run replaces it. A `Prepare` or a run that is actually running is `busy`:
+/// the worker is theirs, and A §5 has one.
+///
+/// **`async`** for [`prepare_start`]'s reason, and one more: a session over another run is closed
+/// and waited for first.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `busy`, `no_workspace`, `worker`, `io` when there is no such run, or
+/// `json` when its `run.json` holds a launch sheet this build cannot read.
+#[tauri::command(async)]
+pub(crate) fn review_open(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<(), CommandError> {
+    jobs::start_review(&app, state.inner(), run_id)
+}
+
+/// Files the reviewer's decisions and asks the session to assemble again (A §8.2).
+///
+/// **Written before it is sent**, and atomically: the answer that comes back is what the window
+/// will draw, and a crash between the two must not leave a screen showing an assembly the folder
+/// on disk cannot account for. The whole list travels every time because undo and redo are the
+/// window's (A §8.1) — the shell keeps no second copy to hold in step with it.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `worker` when no session is open or it is no longer listening,
+/// `json` when the list is not one this build can file, `no_workspace`, or `io`.
+#[tauri::command]
+pub(crate) fn review_apply(
+    state: State<'_, AppState>,
+    decisions: DecisionsFile,
+) -> Result<(), CommandError> {
+    let (run_id, requester) = session(state.inner())?;
+    checked(&decisions)?;
+    let dir = run_dir(state.inner(), &run_id)?;
+    decisions.save(&dir)?;
+    requester.send(&Request::Reassemble { decisions })?;
+    Ok(())
+}
+
+/// Asks the session for the seam of one placement (A §8.3), which arrives as a `pair_detail`
+/// event. `pose` maps `b` into `a`'s frame, row-major — the matrix a `CandidateRow` carries.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `worker` when no session is open or it is no longer listening. A
+/// pair the collection does not have is the *session's* answer — a `request_failed` event — and
+/// not a refusal here: the window asked something answerable and the answer is «no such pair».
+#[tauri::command]
+pub(crate) fn review_pair(
+    state: State<'_, AppState>,
+    a: String,
+    b: String,
+    pose: [[f64; 4]; 4],
+) -> Result<(), CommandError> {
+    let (_, requester) = session(state.inner())?;
+    requester.send(&Request::PairDetail { a, b, pose })?;
+    Ok(())
+}
+
+/// Asks the session to run R §9 over the groups this run's decisions left unrefined (A §8.4).
+///
+/// From the file and not from an argument: what is refined must be the assembly the decisions on
+/// disk describe, and a list sent here that [`review_apply`] had not filed would refine a draft
+/// nobody could get back to.
+///
+/// # Errors
+///
+/// As [`review_apply`], without the validation.
+#[tauri::command]
+pub(crate) fn review_refine(state: State<'_, AppState>) -> Result<(), CommandError> {
+    let (run_id, requester) = session(state.inner())?;
+    let dir = run_dir(state.inner(), &run_id)?;
+    let decisions = DecisionsFile::load_or_default(&dir)?;
+    requester.send(&Request::Refine { decisions })?;
+    Ok(())
+}
+
+/// Closes the review session (A §8): the worker answers `Done` and its ~3 GB go back to the OS.
+///
+/// Returns as soon as the line is out, as «Отменить» does: the session's own thread frees the job
+/// slot and sends `engine:finished`, which is how the window learns it is over. Closing nothing
+/// is no error — the window leaves the mode, and a run started a moment earlier may have closed
+/// the session already.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `worker` when the job slot is poisoned.
+#[tauri::command]
+pub(crate) fn review_close(state: State<'_, AppState>) -> Result<(), CommandError> {
+    let open = {
+        let slot = state.job()?;
+        slot.as_ref()
+            .filter(|job| job.kind == JobKind::Review)
+            .and_then(|job| job.requester.clone())
+    };
+    if let Some(requester) = open {
+        // A session already gone is what was asked for; the error would say nothing useful.
+        let _ = requester.send(&Request::Close);
+    }
+    Ok(())
+}
+
+/// The open review session: the run it is over, and the handle its questions go down.
+///
+/// The lock is taken and let go of here, not held: what follows writes a file and writes to a
+/// pipe, and no lock of this app is held across either (see [`crate::state`]). What the gap can
+/// hold is the session ending underneath, and that is the `worker` error [`Requester::send`]
+/// gives — the same answer, arrived at a moment later.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `worker` when no session is open or the job slot is poisoned.
+fn session(state: &AppState) -> Result<(String, Requester), CommandError> {
+    let slot = state.job()?;
+    let open = slot.as_ref().filter(|job| job.kind == JobKind::Review);
+    match open.and_then(|job| job.run_id.clone().zip(job.requester.clone())) {
+        Some(session) => Ok(session),
+        None => Err(CommandError::no_session()),
+    }
+}
+
+/// What the shell checks before a decision list becomes `decisions.json` (A §8.1).
+///
+/// Two things, and both are about the *file*, not about the review: a version this build could
+/// not read back, and a pair decided twice. The second is the file's own invariant — one decision
+/// per unordered pair — and a list that broke it would put two lines about one pair into the
+/// engine's `constraints.json` and leave the window's own undo stack disagreeing with the disk.
+///
+/// Everything else is the session's to answer, not the shell's: a decision naming a fragment the
+/// collection no longer has is reported as `dropped` (A §8.5), and a pose that is not rigid is
+/// `constraints::resolve`'s refusal.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `json`.
+fn checked(decisions: &DecisionsFile) -> Result<(), CommandError> {
+    if decisions.version > DECISIONS_VERSION {
+        return Err(CommandError::malformed(format!(
+            "{DECISIONS_FILE}: the window sent format {}, this build writes {DECISIONS_VERSION}",
+            decisions.version
+        )));
+    }
+    let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
+    for decision in &decisions.decisions {
+        let (a, b) = (decision.a.as_str(), decision.b.as_str());
+        if a.is_empty() || b.is_empty() || a == b {
+            return Err(CommandError::malformed(format!(
+                "{DECISIONS_FILE}: {a:?} and {b:?} are not two fragments"
+            )));
+        }
+        if !seen.insert(if a <= b { (a, b) } else { (b, a) }) {
+            return Err(CommandError::malformed(format!(
+                "{DECISIONS_FILE}: {a} – {b} is decided twice"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The end of a job's log, for A §10's «Показать лог»: a run's `engine.log` by id, or the
@@ -652,7 +854,53 @@ fn config_dir(app: &AppHandle) -> Result<PathBuf, CommandError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{adapter_names, tail};
+    use sherd_app_core::decisions::{Decision, DecisionsFile, Verdict};
+
+    use super::{adapter_names, checked, tail};
+
+    fn decision(a: &str, b: &str) -> Decision {
+        Decision {
+            a: a.to_owned(),
+            b: b.to_owned(),
+            verdict: Verdict::Accept,
+            pose: None,
+            source: Some("probable".to_owned()),
+            bulk: false,
+            at: "2026-09-21T12:00:00+03:00".to_owned(),
+            carried_from: None,
+        }
+    }
+
+    /// A §8.1: `decisions.json` holds one decision per unordered pair, and a version this build
+    /// can read back. Both are refused **before** anything is written, because what the shell
+    /// will not file is exactly what the next `review_open` could not load.
+    #[test]
+    fn a_decision_list_that_could_not_be_filed_again_is_refused_before_it_is_sent() {
+        let mut file = DecisionsFile::default();
+        file.decisions.push(decision("pieceA", "pieceB"));
+        file.decisions.push(decision("pieceB", "pieceC"));
+        assert!(checked(&file).is_ok());
+
+        // The same pair, named the other way round: `DecisionsFile::set` keeps one of these and
+        // the window's own list must too, or the engine is told twice about one join.
+        let mut twice = file.clone();
+        twice.decisions.push(decision("pieceB", "pieceA"));
+        let refused = checked(&twice).expect_err("one pair, one decision");
+        assert_eq!(refused.kind, "json");
+        assert!(refused.message.contains("pieceB – pieceA"), "{}", refused.message);
+
+        // A fragment with itself, and an empty name: neither is a pair.
+        let mut itself = DecisionsFile::default();
+        itself.decisions.push(decision("pieceA", "pieceA"));
+        assert!(checked(&itself).is_err());
+        let mut nameless = DecisionsFile::default();
+        nameless.decisions.push(decision("pieceA", ""));
+        assert!(checked(&nameless).is_err());
+
+        // And a list a newer app wrote, which this build would not read back.
+        let newer = DecisionsFile { version: file.version + 1, ..file };
+        assert!(checked(&newer).is_err());
+    }
 
     /// A §7.4: the sheet says which card a run would go to, and the engine's `info` says a great
     /// deal more than that. What it says is parsed, not shown.

@@ -54,9 +54,15 @@ fn main() {
             commands::job_cancel,
             commands::run_assembly,
             commands::run_candidates,
+            commands::run_decisions,
             commands::run_log,
             commands::run_delete,
             commands::engine_info,
+            commands::review_open,
+            commands::review_apply,
+            commands::review_pair,
+            commands::review_refine,
+            commands::review_close,
         ])
         .run(tauri::generate_context!())
         .expect("the window could not be opened");

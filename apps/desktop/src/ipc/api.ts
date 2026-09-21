@@ -2,6 +2,7 @@ import type { Language } from "../state/ui";
 import type { AssemblyDto } from "./bindings/AssemblyDto";
 import type { Calibration } from "./bindings/Calibration";
 import type { CandidateRow } from "./bindings/CandidateRow";
+import type { DecisionsFile } from "./bindings/DecisionsFile";
 import type { Event as EngineEvent } from "./bindings/Event";
 import type { JobKind } from "./bindings/JobKind";
 import type { Outcome } from "./bindings/Outcome";
@@ -110,8 +111,13 @@ export interface Api {
    * Starts a run and answers with its id — the folder under `runs/` everything below asks about.
    * Returns as soon as the worker is on its way; the run itself arrives as `engine:event` and
    * ends with `engine:finished`. `lang` is as [`Api.prepareStart`]'s.
+   *
+   * `carryFrom` is A §8.5's «Перенести решения ревью»: the run whose decisions this one starts
+   * from — accepted pairs pinned at their pose and not matched again, rejected pairs skipped.
+   * `null` carries nobody's. What could not come along arrives once as an `engine:event` whose
+   * event is `dropped`.
    */
-  runStart(spec: RunSpec, lang: Language): Promise<string>;
+  runStart(spec: RunSpec, lang: Language, carryFrom: string | null): Promise<string>;
   jobCancel(): Promise<void>;
   /** What a run of the open workspace would take (A §6), for the launch sheet. */
   calibration(): Promise<CalibrationView>;
@@ -123,6 +129,37 @@ export interface Api {
   runAssembly(runId: string): Promise<AssemblyDto>;
   /** Every candidate of a run, from its `candidates.json` (A §8.3); refuses as [`Api.runAssembly`]. */
   runCandidates(runId: string): Promise<CandidateRow[]>;
+  /**
+   * What the reviewer decided about a run, from its `decisions.json` (A §8.1). A run nobody has
+   * reviewed answers an empty list rather than refusing.
+   */
+  runDecisions(runId: string): Promise<DecisionsFile>;
+  /**
+   * Opens a review session over a finished run (A §8). The worker loads the collection and the
+   * run's saved match once and then answers the four calls below; everything it says arrives as
+   * `engine:event` — `ready` when it can be asked, `assembly` for every decision, `pair_detail`
+   * for every seam, `dropped` and `request_failed` when something could not be done.
+   *
+   * Opening the run that is already open does nothing. A `Prepare` or a run that is going
+   * refuses with kind `busy`; a run's `match.state` that cannot be read ends the session with
+   * `engine:finished` carrying `protocol` (A §10: the run stays viewable, review is off).
+   */
+  reviewOpen(runId: string): Promise<void>;
+  /**
+   * Files the whole list of decisions and asks the session to assemble again (A §8.2). The
+   * answer is an `assembly` event, under a second. The list travels whole because undo and redo
+   * are the window's.
+   */
+  reviewApply(decisions: DecisionsFile): Promise<void>;
+  /**
+   * Asks for the seam of one placement (A §8.3), which arrives as a `pair_detail` event. `pose`
+   * maps `b` into `a`'s frame, row-major — the matrix a [`CandidateRow`] carries.
+   */
+  reviewPair(a: string, b: string, pose: number[][]): Promise<void>;
+  /** Runs R §9 over the groups the filed decisions left unrefined (A §8.4); answers `assembly`. */
+  reviewRefine(): Promise<void>;
+  /** Closes the session and gives the engine's memory back. Closing none is no error. */
+  reviewClose(): Promise<void>;
   /**
    * The last `maxLines` lines of a run's `engine.log`, or of the workspace's `prepare.log` for
    * `null` (A §10's «Показать лог»). A log that does not exist yet is an empty string.

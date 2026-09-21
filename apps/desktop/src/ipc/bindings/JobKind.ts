@@ -3,4 +3,4 @@
 /**
  * Which kind of job a worker is on (A §5). The window shows a different progress strip for each.
  */
-export type JobKind = "prepare" | "run";
+export type JobKind = "prepare" | "run" | "review";

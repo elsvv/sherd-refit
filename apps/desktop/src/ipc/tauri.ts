@@ -5,6 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 import type { AssemblyDto } from "./bindings/AssemblyDto";
 import type { CandidateRow } from "./bindings/CandidateRow";
+import type { DecisionsFile } from "./bindings/DecisionsFile";
 import type { WorkspaceView } from "./bindings/WorkspaceView";
 import type {
   Api,
@@ -45,7 +46,8 @@ export const tauriApi: Api = {
   prepareStart: async (lang) => {
     await invoke("prepare_start", { lang });
   },
-  runStart: (spec, lang) => invoke<string>("run_start", { spec, lang }),
+  // `carryFrom` is A §8.5's carry-over; `null` is a run that starts from nobody's decisions.
+  runStart: (spec, lang, carryFrom) => invoke<string>("run_start", { spec, lang, carryFrom }),
   jobCancel: async () => {
     await invoke("job_cancel");
   },
@@ -55,9 +57,29 @@ export const tauriApi: Api = {
   // below take: `run_id`, `max_lines`.
   runAssembly: (runId) => invoke<AssemblyDto>("run_assembly", { runId }),
   runCandidates: (runId) => invoke<CandidateRow[]>("run_candidates", { runId }),
+  runDecisions: (runId) => invoke<DecisionsFile>("run_decisions", { runId }),
   runLog: (runId, maxLines) => invoke<string>("run_log", { runId, maxLines }),
   runDelete: (runId) => invoke<WorkspaceView>("run_delete", { runId }),
   engineInfo: () => invoke<EngineInfoView>("engine_info"),
+
+  // A §8's review session. Each of these answers `null`, because what the window is waiting for
+  // is the event the session sends back — `ready`, `assembly`, `pair_detail` — and not the
+  // return of the call that asked for it.
+  reviewOpen: async (runId) => {
+    await invoke("review_open", { runId });
+  },
+  reviewApply: async (decisions) => {
+    await invoke("review_apply", { decisions });
+  },
+  reviewPair: async (a, b, pose) => {
+    await invoke("review_pair", { a, b, pose });
+  },
+  reviewRefine: async () => {
+    await invoke("review_refine");
+  },
+  reviewClose: async () => {
+    await invoke("review_close");
+  },
 
   pickFolder: async (title) => {
     // `directory: true, multiple: false` has to survive inference as the literal `true`/`false`,

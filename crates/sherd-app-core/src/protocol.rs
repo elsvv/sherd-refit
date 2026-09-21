@@ -416,6 +416,169 @@ pub struct FragmentStatsTs {
     fracture_area_fraction: f64,
 }
 
+/// [`sherd_core::matching::verify::Scores`], field for field, for the TypeScript bindings only.
+///
+/// The same arrangement and the same reason as [`FragmentStatsTs`], and the same test keeping it
+/// honest: A §8.3's scores panel puts each of these numbers against its threshold and colours it,
+/// and a `Record<string, number>` is not a contract that can be written against — a renamed key
+/// would reach the window as a blank cell instead of a compile error.
+///
+/// The two flags carry the engine's own JSON shape: left out unless they are set, and written as
+/// `1.0` when they are (`verify::as_one`), which is why they are numbers here and not booleans.
+#[cfg(feature = "ts")]
+#[derive(Debug, Default, serde::Serialize, ts_rs::TS)]
+#[ts(export, rename = "Scores")]
+pub struct ScoresTs {
+    /// Fraction of A's facing fracture samples within the tight limit of B's surface (R §6.1).
+    #[serde(rename = "tightA")]
+    tight_a: f64,
+    /// The same for B's samples against A's.
+    #[serde(rename = "tightB")]
+    tight_b: f64,
+    /// `min(tightA, tightB)` — the side that fits worse is the fit.
+    tight: f64,
+    /// Median distance of A's facing samples to B's fracture surface, in `t`.
+    #[serde(rename = "gapA")]
+    gap_a: f64,
+    /// The same for B.
+    #[serde(rename = "gapB")]
+    gap_b: f64,
+    /// `max(gapA, gapB)`, in `t`.
+    gap: f64,
+    /// Area of A in contact with B, in `t²`.
+    #[serde(rename = "contactA")]
+    contact_a: f64,
+    /// The same for B.
+    #[serde(rename = "contactB")]
+    contact_b: f64,
+    /// `min(contactA, contactB)`, in `t²`.
+    contact: f64,
+    /// Length of the shared seam, in `t` (R §6.2).
+    seam: f64,
+    /// The pair's own gap limit, in `t` — what `gap` is shown against.
+    gap_limit: f64,
+    /// The distance `tight` counted, in `t`.
+    tight_delta: f64,
+    /// Median step height of the outer shell across the seam, in `t` (R §6.3).
+    cont: f64,
+    /// Median agreement of the two shells' normals across the seam (R §6.3).
+    cont_n: f64,
+    /// Fraction of surface samples of either fragment inside the other (R §6.4).
+    pen: f64,
+    /// Deepest excursion of either fragment into the other, in `t` (R §6.4).
+    pen_depth: f64,
+    /// `1` when a fragment is not watertight and R §6.4 could not run; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pen_unavailable: Option<f64>,
+    /// `1` when only the cheap half of R §6 was computed; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    partial: Option<f64>,
+    /// R §5.4's re-score of the stage-1 pose this candidate was refined from.
+    brk: f64,
+    /// The best stage-1 re-score of the whole pair (R §5.7).
+    brk_best: f64,
+}
+
+/// [`sherd_core::tiers::Evidence`], field for field, for the TypeScript bindings only.
+///
+/// This is what A §8.3's «Почему не подтверждён сам» is written from — `failed` above all, which
+/// the window turns into sentences — and what says why a confirmed join is confirmed (`arm`). As
+/// [`ScoresTs`], with a test against the engine's own keys.
+///
+/// Every field the engine leaves out of the JSON when it has nothing to say is optional here, and
+/// for the same reason: a run that probed no rival writes no `margin`, and a window that read
+/// `0` there would show a number the engine never measured.
+#[cfg(feature = "ts")]
+#[derive(Debug, Default, serde::Serialize, ts_rs::TS)]
+#[ts(export, rename = "Evidence")]
+pub struct EvidenceTs {
+    /// `score / rival_score` over a second placement that scores.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    margin: Option<f64>,
+    /// How far that second placement puts the sherd, in `t`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    rival_moved_t: Option<f64>,
+    /// The same ratio over the wide second placement (R §5.6's full list, then stage 1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    wide_margin: Option<f64>,
+    /// How far the wide second placement puts the sherd from **this** candidate, in `t`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    wide_rival_moved_t: Option<f64>,
+    /// The same distance from the pair's best candidate, in `t`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    wide_rival_pair_t: Option<f64>,
+    /// Where the wide second placement was found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "\"stage2\" | \"stage1\"")]
+    wide_rival_source: Option<String>,
+    /// Whether R §6.5 would accept that second placement itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    wide_rival_accepted: Option<bool>,
+    /// Distinct placements the pair's kept list makes.
+    #[ts(type = "number")]
+    placements: u64,
+    /// Worst rotation over the twelve one-ULP neighbours, in degrees.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    determined_deg: Option<f64>,
+    /// The same in translation, in `t`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    determined_t: Option<f64>,
+    /// How far the pose stays away after a ±0.5 t push along the seam, in `t`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    slide_t: Option<f64>,
+    /// Smallest `tight` over the three draws.
+    resample_tight_min: f64,
+    /// Largest `gap` over the three draws, in `t`.
+    resample_gap_max: f64,
+    /// How many of the three draws R §6.5 accepts.
+    resample_accept: u32,
+    /// Independent accepted joins that agree with this placement.
+    support: u32,
+    /// The tier's tests this candidate failed; left out on a confirmed join. A §8.3 turns each of
+    /// these into a sentence (`state/reasons.ts`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    failed: Option<Vec<String>>,
+    /// Which distinguishing arm confirmed this candidate — `support`, `margin` or `research`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    arm: Option<String>,
+    /// How many of this candidate's re-searches landed on its placement, and how many were run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    research: Option<[u32; 2]>,
+    /// Task S2's colour agreement across the seam — reported, never gated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    colour: Option<ColourAgreementTs>,
+}
+
+/// [`sherd_core::tiers::ColourAgreement`] for the bindings, as [`EvidenceTs`] carries it.
+#[cfg(feature = "ts")]
+#[derive(Debug, Default, serde::Serialize, ts_rs::TS)]
+#[ts(export, rename = "ColourAgreement")]
+pub struct ColourAgreementTs {
+    /// CIE76 between the two fragments' fracture-face mean Lab.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    frac_delta_e: Option<f64>,
+    /// Total variation between the two fragments' shell-face Lab histograms, `0`…`1`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    shell_hist: Option<f64>,
+}
+
 /// Something worth telling the reviewer about one fragment (A §5).
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -522,7 +685,7 @@ pub struct CandidateRow {
     /// R §5.7's ranking key, `seam · tight`: what the queue sorts on.
     pub score: f64,
     /// Every number R §6 produced, for the scores panel against its thresholds.
-    #[cfg_attr(feature = "ts", ts(type = "Record<string, number | boolean | null>"))]
+    #[cfg_attr(feature = "ts", ts(as = "ScoresTs"))]
     pub scores: Scores,
     /// The band it ended in — after the constraints and the object round, which is the band the
     /// run acted on.
@@ -533,7 +696,7 @@ pub struct CandidateRow {
     pub used: bool,
     /// The tier pass's evidence, which is what A §8.3 says «почему не подтверждено» from; `None`
     /// where the pass did not run or never probed this candidate.
-    #[cfg_attr(feature = "ts", ts(type = "Record<string, unknown> | null"))]
+    #[cfg_attr(feature = "ts", ts(as = "Option<EvidenceTs>"))]
     pub evidence: Option<Evidence>,
 }
 
@@ -610,6 +773,83 @@ mod tests {
                 .unwrap(),
             r#"{"event":"request_failed","message":"no such pair"}"#
         );
+    }
+
+    /// The keys of a serialised value, in the order serde wrote them.
+    #[cfg(feature = "ts")]
+    fn keys(value: &serde_json::Value) -> Vec<String> {
+        value.as_object().expect("an object").keys().cloned().collect()
+    }
+
+    /// The mirrors exist because the engine's types cannot derive `TS` from here (A §2.2: the
+    /// wire contract has one source, and it is the Rust). This is what keeps them honest — with
+    /// every optional field of the engine's own set, so that one left out of the mirror fails
+    /// here and not in the window.
+    #[cfg(feature = "ts")]
+    #[test]
+    fn the_typescript_mirrors_of_a_candidates_scores_and_evidence_have_the_engines_keys() {
+        use sherd_core::measure::RivalSource;
+        use sherd_core::tiers::ColourAgreement;
+
+        let real = Scores { pen_unavailable: true, partial: true, ..Scores::default() };
+        let mirror =
+            ScoresTs { pen_unavailable: Some(1.0), partial: Some(1.0), ..ScoresTs::default() };
+        assert_eq!(
+            keys(&serde_json::to_value(real).unwrap()),
+            keys(&serde_json::to_value(mirror).unwrap())
+        );
+
+        // Named field by field rather than built from a `Default`, which `Evidence` has none of:
+        // a field added to the engine's row stops this test compiling, which is the point.
+        let real = Evidence {
+            margin: Some(6.2),
+            rival_moved_t: Some(9.1),
+            wide_margin: Some(2.4),
+            wide_rival_moved_t: Some(8.2),
+            wide_rival_pair_t: Some(8.2),
+            wide_rival_source: Some(RivalSource::Stage2),
+            wide_rival_accepted: Some(false),
+            placements: 3,
+            determined_deg: Some(1e-3),
+            determined_t: Some(1e-4),
+            slide_t: Some(0.5),
+            resample_tight_min: 0.31,
+            resample_gap_max: 0.02,
+            resample_accept: 2,
+            support: 1,
+            failed: vec!["cont_n 0.8485 < 0.9".to_owned()],
+            arm: Some("support".to_owned()),
+            research: Some([1, 2]),
+            colour: Some(ColourAgreement { frac_delta_e: Some(3.4), shell_hist: Some(0.12) }),
+        };
+        let mirror = EvidenceTs {
+            margin: Some(6.2),
+            rival_moved_t: Some(9.1),
+            wide_margin: Some(2.4),
+            wide_rival_moved_t: Some(8.2),
+            wide_rival_pair_t: Some(8.2),
+            wide_rival_source: Some("stage2".to_owned()),
+            wide_rival_accepted: Some(false),
+            placements: 3,
+            determined_deg: Some(1e-3),
+            determined_t: Some(1e-4),
+            slide_t: Some(0.5),
+            resample_tight_min: 0.31,
+            resample_gap_max: 0.02,
+            resample_accept: 2,
+            support: 1,
+            failed: Some(vec!["cont_n 0.8485 < 0.9".to_owned()]),
+            arm: Some("support".to_owned()),
+            research: Some([1, 2]),
+            colour: Some(ColourAgreementTs { frac_delta_e: Some(3.4), shell_hist: Some(0.12) }),
+        };
+        let (real, mirror) =
+            (serde_json::to_value(real).unwrap(), serde_json::to_value(mirror).unwrap());
+        assert_eq!(keys(&real), keys(&mirror));
+        // And the one nested object, whose keys the window reads the same way.
+        assert_eq!(keys(&real["colour"]), keys(&mirror["colour"]));
+        // The word the engine writes for a source is the word the binding's union offers.
+        assert_eq!(real["wide_rival_source"], mirror["wide_rival_source"]);
     }
 
     /// A §7.4: «Стандарт» is the CLI's defaults, threshold for threshold.

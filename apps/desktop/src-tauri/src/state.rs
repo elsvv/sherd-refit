@@ -20,7 +20,7 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use sherd_app_core::host::Canceller;
+use sherd_app_core::host::{Canceller, Requester};
 use sherd_app_core::view::{JobKind, JobView};
 use sherd_app_core::workspace::Workspace;
 
@@ -36,10 +36,17 @@ use crate::error::CommandError;
 pub(crate) struct JobSlot {
     /// Which kind of job, for the view and for the events the window is sent.
     pub(crate) kind: JobKind,
-    /// The run it is writing, for a [`JobKind::Run`]; `None` for a `Prepare`.
+    /// The run it is writing, for a [`JobKind::Run`], or the run it is reviewing, for a
+    /// [`JobKind::Review`]; `None` for a `Prepare`.
     pub(crate) run_id: Option<String>,
     /// How to stop it (A §2.2).
     pub(crate) canceller: Canceller,
+    /// How to ask it something, for a [`JobKind::Review`] (A §8): a session sits in the slot
+    /// answering `Reassemble`, `PairDetail` and `Refine` until it is closed.
+    ///
+    /// `None` for the two jobs that answer no questions, so that a `review_apply` arriving while
+    /// a run is on is refused here rather than writing a line into a worker that ignores it.
+    pub(crate) requester: Option<Requester>,
 }
 
 impl JobSlot {

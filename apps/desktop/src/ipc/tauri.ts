@@ -3,8 +3,18 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 
+import type { AssemblyDto } from "./bindings/AssemblyDto";
+import type { CandidateRow } from "./bindings/CandidateRow";
 import type { WorkspaceView } from "./bindings/WorkspaceView";
-import type { Api, AppInfo, EngineEventPayload, EngineFinishedPayload, RecentEntry } from "./api";
+import type {
+  Api,
+  AppInfo,
+  CalibrationView,
+  EngineEventPayload,
+  EngineFinishedPayload,
+  EngineInfoView,
+  RecentEntry,
+} from "./api";
 
 /** The shell's event names, as `src-tauri/src/jobs.rs` emits them. */
 const ENGINE_EVENT = "engine:event";
@@ -35,9 +45,19 @@ export const tauriApi: Api = {
   prepareStart: async (lang) => {
     await invoke("prepare_start", { lang });
   },
+  runStart: (spec, lang) => invoke<string>("run_start", { spec, lang }),
   jobCancel: async () => {
     await invoke("job_cancel");
   },
+
+  calibration: () => invoke<CalibrationView>("calibration"),
+  // Tauri 2 matches a camelCase argument to its snake_case parameter, which is what the commands
+  // below take: `run_id`, `max_lines`.
+  runAssembly: (runId) => invoke<AssemblyDto>("run_assembly", { runId }),
+  runCandidates: (runId) => invoke<CandidateRow[]>("run_candidates", { runId }),
+  runLog: (runId, maxLines) => invoke<string>("run_log", { runId, maxLines }),
+  runDelete: (runId) => invoke<WorkspaceView>("run_delete", { runId }),
+  engineInfo: () => invoke<EngineInfoView>("engine_info"),
 
   pickFolder: async (title) => {
     // `directory: true, multiple: false` has to survive inference as the literal `true`/`false`,

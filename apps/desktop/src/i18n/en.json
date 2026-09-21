@@ -30,7 +30,13 @@
   },
   "stage": {
     "preprocess": "Preprocessing scans",
-    "display": "Previews and meshes"
+    "display": "Previews and meshes",
+    "matching": "Matching",
+    "tiers": "Confidence",
+    "assembly": "Assembly",
+    "objects": "Objects",
+    "refine": "Refinement",
+    "output": "Files"
   },
   "welcome": {
     "tagline": "Assembling 3D scans of ceramic fragments",

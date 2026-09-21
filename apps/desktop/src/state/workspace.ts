@@ -5,6 +5,7 @@ import type { CommandError, RecentEntry } from "../ipc/api";
 import { toCommandError } from "../ipc/api";
 import type { FragmentInfo } from "../ipc/bindings/FragmentInfo";
 import type { WorkspaceView } from "../ipc/bindings/WorkspaceView";
+import { useAssembly } from "./assembly";
 
 /**
  * The open workspace, as the shell last described it (A §5). The window keeps no second opinion:
@@ -34,7 +35,11 @@ export interface WorkspaceState {
   setView(view: WorkspaceView | null): void;
   /** Files a refusal that did not come from one of the actions below. */
   setError(error: CommandError | null): void;
-  /** Picks a run of the history, or none. */
+  /**
+   * Picks a run of the history, or none, and puts what it assembled in [`useAssembly`] — the
+   * selection and the thing selected are one act, so no screen can be showing a run's 3D over
+   * another run's name.
+   */
   selectRun(runId: string | null): void;
 
   loadRecent(): Promise<void>;
@@ -101,7 +106,18 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => {
       set({ error });
     },
     selectRun: (runId) => {
+      if (get().selectedRunId === runId) {
+        return;
+      }
       set({ selectedRunId: runId });
+      // Downwards only: the assembly store knows nothing about the workspace, so this direction
+      // can never become a cycle — and a run selected is a run loaded, wherever it was selected
+      // from (the history menu, or a run that has just ended).
+      if (runId === null) {
+        useAssembly.getState().clear();
+      } else {
+        void useAssembly.getState().load(runId);
+      }
     },
 
     loadRecent: async () => {
@@ -115,12 +131,12 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => {
     // A workspace opened is a different workspace: the run selected in the last one means
     // nothing here, so the selection goes with it.
     create: async (path) => {
-      set({ selectedRunId: null });
+      get().selectRun(null);
       await command(() => api.workspaceCreate(path));
       await get().loadRecent();
     },
     open: async (path) => {
-      set({ selectedRunId: null });
+      get().selectRun(null);
       await command(() => api.workspaceOpen(path));
       await get().loadRecent();
     },
@@ -128,7 +144,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => {
     close: async () => {
       try {
         await api.workspaceClose();
-        set({ view: null, selectedRunId: null, error: null });
+        get().selectRun(null);
+        set({ view: null, error: null });
       } catch (e) {
         set({ error: toCommandError(e) });
       }

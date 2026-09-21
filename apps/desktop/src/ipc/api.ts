@@ -1,7 +1,11 @@
 import type { Language } from "../state/ui";
+import type { AssemblyDto } from "./bindings/AssemblyDto";
+import type { Calibration } from "./bindings/Calibration";
+import type { CandidateRow } from "./bindings/CandidateRow";
 import type { Event as EngineEvent } from "./bindings/Event";
 import type { JobKind } from "./bindings/JobKind";
 import type { Outcome } from "./bindings/Outcome";
+import type { RunSpec } from "./bindings/RunSpec";
 import type { WorkspaceView } from "./bindings/WorkspaceView";
 
 /**
@@ -55,6 +59,24 @@ export interface EngineFinishedPayload {
   view: WorkspaceView | null;
 }
 
+/**
+ * What a run of this collection will take, for the launch sheet's «≈ 18 мин» (A §6). Three
+ * things and not one: what this machine has measured, how many pairs the collection can make at
+ * most — A §7.4's «до N пар», an upper bound because R §4.1's wall-ratio filter skips some — and
+ * the seconds those pairs come to. `estimate_seconds` is `null` until a run has finished here,
+ * and the sheet says so rather than inventing a figure.
+ */
+export interface CalibrationView {
+  calibration: Calibration;
+  pairs_upper_bound: number;
+  estimate_seconds: number | null;
+}
+
+/** What this build can run on (A §7.4's «Вычисления»), one line per executor in the engine's words. */
+export interface EngineInfoView {
+  backends: string[];
+}
+
 /** Undoes one subscription. */
 export type Unlisten = () => void;
 
@@ -79,7 +101,32 @@ export interface Api {
    * window is behind something else, is worded in it.
    */
   prepareStart(lang: Language): Promise<void>;
+  /**
+   * Starts a run and answers with its id — the folder under `runs/` everything below asks about.
+   * Returns as soon as the worker is on its way; the run itself arrives as `engine:event` and
+   * ends with `engine:finished`. `lang` is as [`Api.prepareStart`]'s.
+   */
+  runStart(spec: RunSpec, lang: Language): Promise<string>;
   jobCancel(): Promise<void>;
+  /** What a run of the open workspace would take (A §6), for the launch sheet. */
+  calibration(): Promise<CalibrationView>;
+  /**
+   * What a run assembled, from its own `assembly.json` (A §8). Refuses with kind `io` for a run
+   * that never got as far as assembling anything — a cancelled one, or one that failed in
+   * matching — which is «nothing to draw» and not a broken workspace.
+   */
+  runAssembly(runId: string): Promise<AssemblyDto>;
+  /** Every candidate of a run, from its `candidates.json` (A §8.3); refuses as [`Api.runAssembly`]. */
+  runCandidates(runId: string): Promise<CandidateRow[]>;
+  /**
+   * The last `maxLines` lines of a run's `engine.log`, or of the workspace's `prepare.log` for
+   * `null` (A §10's «Показать лог»). A log that does not exist yet is an empty string.
+   */
+  runLog(runId: string | null, maxLines: number): Promise<string>;
+  /** Moves a run's folder to the OS trash (A §4) and hands back the workspace without it. */
+  runDelete(runId: string): Promise<WorkspaceView>;
+  /** What the engine can run on; asked of a worker once and kept by the shell. */
+  engineInfo(): Promise<EngineInfoView>;
   pickFolder(title: string): Promise<string | null>;
   /** A URL the window can fetch for a file inside the open workspace. */
   assetUrl(path: string): string;

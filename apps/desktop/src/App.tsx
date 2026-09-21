@@ -36,7 +36,6 @@ function inputSignature(view: WorkspaceView): string {
  */
 export default function App() {
   const view = useWorkspace((state) => state.view);
-  const selectedRunId = useWorkspace((state) => state.selectedRunId);
   useShortcuts();
 
   // The signature of the folder the last automatic preparation was started for. A ref and not
@@ -74,12 +73,17 @@ export default function App() {
    * exactly as it was, so without this guard the failure would start it again, and again; the
    * banner's «Повторить подготовку» is how a user asks for the retry the app will not take by
    * itself. A folder that has actually changed has a new signature and is prepared again.
+   *
+   * The status is asked for with *no* run selected on purpose. A §5's table lets the selected run
+   * speak over the whole-workspace rows, so a workspace that opens on an earlier result reads as
+   * `current` or `stale` however unprepared its input is — and «is there anything to prepare?» is
+   * a question about the folder, not about which run the user happens to be looking at.
    */
   useEffect(() => {
     if (view === null) {
       return;
     }
-    if (deriveStatus(view, selectedRunId, false).kind !== "unprepared") {
+    if (deriveStatus(view, null, false).kind !== "unprepared") {
       return;
     }
     const signature = inputSignature(view);
@@ -88,7 +92,7 @@ export default function App() {
     }
     attempted.current = signature;
     void useJobs.getState().start();
-  }, [view, selectedRunId]);
+  }, [view]);
 
   useEffect(() => {
     const onFocus = () => {

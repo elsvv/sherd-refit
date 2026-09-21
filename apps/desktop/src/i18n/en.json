@@ -69,7 +69,9 @@
   "topbar": {
     "menu": "Workspace menu",
     "modes": "Modes",
-    "no_runs": "No runs yet"
+    "no_runs": "No runs yet",
+    "run_history": "Run history",
+    "runs": "Runs: {{n}}"
   },
   "menu": {
     "open_other": "Open another…",
@@ -101,7 +103,29 @@
     "regenerate": "Regenerate…",
     "repeat": "Run again…",
     "relink": "Point at the folder again",
-    "retry_prepare": "Prepare again"
+    "retry_prepare": "Prepare again",
+    "show_log": "Show the log",
+    "repeat_cpu": "Run again on the CPU"
+  },
+  "fail": {
+    "input": "scan",
+    "too_few": "too few fragments",
+    "disk": "disk",
+    "gpu": "GPU",
+    "protocol": "protocol",
+    "internal": "internal error",
+    "crashed": "crash",
+    "cancelled": "stopped"
+  },
+  "failure": {
+    "input": "A scan could not be read.",
+    "too_few": "An assembly needs at least two fragments.",
+    "disk": "The result could not be written — the disk may be full.",
+    "gpu": "The graphics card gave up. On the CPU a run is slower but usually gets to the end.",
+    "protocol": "The window and the engine are of different versions — reinstall the app.",
+    "internal": "An internal error in the engine.",
+    "crashed": "The assembly process crashed — it may have run out of memory.",
+    "cancelled": "The run was stopped."
   },
   "dialog": {
     "close": "Close"
@@ -227,7 +251,10 @@
     "fragments_other": "{{count}} fragments",
     "warnings": "{{n}} warnings",
     "excluded_one": "{{count}} excluded",
-    "excluded_other": "{{count}} excluded"
+    "excluded_other": "{{count}} excluded",
+    "groups_one": "{{count}} group",
+    "groups_other": "{{count}} groups",
+    "unpaired": "{{n}} unpaired"
   },
   "job": {
     "elapsed": "elapsed {{time}}"
@@ -244,11 +271,36 @@
     "cancel_title": "Stop the assembly?",
     "cancel_body": "The pairs already matched will not be kept.",
     "cancel_confirm": "Stop",
-    "cancel_keep": "Keep going"
+    "cancel_keep": "Keep going",
+    "state_running": "running",
+    "state_done": "finished",
+    "state_cancelled": "cancelled",
+    "state_interrupted": "interrupted",
+    "state_failed": "failed: {{kind}}",
+    "stale": "out of date",
+    "menu": "What to do with this run",
+    "delete": "Delete",
+    "delete_title": "Delete the run of {{run}}?",
+    "delete_body": "The run's folder will be moved to the trash.",
+    "delete_confirm": "Delete",
+    "delete_keep": "Cancel"
+  },
+  "log": {
+    "title": "Engine log",
+    "prepare": "preparation",
+    "level_all": "All",
+    "level_problems": "Warnings and errors",
+    "refresh": "Refresh",
+    "close": "Hide the log",
+    "loading": "Reading the log…",
+    "empty": "The log is empty",
+    "nothing": "No warnings at all"
   },
   "banner": {
     "input_missing": "The folder with the scans is unavailable: it has moved, or its disk is disconnected.",
-    "stale": "The input folder has changed: {{diff}}",
+    "stale": "The input has changed since this assembly: {{diff}}",
+    "cancelled": "This run was stopped by hand.",
+    "interrupted": "This run was interrupted: the app closed while it was going.",
     "stale_added_one": "+{{count}} file",
     "stale_added_other": "+{{count}} files",
     "stale_removed": "−{{n}}",
@@ -258,7 +310,7 @@
     "stale_excluded_other": "{{count}} excluded",
     "stale_included_one": "{{count}} brought back",
     "stale_included_other": "{{count}} brought back",
-    "job_failed": "Preparation failed: {{message}}",
+    "job_failed": "Preparation failed.",
     "dismiss": "Dismiss"
   },
   "drop": {

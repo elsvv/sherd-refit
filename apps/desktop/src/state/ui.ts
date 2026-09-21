@@ -8,6 +8,12 @@ export type InputFilter = "all" | "warnings" | "excluded";
 export type InputLayout = "grid" | "list";
 /** The viewer's two meshes (A §7.2): the scan, or the fracture faces in red. */
 export type FragmentView = "scan" | "seg";
+/**
+ * What the pull-up engine log shows (A §7.1's «level filter»): every line the worker wrote, or
+ * only the ones `tracing` marked `WARN` or `ERROR` — which is what someone who opened the log
+ * after a failure came for.
+ */
+export type LogLevel = "all" | "problems";
 /** `system` follows the OS; the other two override it. */
 export type Theme = "system" | "light" | "dark";
 /** Russian is the primary wording; English is the translation. */
@@ -28,6 +34,10 @@ export interface UiState {
   inputLayout: InputLayout;
   fragmentView: FragmentView;
   wireframe: boolean;
+  /** Whether A §7.1's engine-log panel is pulled up over the status line (`Mod+J`). */
+  logOpen: boolean;
+  /** Which of its lines are shown. */
+  logLevel: LogLevel;
   theme: Theme;
   language: Language;
 
@@ -39,6 +49,10 @@ export interface UiState {
   setInputLayout(layout: InputLayout): void;
   setFragmentView(view: FragmentView): void;
   setWireframe(on: boolean): void;
+  /** Used by A §10's «Показать лог», which must open the panel and never close it. */
+  setLogOpen(open: boolean): void;
+  toggleLog(): void;
+  setLogLevel(level: LogLevel): void;
   setTheme(theme: Theme): void;
   setLanguage(language: Language): void;
 }
@@ -107,6 +121,8 @@ export const useUi = create<UiState>()((set) => ({
   inputLayout: "grid",
   fragmentView: "scan",
   wireframe: false,
+  logOpen: false,
+  logLevel: "all",
   theme: initialTheme(),
   language: initialLanguage(),
 
@@ -133,6 +149,15 @@ export const useUi = create<UiState>()((set) => ({
   },
   setWireframe: (on) => {
     set({ wireframe: on });
+  },
+  setLogOpen: (open) => {
+    set({ logOpen: open });
+  },
+  toggleLog: () => {
+    set((state) => ({ logOpen: !state.logOpen }));
+  },
+  setLogLevel: (level) => {
+    set({ logLevel: level });
   },
   setTheme: (theme) => {
     set({ theme });

@@ -23,6 +23,7 @@ import Button from "../ui/Button";
 import type { BannerAction, BannerProps } from "./Banner";
 import Banner from "./Banner";
 import LaunchSheet from "./LaunchSheet";
+import LogDrawer from "./LogDrawer";
 import RunOverlay from "./RunOverlay";
 import StatusLine from "./StatusLine";
 import TopBar, { pickAndLinkInput } from "./TopBar";
@@ -139,6 +140,7 @@ export default function Frame({ view }: { view: WorkspaceView }) {
   const mode = useUi((state) => state.mode);
   const leftOpen = useUi((state) => state.leftOpen);
   const rightOpen = useUi((state) => state.rightOpen);
+  const logOpen = useUi((state) => state.logOpen);
   const selectedRunId = useWorkspace((state) => state.selectedRunId);
   const error = useWorkspace((state) => state.error);
   const lastFailure = useJobs((state) => state.lastFailure);
@@ -152,43 +154,93 @@ export default function Frame({ view }: { view: WorkspaceView }) {
   const status: Status = deriveStatus(view, selectedRunId, false);
   const panes: Panes = panesOf(mode, view);
 
+  /** A §5's «Показать лог»: the pull-up panel, never closed by an action that says «show». */
+  const showLog = (): void => {
+    useUi.getState().setLogOpen(true);
+  };
+  /** «Перегенерировать…» / «Повторить…» / «Повторить на CPU» — all one sheet, differently filled. */
+  const again = (patch: Partial<RunSpec>): BannerAction["onClick"] => {
+    return () => {
+      setSheet(patch);
+    };
+  };
+
+  // One banner from the status, because a status is one value: A §5's table gives each of these
+  // rows its own sentence, and two of them can never be true at once.
+  //
+  // The banner never repeats the action the top bar is already showing for the same status. A §5
+  // gives every row one primary action and the top bar is where it lives; a second button with
+  // the same word on it, twenty pixels below the first, reads as a fault in the window rather
+  // than as a second offer. So «Перегенерировать…» and «Указать папку заново» stay up there, and
+  // the banner carries only what the top bar has no room for — the log, and the one repeat that
+  // differs from it («Повторить на CPU»).
   const banners: BannerProps[] = [];
-  if (status.kind === "input_missing") {
-    banners.push({
-      tone: "danger",
-      text: t("banner.input_missing"),
-      action: {
-        label: t("action.relink"),
-        onClick: () => {
-          pickAndLinkInput(t("action.pick_input_title"));
-        },
-      },
-    });
+  switch (status.kind) {
+    case "input_missing":
+      banners.push({ tone: "danger", text: t("banner.input_missing") });
+      break;
+    case "stale":
+      banners.push({ tone: "warn", text: t("banner.stale", { diff: staleText(status.diff, t) }) });
+      break;
+    case "failed":
+      banners.push({
+        tone: "danger",
+        // The kind is the part the user can act on; the engine's own words go underneath it.
+        text: t(`failure.${status.failKind}`),
+        detail: status.message,
+        actions: [
+          { label: t("action.show_log"), onClick: showLog },
+          // A §10: an adapter that gave up is the one failure with a different run to offer, and
+          // the sheet opens on it rather than making the user find «Вычисления» themselves.
+          ...(status.failKind === "gpu"
+            ? [{ label: t("action.repeat_cpu"), onClick: again({ backend: "cpu" }) }]
+            : []),
+        ],
+      });
+      break;
+    case "cancelled":
+    case "interrupted":
+      banners.push({
+        tone: "warn",
+        text: t(`banner.${status.kind}`),
+        actions: [{ label: t("action.show_log"), onClick: showLog }],
+      });
+      break;
+    default:
+      break;
   }
-  if (status.kind === "stale") {
-    banners.push({ tone: "warn", text: t("banner.stale", { diff: staleText(status.diff, t) }) });
-  }
+
   // A cancelled job is not a failure: the user stopped it, and the button they pressed is all the
-  // report they need (A §10's table gives `cancelled` no message of its own).
-  if (lastFailure !== null && lastFailure.kind !== "cancelled") {
+  // report they need (A §10's table gives `cancelled` no message of its own). Nor is a run that
+  // the status has already reported above — the same ending twice would read as two of them.
+  const reported = status.kind === "failed" || status.kind === "cancelled" || status.kind === "interrupted";
+  if (lastFailure !== null && lastFailure.kind !== "cancelled" && !reported) {
     // A preparation that failed leaves the input unprepared, and the automatic one will not try
     // again on its own (App.tsx retries only once per state of the folder) — so the offer to
     // repeat it by hand is the banner's, and only while there is something left to prepare.
-    const retry: BannerAction | undefined =
+    const retry: BannerAction[] =
       status.kind === "unprepared"
-        ? {
-            label: t("action.retry_prepare"),
-            onClick: () => {
-              void useJobs.getState().start();
+        ? [
+            {
+              label: t("action.retry_prepare"),
+              onClick: () => {
+                void useJobs.getState().start();
+              },
             },
-          }
-        : undefined;
-    banners.push({ tone: "danger", text: t("banner.job_failed", { message: lastFailure.message }), action: retry });
+          ]
+        : [];
+    banners.push({
+      tone: "danger",
+      text: t("banner.job_failed"),
+      detail: lastFailure.message,
+      actions: [...retry, { label: t("action.show_log"), onClick: showLog }],
+    });
   }
   if (error !== null) {
     banners.push({
       tone: "danger",
-      text: `${t(`error.${error.kind}`)} · ${error.message}`,
+      text: t(`error.${error.kind}`),
+      detail: error.message,
       onDismiss: () => {
         useWorkspace.getState().setError(null);
       },
@@ -230,6 +282,8 @@ export default function Frame({ view }: { view: WorkspaceView }) {
           <aside className="w-[260px] shrink-0 overflow-hidden border-l border-border bg-panel">{panes.right}</aside>
         ) : null}
       </div>
+
+      {logOpen ? <LogDrawer view={view} /> : null}
 
       <StatusLine view={view} status={status} />
 

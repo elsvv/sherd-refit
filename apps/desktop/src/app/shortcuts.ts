@@ -38,8 +38,9 @@ function typing(target: EventTarget | null): boolean {
 }
 
 /**
- * The frame's keys (A §7.1): `Mod+B` and `Mod+Alt+B` collapse the two side panes, `1` `2` `3`
- * choose a mode, `F` fits the viewer. They are matched on `event.code`, the physical key, and not
+ * The frame's keys (A §7.1): `Mod+B` and `Mod+Alt+B` collapse the two side panes, `Mod+J` pulls
+ * the engine log up and back down, `1` `2` `3` choose a mode, `F` fits the viewer. They are
+ * matched on `event.code`, the physical key, and not
  * on `event.key`: the window's own language is Russian, and on a Russian layout `F` types «а».
  */
 export function useShortcuts(): void {
@@ -58,6 +59,14 @@ export function useShortcuts(): void {
         } else {
           useUi.getState().toggleLeft();
         }
+        return;
+      }
+
+      // A §7.1's pull-up engine log. With a modifier, because the panel is also reached from the
+      // «Показать лог» of a failed run and a bare key would fire while the user is reading it.
+      if (e.code === "KeyJ" && mod && !otherMod && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        useUi.getState().toggleLog();
         return;
       }
 

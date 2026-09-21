@@ -49,6 +49,12 @@ export interface WorkspaceState {
   refresh(): Promise<void>;
   linkInput(path: string): Promise<void>;
   excludeFragment(name: string, excluded: boolean): Promise<void>;
+  /**
+   * Moves a run's folder to the OS trash (A §7.4's history menu). The shell hands back the
+   * workspace without it; a run that was being shown is replaced by the newest one that is left,
+   * so the window is never pointing at a folder that is no longer there.
+   */
+  deleteRun(runId: string): Promise<void>;
 
   /**
    * Puts one `fragment_ready` into the view (A §5's «preparing» row): the grid fills in as the
@@ -82,6 +88,16 @@ function carryFragments(current: WorkspaceView | null, incoming: WorkspaceView):
   return { ...incoming, fragments: [...byName.values()] };
 }
 
+/**
+ * The run a workspace should open on: the newest one that finished (A §7.4 — the history is
+ * newest first, and what someone coming back to a collection wants to see is its last *result*,
+ * not its last attempt). `null` when nothing here has ever finished, which leaves the window on
+ * the input as it stands and A §5's whole-workspace answers.
+ */
+function newestDone(view: WorkspaceView): string | null {
+  return view.runs.find((row) => row.run.status.state === "done")?.run.id ?? null;
+}
+
 export const useWorkspace = create<WorkspaceState>()((set, get) => {
   /** Runs one command: its view on success, its refusal on failure, never both. */
   const command = async (call: () => Promise<WorkspaceView>): Promise<void> => {
@@ -91,6 +107,26 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => {
     } catch (e) {
       set({ error: toCommandError(e) });
     }
+  };
+
+  /**
+   * Opens or creates a workspace and shows its newest finished run.
+   *
+   * A workspace opened is a different workspace: the run selected in the last one means nothing
+   * here, so the selection goes first and the new one's own newest result takes its place. The
+   * two views are compared by identity — [`command`] puts a fresh object in on success and
+   * touches nothing on a refusal — so a workspace that would *not* open cannot move the selection
+   * of the one that is still there.
+   */
+  const opened = async (call: () => Promise<WorkspaceView>): Promise<void> => {
+    get().selectRun(null);
+    const before = get().view;
+    await command(call);
+    const after = get().view;
+    if (after !== null && after !== before) {
+      get().selectRun(newestDone(after));
+    }
+    await get().loadRecent();
   };
 
   return {
@@ -128,18 +164,8 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => {
       }
     },
 
-    // A workspace opened is a different workspace: the run selected in the last one means
-    // nothing here, so the selection goes with it.
-    create: async (path) => {
-      get().selectRun(null);
-      await command(() => api.workspaceCreate(path));
-      await get().loadRecent();
-    },
-    open: async (path) => {
-      get().selectRun(null);
-      await command(() => api.workspaceOpen(path));
-      await get().loadRecent();
-    },
+    create: (path) => opened(() => api.workspaceCreate(path)),
+    open: (path) => opened(() => api.workspaceOpen(path)),
 
     close: async () => {
       try {
@@ -154,6 +180,20 @@ export const useWorkspace = create<WorkspaceState>()((set, get) => {
     refresh: () => command(() => api.workspaceView()),
     linkInput: (path) => command(() => api.inputLink(path)),
     excludeFragment: (name, excluded) => command(() => api.fragmentExclude(name, excluded)),
+
+    deleteRun: async (runId) => {
+      try {
+        const view = await api.runDelete(runId);
+        set((state) => ({ view: carryFragments(state.view, view), error: null }));
+        // Only when it was the one being shown: deleting an old run must not throw away the
+        // assembly the user is looking at, and `selectRun` would reload it for nothing.
+        if (get().selectedRunId === runId) {
+          get().selectRun(newestDone(view));
+        }
+      } catch (e) {
+        set({ error: toCommandError(e) });
+      }
+    },
 
     applyFragmentReady: (info) => {
       set((state) => {

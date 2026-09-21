@@ -16,6 +16,7 @@ import Button, { FOCUS_RING } from "../ui/Button";
 import Chip from "../ui/Chip";
 import Dialog from "../ui/Dialog";
 import IconButton from "../ui/IconButton";
+import RunSelector from "./RunSelector";
 
 /** The three modes of A §7.3, left to right, which is also the order of the `1` `2` `3` keys. */
 export const MODES: readonly Mode[] = ["input", "assembly", "review"];
@@ -295,11 +296,7 @@ export default function TopBar({
     <header className="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-panel-2 px-2">
       <WorkspaceMenu name={view.name} />
 
-      {/* The run selector. Milestone 3 writes no runs, so it is a label until milestone 4 gives
-          it the history dropdown of A §7.4. */}
-      <Chip disabled title={t("topbar.no_runs")}>
-        {view.runs[0]?.run.id ?? t("topbar.no_runs")}
-      </Chip>
+      <RunSelector view={view} />
 
       <span className="flex-1" />
 

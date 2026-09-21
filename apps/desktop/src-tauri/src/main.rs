@@ -35,6 +35,9 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // A §6: the shell says when a job is over, in the language the window told it. The
+        // window's own side of the plugin is there only to ask the OS for the permission once.
+        .plugin(tauri_plugin_notification::init())
         .manage(state::AppState::default())
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
@@ -49,6 +52,11 @@ fn main() {
             commands::run_start,
             commands::calibration,
             commands::job_cancel,
+            commands::run_assembly,
+            commands::run_candidates,
+            commands::run_log,
+            commands::run_delete,
+            commands::engine_info,
         ])
         .run(tauri::generate_context!())
         .expect("the window could not be opened");

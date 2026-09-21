@@ -20,6 +20,12 @@ sherd-core = { path = "../../../crates/sherd-core" }
 tauri = { version = "=2.11.6", features = ["protocol-asset"] }
 tauri-plugin-dialog = "=2.7.3"
 tauri-plugin-opener = "=2.5.5"
+# A §6: the job says when it is over, even when the window is behind something else.
+tauri-plugin-notification = "=2.4.0"
+# A §6: a run is 17–80 minutes, and a laptop that goes to sleep in the middle loses it.
+keepawake = "=0.6.1"
+# A §4: «Удалить прогон» moves the folder to the OS trash — never `remove_dir_all`.
+trash = "=5.2.9"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }

@@ -5,18 +5,20 @@
 //! second opinion about the workspace to hold in step with the first. The window asks; the shell
 //! reads and writes the folder (A §2.1).
 
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use sherd_app_core::eta::{self, Calibration};
-use sherd_app_core::protocol::RunSpec;
+use sherd_app_core::host::{self, Outcome, Worker};
+use sherd_app_core::protocol::{AssemblyDto, CandidateRow, Event, Job, RunSpec};
 use sherd_app_core::view::{self, WorkspaceView};
 use sherd_app_core::workspace::Workspace;
-use sherd_app_core::{run, snapshot};
+use sherd_app_core::{AppError, atomic, run, snapshot};
 use tauri::{AppHandle, Manager, State};
 
 use crate::error::CommandError;
-use crate::jobs;
+use crate::jobs::{self, Lang};
 use crate::recent::{self, RecentEntry};
 use crate::state::{AppState, JobSlot};
 
@@ -163,6 +165,10 @@ pub(crate) fn fragment_exclude(
 /// way: everything the job says arrives at the window as `engine:event`, and its end, with a
 /// fresh view, as `engine:finished`.
 ///
+/// `lang` is the window's own language (`ru`, `en`; anything else reads as `ru`). The job carries
+/// it so that A §6's end-of-job notification — written by the shell and shown by the OS, by which
+/// time the window may be behind something else — is in the language the user is reading.
+///
 /// # Errors
 ///
 /// [`CommandError`] of kind `busy`, `no_workspace`, `worker`, `io` or `engine`; see
@@ -171,8 +177,9 @@ pub(crate) fn fragment_exclude(
 pub(crate) fn prepare_start(
     app: AppHandle,
     state: State<'_, AppState>,
+    lang: String,
 ) -> Result<(), CommandError> {
-    jobs::start_prepare(&app, state.inner())
+    jobs::start_prepare(&app, state.inner(), Lang::of(&lang))
 }
 
 /// Starts a run on the open workspace (A §7) and answers with its id — the folder under `runs/`
@@ -181,7 +188,7 @@ pub(crate) fn prepare_start(
 /// fresh view, as `engine:finished`.
 ///
 /// The sheet is remembered before the run starts, so the next «Подготовить» prepares the cache
-/// *this* run would have wanted (A §7.4).
+/// *this* run would have wanted (A §7.4). `lang` is as [`prepare_start`]'s.
 ///
 /// # Errors
 ///
@@ -192,8 +199,9 @@ pub(crate) fn run_start(
     app: AppHandle,
     state: State<'_, AppState>,
     spec: RunSpec,
+    lang: String,
 ) -> Result<String, CommandError> {
-    jobs::start_run(&app, state.inner(), spec)
+    jobs::start_run(&app, state.inner(), spec, Lang::of(&lang))
 }
 
 /// What a run of this collection will take, for the launch sheet's «≈ 11 мин» (A §6).
@@ -247,6 +255,247 @@ fn included_scans(state: &AppState) -> Result<usize, CommandError> {
     let excluded = &ws.file().excluded;
     let scans = snapshot::scan(&input, excluded)?;
     Ok(scans.files.iter().filter(|file| !excluded.contains(&file.name)).count())
+}
+
+/// What a run assembled (A §8), from its own `assembly.json`.
+///
+/// The window has every fragment's display mesh already and needs only the poses (A §7.2), which
+/// is why this is the whole of what a run's 3D costs: one file of a few hundred kilobytes, and
+/// no worker.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `no_workspace`, `io` when there is no such run or the run has no
+/// `assembly.json` — a run that failed before it assembled anything has none — or `json` when
+/// the file does not parse.
+#[tauri::command]
+pub(crate) fn run_assembly(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<AssemblyDto, CommandError> {
+    let dir = run_dir(state.inner(), &run_id)?;
+    Ok(atomic::read_json(&dir.join(host::ASSEMBLY_FILE))?)
+}
+
+/// Every candidate of a run (A §8.3), from its `candidates.json` — the index the review screen
+/// works from, and what the window shows about a join it is asked to explain.
+///
+/// # Errors
+///
+/// As [`run_assembly`], about `candidates.json`.
+#[tauri::command]
+pub(crate) fn run_candidates(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<Vec<CandidateRow>, CommandError> {
+    let dir = run_dir(state.inner(), &run_id)?;
+    Ok(atomic::read_json(&dir.join(sherd_app_core::worker::CANDIDATES_FILE))?)
+}
+
+/// The end of a job's log, for A §10's «Показать лог»: a run's `engine.log` by id, or the
+/// `prepare.log` beside `sherd-workspace.json` for `None` (A §4 — a `Prepare` has no run folder).
+///
+/// The tail and not the file: a long run's log is megabytes of `tracing`, and what the drawer
+/// shows is its last few hundred lines. A log that does not exist yet is an empty string rather
+/// than a refusal — the window offers «Показать лог» before anything has been written into it.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `no_workspace`, or `io` when there is no such run or the log is
+/// there and cannot be read.
+#[tauri::command]
+pub(crate) fn run_log(
+    state: State<'_, AppState>,
+    run_id: Option<String>,
+    max_lines: usize,
+) -> Result<String, CommandError> {
+    let path = {
+        let held = state.workspace()?;
+        let ws = held.as_ref().ok_or_else(CommandError::no_workspace)?;
+        match &run_id {
+            Some(id) => run_dir_of(ws, id)?.join(host::ENGINE_LOG),
+            None => ws.root().join(jobs::PREPARE_LOG),
+        }
+    };
+    let bytes = read_log_tail(&path)?;
+    // Lossy, deliberately: a log is what the user is shown when something has already gone wrong,
+    // and a byte the engine's own panic message mangled must not be what stops them reading it.
+    let text = String::from_utf8_lossy(&bytes);
+    Ok(tail(&text, max_lines).to_owned())
+}
+
+/// How much of a log is read to find its last lines. Four mebibytes is thousands of lines of
+/// `tracing` — far more than any `max_lines` A §10's drawer asks for — and a log that has grown
+/// past it must not be loaded whole into the window's process every two seconds, which is how
+/// often the drawer refreshes itself while a job is running.
+const LOG_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The last [`LOG_TAIL_BYTES`] of `path`, or all of it when it is shorter.
+///
+/// A log that is not there yet is no bytes and not a refusal: A §10 offers «Показать лог» from
+/// the moment a job starts, and the worker may not have written its first line.
+fn read_log_tail(path: &Path) -> Result<Vec<u8>, CommandError> {
+    let failed = |source| AppError::io(path, source);
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => return Err(failed(source).into()),
+    };
+    let len = file.seek(SeekFrom::End(0)).map_err(failed)?;
+    let from = len.saturating_sub(LOG_TAIL_BYTES);
+    file.seek(SeekFrom::Start(from)).map_err(failed)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(failed)?;
+    // A read that began in the middle of the file began in the middle of a line, and possibly in
+    // the middle of a character: both go with everything up to the first newline.
+    if from > 0
+        && let Some(at) = bytes.iter().position(|byte| *byte == b'\n')
+    {
+        bytes.drain(..=at);
+    }
+    Ok(bytes)
+}
+
+
+/// Deletes a run: its folder goes to the OS trash (A §4), never to `remove_dir_all`.
+///
+/// The trash and not a delete, because a run is hours of someone's machine and the confirmation
+/// dialog is one keystroke away from an accident; the OS's own undo is the only one the app has.
+///
+/// The run a worker is writing is refused with `busy`: its folder is open, and moving it under a
+/// live worker would leave the run's own files landing in a folder that is no longer there.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `busy`, `no_workspace`, `io` when there is no such run or the trash
+/// will not take the folder, or `engine` when the view cannot be rebuilt afterwards.
+#[tauri::command]
+pub(crate) fn run_delete(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<WorkspaceView, CommandError> {
+    // Job slot first, then the workspace, as `crate::state` requires — and held to the end, not
+    // sampled: let go of after the check, it leaves a gap in which a run starts on the very
+    // folder about to be moved away.
+    let slot = state.job()?;
+    if slot.as_ref().is_some_and(|job| job.run_id.as_deref() == Some(run_id.as_str())) {
+        return Err(CommandError::busy());
+    }
+    let job = slot.as_ref().map(JobSlot::view);
+    let held = state.workspace()?;
+    let ws = held.as_ref().ok_or_else(CommandError::no_workspace)?;
+    let dir = run_dir_of(ws, &run_id)?;
+    trash::delete(&dir).map_err(|source| {
+        let why = format!("the run could not be moved to the trash: {source}");
+        AppError::io(&dir, std::io::Error::other(why))
+    })?;
+    Ok(view::build(ws, job)?)
+}
+
+/// What this build can run on (A §7.4's «Вычисления»), as the launch sheet lists it under the
+/// backend choice.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct EngineInfoView {
+    /// One line per executor, in the engine's own words.
+    pub(crate) backends: Vec<String>,
+}
+
+/// What the engine can run on. Asked of a worker once and kept (A §2.1: only the engine's own
+/// process knows what adapters this build sees, and the window may not load a GPU driver).
+///
+/// The job slot is not taken: this is a process that lives for a few milliseconds and writes
+/// nothing, not one of A §5's two job kinds, and the sheet asks for it while a run is going as
+/// well as before one. Two sheets opened at the same moment would ask twice and store the same
+/// answer twice, which is a wasted process and not a wrong one — the alternative is a lock held
+/// across a spawn, which [`crate::state`] does not allow.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `worker` when the engine process cannot be started or says it
+/// failed.
+#[tauri::command]
+pub(crate) fn engine_info(state: State<'_, AppState>) -> Result<EngineInfoView, CommandError> {
+    {
+        let cached = state.engine_info()?;
+        if let Some(info) = cached.as_ref() {
+            return Ok(info.clone());
+        }
+    }
+    let info = ask_engine_info()?;
+    *state.engine_info()? = Some(info.clone());
+    Ok(info)
+}
+
+/// One `Job::Info` worker, driven to its end. `selftest: false`: opening the device costs a
+/// second, and the sheet wants the lines, not the test (A §7.4 — the self-test is its own button).
+fn ask_engine_info() -> Result<EngineInfoView, CommandError> {
+    let command = jobs::worker_command()?;
+    let job = Job::Info { adapter: None, selftest: false };
+    // No log: an `Info` has no run folder to keep one in, and its stderr is read and dropped by
+    // the worker's own reader thread so that a full pipe cannot stop it.
+    let mut worker = Worker::spawn(&command, &job, None)?;
+    let mut backends = Vec::new();
+    let outcome = host::drive(&mut worker, |event| {
+        if let Event::Info { backends: lines, .. } = event {
+            backends.clone_from(lines);
+        }
+    });
+    match outcome {
+        Outcome::Done { .. } => Ok(EngineInfoView { backends }),
+        Outcome::Failed { message, .. } => Err(AppError::Worker(message).into()),
+    }
+}
+
+/// The folder of the run `run_id` names, on the open workspace.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `no_workspace`, or `io` as [`run_dir_of`].
+fn run_dir(state: &AppState, run_id: &str) -> Result<PathBuf, CommandError> {
+    let held = state.workspace()?;
+    run_dir_of(held.as_ref().ok_or_else(CommandError::no_workspace)?, run_id)
+}
+
+/// The folder of the run `run_id` names, on a workspace already in hand.
+///
+/// **A run id becomes a path, so it is checked against the runs that exist and not against a list
+/// of forbidden characters.** `run::list` answers the names of folders it read out of `runs/`, so
+/// a `..`, a separator or the name of something elsewhere on the disk is simply not among them,
+/// and no spelling of any of those can reach the file system through here (A §2.1: the window is
+/// given nothing outside the workspace and may ask for nothing outside it).
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `io` when `runs/` cannot be listed, or when it holds no such run.
+fn run_dir_of(ws: &Workspace, run_id: &str) -> Result<PathBuf, CommandError> {
+    if run::list(&ws.runs_dir())?.iter().any(|run| run.id == run_id) {
+        return Ok(ws.run_dir(run_id));
+    }
+    // The folder that was searched, and the name as it was asked for — not the two joined, which
+    // would be the path this function exists to refuse to build.
+    let why = std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("the workspace has no run named {run_id:?}"),
+    );
+    Err(AppError::io(ws.runs_dir(), why).into())
+}
+
+/// The last `max_lines` lines of `text`, as a slice of it: all of it when it has fewer, and
+/// nothing at all for `0`.
+///
+/// A slice and not a `String`, so that showing the end of a twenty-megabyte log copies the few
+/// kilobytes the window asked for and not the log. A final newline ends the last line rather than
+/// beginning an empty one, which is what makes «the last 400 lines» of a log a worker is still
+/// writing the same 400 lines a moment later.
+fn tail(text: &str, max_lines: usize) -> &str {
+    if max_lines == 0 {
+        return "";
+    }
+    let body = text.strip_suffix('\n').unwrap_or(text);
+    match body.match_indices('\n').nth_back(max_lines - 1) {
+        Some((at, _)) => &text[at + 1..],
+        None => text,
+    }
 }
 
 /// «Отменить» (A §2.2). Asks the job to stop; it ends at its next unit of work and reports
@@ -329,4 +578,27 @@ fn same_folder(a: &Path, b: &Path) -> bool {
 /// self-test and the settings.
 fn config_dir(app: &AppHandle) -> Result<PathBuf, CommandError> {
     Ok(app.path().app_config_dir()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tail;
+
+    /// A §10's «Показать лог» shows the end of a log and not the whole of one, and the end of a
+    /// log is the part a reviewer needs: the lines around what went wrong, last.
+    #[test]
+    fn a_log_is_shown_from_its_end() {
+        assert_eq!(tail("a\nb\nc", 2), "b\nc");
+        // A trailing newline ends the last line; it does not begin an empty one.
+        assert_eq!(tail("a\nb\nc\n", 2), "b\nc\n");
+        // Fewer lines than asked for is all of them, and asking for none is none.
+        assert_eq!(tail("a\nb", 5), "a\nb");
+        assert_eq!(tail("one line", 1), "one line");
+        assert_eq!(tail("a\nb\nc", 0), "");
+        assert_eq!(tail("", 400), "");
+        // Blank lines are lines: three newlines are three empty ones, and the last is the last.
+        assert_eq!(tail("\n\n\n", 1), "\n");
+        // The whole of a text whose line count is exactly what was asked for.
+        assert_eq!(tail("a\nb\nc", 3), "a\nb\nc");
+    }
 }

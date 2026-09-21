@@ -12,6 +12,11 @@
 //! slot, the one thread, the two events. What a run adds is what the host owns and the worker may
 //! not touch (A §2.1) — `assembly.json` the moment the groups are reported, `run.json` closed when
 //! it is over, and what it measured taught to A §6's calibration.
+//!
+//! Around both kinds sits the machine A §6 asks for, and none of it is the job: the computer is
+//! kept awake while a worker runs, the dock shows how far along it is, and a job that ends behind
+//! another window says so. Each of the three is logged and shrugged off when the OS will not play
+//! along — a run that matched for forty minutes must not be lost to a notification.
 
 use std::path::PathBuf;
 
@@ -24,7 +29,9 @@ use sherd_app_core::run::{EngineInfo, FailKind, RunCounts, RunFile};
 use sherd_app_core::view::{self, JobKind, WorkspaceView};
 use sherd_app_core::workspace::{WORKSPACE_FILE, Workspace};
 use sherd_core::Params;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::window::{ProgressBarState, ProgressBarStatus};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri_plugin_notification::NotificationExt;
 
 use crate::ENGINE_WORKER;
 use crate::error::CommandError;
@@ -36,10 +43,21 @@ const EVENT: &str = "engine:event";
 const FINISHED: &str = "engine:finished";
 /// Where a `Prepare`'s worker keeps what it writes on stderr. A `Prepare` has no run folder, so
 /// its log sits beside `sherd-workspace.json` rather than in `runs/<id>/engine.log` (A §4); A
-/// §10's «Показать лог» has somewhere to send the user when a preparation fails.
-const PREPARE_LOG: &str = "prepare.log";
+/// §10's «Показать лог» has somewhere to send the user when a preparation fails, which is why
+/// [`crate::commands::run_log`] reads this same name for a `None` run.
+pub(crate) const PREPARE_LOG: &str = "prepare.log";
 /// The job thread's name. Named, so that a backtrace or a profiler says which thread this is.
 const THREAD: &str = "sherd-job";
+/// The one window (`tauri.conf.json`): whose dock progress this is, and whose focus decides
+/// whether the end of a job is worth a notification.
+const MAIN_WINDOW: &str = "main";
+/// What every notification of ours is titled — the app, as the OS already knows it.
+const NOTIFICATION_TITLE: &str = "Sherd Refit";
+/// Why the machine is being kept awake, for the OS's own list of who is holding it (`pmset -g
+/// assertions` on macOS).
+const AWAKE_REASON: &str = "sherd-refit: a job is running";
+/// Who is holding it.
+const AWAKE_APP: &str = "Sherd Refit";
 
 /// The payload of `engine:event`.
 ///
@@ -186,6 +204,29 @@ pub(crate) fn worker_command() -> Result<WorkerCommand, CommandError> {
     Ok(WorkerCommand { program, args: vec![ENGINE_WORKER.to_owned()] })
 }
 
+/// The language the window is showing, for the one sentence the shell writes itself.
+///
+/// Everything else the user reads is a translation in the frontend's `ru.json`/`en.json`, and the
+/// end-of-job notification cannot be: it is shown by the OS, after the job, possibly while the
+/// window is behind something else — so the window says which language it is in when it starts
+/// the job, and the shell keeps that word until the job ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lang {
+    /// Russian, the app's primary wording.
+    Ru,
+    /// English.
+    En,
+}
+
+impl Lang {
+    /// The language `tag` names. Anything that is not `en` is Russian — a tag the shell does not
+    /// know is a new translation of the window's, and the app's own wording is the better guess
+    /// for it than English.
+    pub(crate) fn of(tag: &str) -> Self {
+        if tag.eq_ignore_ascii_case("en") { Self::En } else { Self::Ru }
+    }
+}
+
 /// Which job to put on the worker. The two kinds differ only in what the host files around them
 /// (A §2.1), which is why one function starts both.
 #[derive(Clone, Debug)]
@@ -224,6 +265,11 @@ struct Started {
 /// What the thread needs from the workspace is therefore taken before it starts ([`Started::run`])
 /// and the lock is taken again, briefly, in [`close_run`] and [`finish`].
 ///
+/// The job thread is also where A §6's machine lives — [`keep_awake`], [`DockProgress`] and the
+/// [`notify`] at the end — because all three begin and end with the job and none of them is the
+/// job: each is logged and shrugged off when the OS will not play along. `lang` is what the
+/// notification is written in; see [`Lang`].
+///
 /// # Errors
 ///
 /// [`CommandError`] of kind `busy` when a job is already on the worker, `no_workspace` when none
@@ -234,6 +280,7 @@ pub(crate) fn start(
     app: &AppHandle,
     state: &AppState,
     kind: JobStart,
+    lang: Lang,
 ) -> Result<Option<String>, CommandError> {
     let mut slot = state.job()?;
     if slot.is_some() {
@@ -267,6 +314,11 @@ pub(crate) fn start(
             // Armed before the drive and disarmed by `finish`: whatever happens between those
             // two lines, this thread does not leave the app «busy» behind it.
             let mut guard = SlotGuard::new(app.clone());
+            // A §6: a run is 17–80 minutes, and a laptop that goes to sleep in the middle of one
+            // loses it. Bound to this thread, so the machine is let go of however the thread ends
+            // — including an unwind, where `finish` below is never reached.
+            let _awake = keep_awake();
+            let mut dock = DockProgress::of(&app);
             let outcome = host::drive(&mut worker, |event| {
                 // A §2.1: `assembly.json` is the host's file, not the worker's, and it is written
                 // the moment the groups are reported rather than at the end — a run that dies
@@ -282,16 +334,23 @@ pub(crate) fn start(
                         "the run's assembly could not be filed; the run goes on without it"
                     );
                 }
+                if let Event::Progress { stage, done, total } = event
+                    && dock_stage(job, stage)
+                {
+                    dock.show(*done, *total);
+                }
                 let payload = EngineEvent { job, run_id: id.clone(), event: event.clone() };
                 // A window that has gone away is not a reason to stop the job; the worker is
                 // ended by dropping it, not by an event that could not be delivered.
                 let _ = app.emit(EVENT, payload);
             });
+            dock.clear();
             // Before the slot is freed: `finish` is the line after which another job may start,
             // and `run.json` must be closed and the calibration taught before that happens.
             if let Some(file) = run_file.as_mut() {
                 close_run(&app, file, &outcome);
             }
+            notify(&app, job, lang, &outcome);
             finish(&app, &mut guard, job, id, &outcome);
         })
         // Nothing to undo: the worker was moved into the closure, and dropping a `Worker` kills
@@ -307,8 +366,12 @@ pub(crate) fn start(
 /// # Errors
 ///
 /// As [`start`].
-pub(crate) fn start_prepare(app: &AppHandle, state: &AppState) -> Result<(), CommandError> {
-    start(app, state, JobStart::Prepare)?;
+pub(crate) fn start_prepare(
+    app: &AppHandle,
+    state: &AppState,
+    lang: Lang,
+) -> Result<(), CommandError> {
+    start(app, state, JobStart::Prepare, lang)?;
     Ok(())
 }
 
@@ -322,12 +385,13 @@ pub(crate) fn start_run(
     app: &AppHandle,
     state: &AppState,
     spec: RunSpec,
+    lang: Lang,
 ) -> Result<String, CommandError> {
     // `start` answers `Some` for every `JobStart::Run` — the id comes from the `run.json` it has
     // just written — so this is unreachable rather than a case the window has to handle. It is an
     // error and not an `expect` because a panic on the command thread poisons the job slot for
     // the rest of the session, and there is nothing here worth that.
-    start(app, state, JobStart::Run { spec })?.ok_or_else(|| {
+    start(app, state, JobStart::Run { spec }, lang)?.ok_or_else(|| {
         AppError::Worker("the run was started without an id of its own".to_owned()).into()
     })
 }
@@ -447,6 +511,169 @@ fn learn(app: &AppHandle, counts: &RunCounts) {
             "the calibration could not be written; the next estimate is the one before it"
         );
     }
+}
+
+/// Holds the machine awake for as long as the returned value lives (A §6).
+///
+/// `idle(true)` and nothing else: a run must survive the idle sleep of a laptop left alone for
+/// forty minutes, but the display may go dark — keeping a screen lit through an hour of matching
+/// is a battery the user did not offer. A machine whose OS refuses the assertion is warned about
+/// and goes on: the job is the job, and most of them finish before any sleep timer.
+fn keep_awake() -> Option<keepawake::KeepAwake> {
+    match keepawake::Builder::default()
+        .idle(true)
+        .reason(AWAKE_REASON)
+        .app_name(AWAKE_APP)
+        .create()
+    {
+        Ok(awake) => Some(awake),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "the machine could not be kept awake; a long job may be lost to a sleep"
+            );
+            None
+        }
+    }
+}
+
+/// The dock's (or taskbar's) progress bar, for the stages of a job worth showing there (A §6).
+///
+/// Not every stage feeds it, because the bar has no second row and no name: see [`dock_stage`]
+/// for which ones do and why.
+#[derive(Debug)]
+struct DockProgress {
+    /// The window the bar belongs to, or `None` when there is no window to put one on — the app
+    /// is closing, or this build was started without one.
+    window: Option<WebviewWindow>,
+    /// Whether it is worth trying again. A platform with no progress bar to show (a Linux desktop
+    /// without `libunity`) refuses every call, and a job reports progress a hundred times: warn
+    /// once, then leave the OS alone.
+    working: bool,
+}
+
+impl DockProgress {
+    /// The bar of the app's one window.
+    fn of(app: &AppHandle) -> Self {
+        let window = app.get_webview_window(MAIN_WINDOW);
+        Self { working: window.is_some(), window }
+    }
+
+    /// Shows `done` of `total` as a percentage. A stage with no length yet says nothing rather
+    /// than dividing by zero.
+    fn show(&mut self, done: usize, total: usize) {
+        if total == 0 {
+            return;
+        }
+        // Rounded down, and clamped at both ends: `done` past `total` — a stage that recounted
+        // its work — is a full bar and not an overflow, and `saturating_mul` keeps a debug build
+        // from panicking on a count no collection of scans can reach.
+        let percent = u64::try_from(done.min(total).saturating_mul(100) / total).unwrap_or(100);
+        self.set(ProgressBarState {
+            status: Some(ProgressBarStatus::Normal),
+            progress: Some(percent),
+        });
+    }
+
+    /// Takes the bar away: the job is over, however it ended.
+    fn clear(&mut self) {
+        self.set(ProgressBarState { status: Some(ProgressBarStatus::None), progress: None });
+    }
+
+    /// One call to the OS, at most one complaint about it.
+    fn set(&mut self, state: ProgressBarState) {
+        if !self.working {
+            return;
+        }
+        let Some(window) = self.window.as_ref() else { return };
+        if let Err(error) = window.set_progress_bar(state) {
+            self.working = false;
+            tracing::warn!(%error, "this desktop shows no progress for a running job");
+        }
+    }
+}
+
+/// Whether a `Progress` event of `stage` is one the dock's bar follows (A §6).
+///
+/// A run's is `matching` alone, which is all but the whole of its wall clock: `tiers`, `refine`
+/// and the rest report progress too, and letting them through would run the bar to the end four
+/// times over and read as four jobs. A preparation's two are `preprocess` and `display`, which
+/// are the two halves of what it does and between them all of it.
+fn dock_stage(job: JobKind, stage: &str) -> bool {
+    match job {
+        JobKind::Run => stage == "matching",
+        JobKind::Prepare => stage == "preprocess" || stage == "display",
+    }
+}
+
+/// Tells the user their job is over, when they are not already looking at it (A §6).
+///
+/// Only when the window is definitely not in front: someone watching the stage strip go by does
+/// not need the OS to tell them what they are reading, and a window this process can no longer
+/// ask about is a window that is going away. Nothing here can fail a job that has already run:
+/// an OS that refuses to show notifications is logged and that is the end of it.
+fn notify(app: &AppHandle, job: JobKind, lang: Lang, outcome: &Outcome) {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW) else { return };
+    // `unwrap_or(true)`: when it cannot be told, say nothing. A stray notification is worse than
+    // a missing one — the user is in another app, and the window is one click away regardless.
+    if window.is_focused().unwrap_or(true) {
+        return;
+    }
+    let body = ended(job, lang, outcome);
+    if let Err(error) = app.notification().builder().title(NOTIFICATION_TITLE).body(body).show() {
+        tracing::warn!(%error, "the end of the job could not be announced");
+    }
+}
+
+/// The one sentence the notification carries: which job, and how it went (A §6).
+///
+/// A cancel is its own wording and not a failure. A §10 keeps the two apart everywhere else — the
+/// history shows a cancelled run in grey and a failed one in red — and telling someone who has
+/// just pressed «Отменить» that their run «не удалась» would be the app disagreeing with them.
+///
+/// The rest is two halves chosen apart from each other, which Russian allows here because both
+/// «Сборка» and «Подготовка» are feminine and take the same «завершена / отменена / не удалась».
+fn ended(job: JobKind, lang: Lang, outcome: &Outcome) -> String {
+    // The one sentence that carries a number: a finished run's groups are what the reviewer
+    // wants from the other side of the room, and the rest they will read on the screen.
+    if let (JobKind::Run, Outcome::Done { counts: Some(counts), .. }) = (job, outcome) {
+        return match lang {
+            Lang::Ru => format!("Сборка завершена: {}", groups_ru(counts.groups)),
+            Lang::En => format!("Assembly finished: {}", groups_en(counts.groups)),
+        };
+    }
+    let what = match (lang, job) {
+        (Lang::Ru, JobKind::Run) => "Сборка",
+        (Lang::Ru, JobKind::Prepare) => "Подготовка",
+        (Lang::En, JobKind::Run) => "Assembly",
+        (Lang::En, JobKind::Prepare) => "Preparation",
+    };
+    let how = match (lang, outcome) {
+        (Lang::Ru, Outcome::Done { .. }) => "завершена",
+        (Lang::Ru, Outcome::Failed { kind: FailKind::Cancelled, .. }) => "отменена",
+        (Lang::Ru, Outcome::Failed { .. }) => "не удалась",
+        (Lang::En, Outcome::Done { .. }) => "finished",
+        (Lang::En, Outcome::Failed { kind: FailKind::Cancelled, .. }) => "cancelled",
+        (Lang::En, Outcome::Failed { .. }) => "failed",
+    };
+    format!("{what} {how}")
+}
+
+/// «1 группа», «2 группы», «17 групп»: Russian's three forms, which a sentence that carries a
+/// number has to get right — this one is read by someone who was not watching.
+fn groups_ru(n: usize) -> String {
+    let form = match (n % 10, n % 100) {
+        (_, 11..=14) => "групп",
+        (1, _) => "группа",
+        (2..=4, _) => "группы",
+        _ => "групп",
+    };
+    format!("{n} {form}")
+}
+
+/// «1 group», «17 groups».
+fn groups_en(n: usize) -> String {
+    if n == 1 { "1 group".to_owned() } else { format!("{n} groups") }
 }
 
 /// Empties the job slot and tells the window how the job ended.

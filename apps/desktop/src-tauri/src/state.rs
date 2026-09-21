@@ -1,9 +1,10 @@
-//! What the window's process holds while it is open: the one workspace, and the one job.
+//! What the window's process holds while it is open: the one workspace, the one job, and the one
+//! answer about this build that is worth asking a process for only once.
 //!
-//! Both are behind a `Mutex` and neither is ever `unwrap`ped. A command runs on Tauri's thread
-//! pool and the job thread (Task 4's `jobs.rs`) runs beside it, so these are the only two things
-//! in the shell that are shared — and A §5 has exactly one of each: one workspace open, one
-//! worker at a time.
+//! Each is behind a `Mutex` and none is ever `unwrap`ped. A command runs on Tauri's thread pool
+//! and the job thread (`jobs.rs`) runs beside it, so these are the only things in the shell that
+//! are shared — and A §5 has exactly one of the first two: one workspace open, one worker at a
+//! time.
 //!
 //! **Locking order: the job slot first, then the workspace.** Every path that needs both takes
 //! them in that order, which is what keeps a command and the job thread from waiting on each
@@ -23,6 +24,7 @@ use sherd_app_core::host::Canceller;
 use sherd_app_core::view::{JobKind, JobView};
 use sherd_app_core::workspace::Workspace;
 
+use crate::commands::EngineInfoView;
 use crate::error::CommandError;
 
 /// The job a worker of ours is on (A §5's «preparing» and «running» rows).
@@ -60,6 +62,12 @@ pub(crate) struct AppState {
     /// The running job, if one is. A fact about this process, not about the folder, which is why
     /// it is here and not in the view built from disk.
     job: Mutex<Option<JobSlot>>,
+    /// What the engine says it can run on (A §7.4's «Вычисления»), once it has been asked.
+    ///
+    /// Kept because the answer costs a process to obtain and cannot change while the app is
+    /// open: it is a property of this build and of the machine's adapters, and the launch sheet
+    /// asks for it every time it opens.
+    engine_info: Mutex<Option<EngineInfoView>>,
 }
 
 impl AppState {
@@ -82,5 +90,17 @@ impl AppState {
     /// [`CommandError::poisoned`].
     pub(crate) fn job(&self) -> Result<MutexGuard<'_, Option<JobSlot>>, CommandError> {
         self.job.lock().map_err(|_| CommandError::poisoned("job"))
+    }
+
+    /// What the engine can run on, locked. Unrelated to the two above — it is about the build and
+    /// not about the folder — so it takes part in no locking order and is never held with them.
+    ///
+    /// # Errors
+    ///
+    /// [`CommandError::poisoned`].
+    pub(crate) fn engine_info(
+        &self,
+    ) -> Result<MutexGuard<'_, Option<EngineInfoView>>, CommandError> {
+        self.engine_info.lock().map_err(|_| CommandError::poisoned("engine info"))
     }
 }

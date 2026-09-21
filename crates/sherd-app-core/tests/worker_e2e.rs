@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use sherd_app_core::decisions::{Decision, DecisionsFile, Verdict};
 use sherd_app_core::host::{self, HostEvent, Outcome, Worker, WorkerCommand};
 use sherd_app_core::protocol::{
-    BackendChoice, CandidateRow, Event, FailKind, FragmentInfo, Job, Request, ReviewJob, RunSpec,
+    BackendChoice, CandidateRow, Event, ExportWhat, FailKind, FragmentInfo, Job, Request,
+    ReviewJob, RunSpec,
 };
 use sherd_app_core::run::{RunFile, RunStatus};
 use sherd_app_core::workspace::Workspace;
@@ -169,6 +170,31 @@ fn wait_for(worker: &mut Worker, want: impl Fn(&Event) -> bool) -> Event {
     }
 }
 
+/// Every event the session says up to and including the one `want` accepts.
+///
+/// Same rule as [`wait_for`] about an ending nobody asked for, and the same reason; the events on
+/// the way are kept because an export is judged by what it said while it worked — the `output`
+/// stage of A §3.4 — as much as by the answer it ended with.
+fn events_until(worker: &mut Worker, want: impl Fn(&Event) -> bool) -> Vec<Event> {
+    let mut seen = Vec::new();
+    loop {
+        match worker.next() {
+            Some(HostEvent::Event(event)) => {
+                let last = want(&event);
+                assert!(
+                    last || !matches!(event, Event::Failed { .. } | Event::RequestFailed { .. }),
+                    "{event:?}"
+                );
+                seen.push(event);
+                if last {
+                    return seen;
+                }
+            }
+            other => panic!("the session ended before it answered: {other:?}"),
+        }
+    }
+}
+
 /// The session's answer to whatever was just asked.
 fn assembly(worker: &mut Worker) -> sherd_app_core::protocol::AssemblyDto {
     match wait_for(worker, |e| matches!(e, Event::Assembly(_))) {
@@ -193,18 +219,18 @@ fn decided(a: &str, b: &str, verdict: Verdict, pose: Option<[[f64; 4]; 4]>) -> D
     file
 }
 
-/// A §8: the review session end to end — the match loaded once, a decision answered with an
-/// assembly, the seam of that placement measured, R §9 over what the decision left unrefined, and
-/// a refined group that survives the next reassembly.
-#[test]
-fn a_review_session_answers_a_decision_with_an_assembly_and_keeps_what_it_refined() {
-    let ws = workspace("review");
+/// A slab workspace prepared and run, a review session open over that run, and the one join the
+/// run found — the starting point of every session test below (A §8).
+///
+/// The shipped rule places nothing on this slab: its one join is probable, which is exactly the
+/// starting point a review exists for. The workspace comes back with the session because it holds
+/// the lock file; letting it go would unlock a workspace a worker is still reading.
+fn a_session_on_the_slab(tag: &str) -> (Workspace, Worker, CandidateRow) {
+    let ws = workspace(tag);
     let job = host::prepare_job(&ws, &cpu()).unwrap();
     let mut worker = Worker::spawn(&command(), &job, None).unwrap();
     assert!(matches!(host::drive(&mut worker, |_| {}), Outcome::Done { .. }));
 
-    // The shipped rule places nothing on this slab — its one join is probable — which is exactly
-    // the starting point a review exists for.
     let (mut run, mut worker) = host::start_run(&ws, &command(), &cpu(), None, now()).unwrap();
     let dir = ws.run_dir(&run.id);
     let outcome = host::drive(&mut worker, |event| {
@@ -216,7 +242,11 @@ fn a_review_session_answers_a_decision_with_an_assembly_and_keeps_what_it_refine
     assert!(matches!(outcome, Outcome::Done { .. }), "{outcome:?}");
     let rows: Vec<CandidateRow> =
         sherd_app_core::atomic::read_json(&dir.join("candidates.json")).unwrap();
-    let join = rows.iter().find(|r| r.tier == Tier::Probable).expect("the slab's join is probable");
+    let join = rows
+        .iter()
+        .find(|r| r.tier == Tier::Probable)
+        .expect("the slab's join is probable")
+        .clone();
 
     let session = Job::Review(ReviewJob {
         workspace: ws.root().to_owned(),
@@ -229,9 +259,18 @@ fn a_review_session_answers_a_decision_with_an_assembly_and_keeps_what_it_refine
         workers: 0,
     });
     let mut worker = Worker::spawn(&command(), &session, None).unwrap();
-    let ask = worker.requester();
     let ready = wait_for(&mut worker, |e| matches!(e, Event::Ready { .. }));
     assert!(matches!(ready, Event::Ready { fragments: 2, candidates } if candidates >= 1));
+    (ws, worker, join)
+}
+
+/// A §8: the review session end to end — the match loaded once, a decision answered with an
+/// assembly, the seam of that placement measured, R §9 over what the decision left unrefined, and
+/// a refined group that survives the next reassembly.
+#[test]
+fn a_review_session_answers_a_decision_with_an_assembly_and_keeps_what_it_refined() {
+    let (_ws, mut worker, join) = a_session_on_the_slab("review");
+    let ask = worker.requester();
 
     // Accepted: R §8 builds with the pinned pose and the two pieces are one group.
     let accepted = decided(&join.a, &join.b, Verdict::Accept, Some(join.pose));
@@ -321,4 +360,118 @@ fn a_worker_whose_host_goes_away_stops_by_itself() {
     drop(stdin);
     let status = child.wait().unwrap();
     assert_eq!(status.code(), Some(2), "cancelled, by the end of its input");
+}
+
+/// A §9.1: «Экспорт» — the reviewed assembly written by the engine's own writers, into a folder
+/// that was empty and had room for it.
+///
+/// One decision and a `Folder` export: the session refines what the decision left unrefined
+/// (A §8.4) and says so first, so the window's assembly is the assembly that was written; R §11's
+/// writers report the `output` stage as they go (A §3.4); and what comes back is the list of
+/// files, which is what «Готово: N файлов» is counted from.
+#[test]
+fn an_export_writes_the_reviewed_assembly_and_refuses_a_folder_that_is_not_empty() {
+    let (_ws, mut worker, join) = a_session_on_the_slab("export");
+    let ask = worker.requester();
+    let accepted = decided(&join.a, &join.b, Verdict::Accept, Some(join.pose));
+    let out = |name: &str| {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+        std::fs::remove_dir_all(&dir).ok();
+        dir
+    };
+
+    // «Папка результата», with the three opt-ins off: what a `sherd-refit-rs run` writes.
+    let folder = out("export-folder");
+    ask.send(&Request::Export {
+        decisions: accepted.clone(),
+        what: ExportWhat::Folder { placed_all: false, merged_meshes: false, previews: false },
+        dest: folder.clone(),
+    })
+    .unwrap();
+    let seen = events_until(&mut worker, |e| matches!(e, Event::Exported { .. }));
+
+    // The assembly comes first, and it is refined: what was exported is what the window now has.
+    let refined = seen.iter().find_map(|e| match e {
+        Event::Assembly(assembly) => Some(assembly),
+        _ => None,
+    });
+    let refined = refined.expect("an export answers with the assembly it is about to write");
+    assert_eq!(refined.groups.len(), 1, "{:?}", refined.groups);
+    assert!(refined.groups[0].refined, "an export refines what the decisions left unrefined");
+
+    // A §3.4's `output` stage: one report per mesh file — two placed meshes and the scene.
+    let output: Vec<(usize, usize)> = seen
+        .iter()
+        .filter_map(|e| match e {
+            Event::Progress { stage, done, total } if stage == "output" => Some((*done, *total)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(output.last(), Some(&(3, 3)), "{output:?}");
+
+    let Some(Event::Exported { dest, files, bytes }) = seen.last() else {
+        unreachable!("{seen:?}")
+    };
+    assert_eq!(dest, &folder);
+    for wanted in [
+        "placed/pieceA.ply",
+        "placed/pieceB.ply",
+        "scene.glb",
+        "viewer.html",
+        "transforms.csv",
+        "transforms.json",
+        "report.md",
+        "README.txt",
+    ] {
+        assert!(files.iter().any(|f| f == wanted), "{wanted} is missing from {files:?}");
+        assert!(folder.join(wanted).is_file(), "{wanted} was listed and not written");
+    }
+    assert!(*bytes > 0, "the files have a size");
+
+    // A §9.1: the reviewer's part is documented by the engine — the decision arrives as a
+    // constraint and `report.md` says what became of it.
+    let report = std::fs::read_to_string(folder.join("report.md")).unwrap();
+    assert!(report.contains("## Constraints"), "{report}");
+    assert!(report.contains(&join.a) && report.contains(&join.b));
+
+    // The same folder again: it is not empty any more, and that is a refusal the session
+    // survives — nothing is overwritten and the next request is still served.
+    ask.send(&Request::Export {
+        decisions: accepted.clone(),
+        what: ExportWhat::Folder { placed_all: false, merged_meshes: false, previews: false },
+        dest: folder.clone(),
+    })
+    .unwrap();
+    let refused = wait_for(&mut worker, |e| matches!(e, Event::RequestFailed { .. }));
+    assert!(
+        matches!(&refused, Event::RequestFailed { message } if message.contains("not empty")),
+        "{refused:?}"
+    );
+
+    // «Только таблицы и отчёт» into a folder of its own: the same report, not one mesh.
+    let tables = out("export-tables");
+    ask.send(&Request::Export {
+        decisions: accepted,
+        what: ExportWhat::Tables,
+        dest: tables.clone(),
+    })
+    .unwrap();
+    let seen = events_until(&mut worker, |e| matches!(e, Event::Exported { .. }));
+    let Some(Event::Exported { files, .. }) = seen.last() else { unreachable!("{seen:?}") };
+    assert!(files.iter().any(|f| f == "report.md") && files.iter().any(|f| f == "transforms.csv"));
+    assert!(
+        !files.iter().any(|f| f.starts_with("placed/") || f == "scene.glb"),
+        "a tables export writes no mesh: {files:?}"
+    );
+    assert!(!tables.join("placed").exists() && !tables.join("scene.glb").exists());
+    assert!(
+        !seen.iter().any(|e| matches!(e, Event::Progress { stage, .. } if stage == "output")),
+        "with no mesh to write there is no output stage at all"
+    );
+
+    ask.send(&Request::Close).unwrap();
+    assert!(matches!(
+        wait_for(&mut worker, |e| matches!(e, Event::Done { .. })),
+        Event::Done { .. }
+    ));
 }

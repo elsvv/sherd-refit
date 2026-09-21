@@ -61,6 +61,11 @@ serde = { version = "1.0.229", features = ["derive"] }
 # difference between a fixture scalar and the float32 value it was written from (S3).
 serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
 sha2 = "0.11.0"                           # fixture manifest checksums
+# Free space at the destination before an export writes gigabytes (A §9.1, A §10's `disk` class).
+# `statvfs` on unix and `GetDiskFreeSpaceExW` on Windows through `rustix`/`windows-sys`, no libc.
+# The last 0.x: 1.0 reshaped the file-lock traits, which nothing here uses — only `available_space`
+# — so the older line is the smaller change. Pinned exactly, as everything else here is.
+fs4 = { version = "=0.13.1", default-features = false }
 image = { version = "0.25.10", default-features = false, features = [
     "png",
 ] } # preview PNGs

@@ -144,8 +144,45 @@ pub enum Request {
         /// The decisions the assembly to refine is built from.
         decisions: DecisionsFile,
     },
+    /// Write the reviewed assembly with the engine's own writers (A §9.1). Answered with
+    /// [`Event::Assembly`] — the refinement below becomes the session's baseline, so the window's
+    /// state is the state that was exported — and then [`Event::Exported`].
+    Export {
+        /// The decisions the assembly to export is built from.
+        decisions: DecisionsFile,
+        /// Which of A §9.1's two kinds.
+        what: ExportWhat,
+        /// Where to write it: a folder that does not exist yet, or an empty one.
+        dest: PathBuf,
+    },
     /// The session is over: the worker answers [`Event::Done`] and exits.
     Close,
+}
+
+/// A §9.1's two kinds of export, which are the two shapes of `RunOptions` the engine's writers
+/// take: everything a `sherd-refit-rs run` writes, or the same without a single mesh.
+///
+/// The engine's switches do not separate `scene.glb` from `placed/`, which is why this is two
+/// kinds with three opt-ins and not five checkboxes: `write_meshes` turns the lot on, and the
+/// three that are left are the ones a run's own flags have (`--placed-all`, `--merged-meshes`,
+/// and R §11.5's previews).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExportWhat {
+    /// «Папка результата»: the tables, the report, `transforms.*`, `README.txt`, `placed/*.ply`,
+    /// `scene.glb` and `viewer.html` — `write_meshes` and `viewer` on, plus the three below.
+    Folder {
+        /// `--placed-all`: a `placed/<name>.ply` for every fragment, not only the assembled ones.
+        placed_all: bool,
+        /// `--merged-meshes`: R §11.4's `assembly_<k>.ply`, one per group of two or more.
+        merged_meshes: bool,
+        /// R §11.5's group previews.
+        previews: bool,
+    },
+    /// «Только таблицы и отчёт»: the same folder with every mesh and every picture switched off —
+    /// seconds and megabytes instead of minutes and gigabytes, for a colleague who wants numbers.
+    Tables,
 }
 
 /// The launch sheet's executor (A §7.4), which is `sherd_core::Backend` with serde on it — the
@@ -336,6 +373,18 @@ pub enum Event {
     RequestFailed {
         /// Why, in the engine's words.
         message: String,
+    },
+    /// An [`Request::Export`] is written and closed (A §9.1). The session stays open: an export
+    /// is one more question about the assembly, not the end of the review.
+    Exported {
+        /// The folder it was written into, as the window shows it and reveals it.
+        dest: PathBuf,
+        /// Every file written, relative to `dest` and with `/` between the parts whatever the
+        /// platform — a list the window counts and prints, not a path it opens.
+        files: Vec<String>,
+        /// What they came to on disk, in bytes.
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
+        bytes: u64,
     },
     /// The job is over and it went well. The three blocks are a run's; `Info` fills none of them.
     Done {
@@ -746,6 +795,28 @@ mod tests {
             round(&Request::Refine { decisions: DecisionsFile::default() }),
             r#"{"request":"refine","decisions":{"version":1,"decisions":[]}}"#
         );
+        // A §9.1: the two kinds are one tagged object inside the request, so that a window one
+        // version older reads `kind` and says «этого экспорта я не знаю» instead of guessing.
+        assert_eq!(
+            round(&Request::Export {
+                decisions: DecisionsFile::default(),
+                what: ExportWhat::Folder {
+                    placed_all: false,
+                    merged_meshes: true,
+                    previews: false
+                },
+                dest: PathBuf::from("/tmp/out"),
+            }),
+            r#"{"request":"export","decisions":{"version":1,"decisions":[]},"what":{"kind":"folder","placed_all":false,"merged_meshes":true,"previews":false},"dest":"/tmp/out"}"#
+        );
+        assert_eq!(
+            round(&Request::Export {
+                decisions: DecisionsFile::default(),
+                what: ExportWhat::Tables,
+                dest: PathBuf::from("/tmp/out"),
+            }),
+            r#"{"request":"export","decisions":{"version":1,"decisions":[]},"what":{"kind":"tables"},"dest":"/tmp/out"}"#
+        );
         assert_eq!(round(&Request::Close), r#"{"request":"close"}"#);
 
         let ready = Event::Ready { fragments: 155, candidates: 54_000 };
@@ -773,6 +844,17 @@ mod tests {
                 .unwrap(),
             r#"{"event":"request_failed","message":"no such pair"}"#
         );
+        let exported = Event::Exported {
+            dest: PathBuf::from("/tmp/out"),
+            files: vec!["placed/pieceA.ply".to_owned()],
+            bytes: 2_048,
+        };
+        let line = serde_json::to_string(&exported).unwrap();
+        assert_eq!(
+            line,
+            r#"{"event":"exported","dest":"/tmp/out","files":["placed/pieceA.ply"],"bytes":2048}"#
+        );
+        assert_eq!(serde_json::from_str::<Event>(&line).unwrap(), exported);
     }
 
     /// The keys of a serialised value, in the order serde wrote them.

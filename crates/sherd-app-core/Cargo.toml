@@ -24,6 +24,7 @@ sherd-core.workspace = true
 sherd-backend.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
+fs4.workspace = true
 nalgebra.workspace = true
 rayon.workspace = true
 serde.workspace = true

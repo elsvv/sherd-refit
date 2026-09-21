@@ -66,7 +66,20 @@ decisions: Array<Decision>, } | { "event": "request_failed",
 /**
  * Why, in the engine's words.
  */
-message: string, } | { "event": "done", 
+message: string, } | { "event": "exported", 
+/**
+ * The folder it was written into, as the window shows it and reveals it.
+ */
+dest: string, 
+/**
+ * Every file written, relative to `dest` and with `/` between the parts whatever the
+ * platform — a list the window counts and prints, not a path it opens.
+ */
+files: Array<string>, 
+/**
+ * What they came to on disk, in bytes.
+ */
+bytes: number, } | { "event": "done", 
 /**
  * What the run found.
  */

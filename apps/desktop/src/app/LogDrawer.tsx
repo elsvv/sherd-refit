@@ -128,6 +128,10 @@ export default function LogDrawer({ view }: { view: WorkspaceView }) {
   return (
     <section
       aria-label={t("log.title")}
+      // A §8.3's `A` / `X` / `␣` decide a join on one key press. The log is read and filtered
+      // with the keyboard over a screen that still has a pair selected, so the keys stop here
+      // ([`elsewhere`] in `shortcuts.ts`).
+      data-shortcuts="off"
       className="flex h-[40%] min-h-[120px] shrink-0 flex-col border-t border-border bg-panel"
     >
       <header className="flex h-8 shrink-0 items-center gap-2 border-b border-border px-3 text-xs">

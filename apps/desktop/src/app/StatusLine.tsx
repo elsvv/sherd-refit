@@ -69,16 +69,21 @@ export default function StatusLine({ view, status }: { view: WorkspaceView; stat
   // owes them is that the engine is not answering *yet*: loading a collection's `match.state`
   // takes a few seconds, and until `ready` every key on the screen is dead.
   //
-  // And nothing else: the `stage` a session leaves in the jobs store is the one it announced
-  // while it was loading, and it stands there for the rest of the session — a status line
-  // reading «Предобработка сканов» over a screen that has been answering for ten minutes. What
-  // «Уточнить позы» should say while it runs is the draft line's question, not this one's.
+  // And R §9's half a minute, which is the one thing a session does that *is* waited on (A §8.4
+  // puts the button in the draft line and its progress here). Not the job's `stage`, which for a
+  // session is the one it announced while it was loading and stands there for the rest of the
+  // session — a status line reading «Предобработка сканов» over a screen that has been answering
+  // for ten minutes. The review store says which of the two is true right now.
+  //
   // Asked of the review store and not of `view.job`: `review_open` answers with nothing and the
   // window does not ask for a fresh view afterwards, so the session shows up in the view only
   // when something else has refreshed it. The store knows the moment the mode was entered.
   const session = useReview((state) => state.runId !== null) || view.job?.kind === "review";
   const waiting = useReview((state) => state.runId !== null && !state.ready);
+  const refining = useReview((state) => state.refining);
   const stageProgress = stage === null ? undefined : progress[stage];
+  // R §9 counts the groups it is refining, and the session sends that under its own stage name.
+  const refine = progress.refine;
   const stageName = stage === null ? null : t(`stage.${stage}`, { defaultValue: stage });
 
   const warnings = view.fragments.filter((fragment) => fragment.warnings.length > 0).length;
@@ -88,6 +93,20 @@ export default function StatusLine({ view, status }: { view: WorkspaceView; stat
       <span className="shrink-0 text-text">{t(`status.${status.kind}`)}</span>
 
       {waiting ? <span className="truncate">{t("review.loading")}</span> : null}
+
+      {refining ? (
+        <>
+          <span className="truncate">{t("review.refining")}</span>
+          {refine === undefined ? null : (
+            <>
+              <span className="shrink-0 tabular-nums">
+                {refine.done} / {refine.total}
+              </span>
+              <Meter value={refine.done} max={refine.total} label={t("review.refining")} />
+            </>
+          )}
+        </>
+      ) : null}
 
       {running && !session && !overlaid && stageName !== null ? (
         <>

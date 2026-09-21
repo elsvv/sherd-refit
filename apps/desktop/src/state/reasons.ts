@@ -13,9 +13,11 @@ import type { CandidateRow } from "../ipc/bindings/CandidateRow";
  *
  * **What it relies on**, from `sherd_core::tiers::Thresholds::refusals`: a numeric test is
  * `<name> <value> < <limit>` or `… > <limit>`; a redraw prefixes its own refusal with
- * `redraw <n>: `; the arms are one line beginning `no arm: support <n> < <m> and `. Anything
- * outside those shapes is shown **as the engine wrote it** rather than dropped: a build of the
- * engine that says something new must still say it on the screen.
+ * `redraw <n>: `; the arms are one line beginning `no arm: support <n> < <m> and `. And from
+ * `sherd_core::assembly::greedy::Rejection::message`, the seven sentences R §8 writes about a
+ * join it would not build with (A §8.4's «N не встали»). Anything outside those shapes is shown
+ * **as the engine wrote it** rather than dropped: a build of the engine that says something new
+ * must still say it on the screen.
  */
 
 /** The one line that says why neither distinguishing arm reached this candidate. */
@@ -47,6 +49,17 @@ const RIVAL_NEAR = /^the second placement is ([\d.]+) t away, under (\S+)$/u;
 
 /** `re-search agreed 1/2 < 2`. */
 const RESEARCH = /^re-search agreed (\d+)\/(\d+) < \d+$/u;
+
+/**
+ * R §8's refusals of a join it was handed, as `Rejection::message` writes them. A fragment's name
+ * may hold a `-` (`FZ234010-02`), so the join two of them name is captured whole and repeated as
+ * the engine wrote it rather than split into two.
+ */
+const PENETRATES = /^penetrates (.+) \([\d.]+\)$/u;
+const WITH_STRONGER = /^inconsistent with stronger join (.+) \(([\d.]+) deg, ([\d.]+) t\)$/u;
+const WITH_ASSEMBLED = /^inconsistent with the assembled poses \(([\d.]+) deg, ([\d.]+) t\)$/u;
+const MERGE_DISAGREES = /^merging the two groups disagrees with join (.+) \(([\d.]+) deg, ([\d.]+) t\)$/u;
+const CONSTRAINED = /^refused by constraints\.json \(`(.+)`\)$/u;
 
 /**
  * How many decimals each score is worth reading at. Not one number for all of them: `tight` is a
@@ -105,6 +118,54 @@ function arm(text: string, t: TFunction): string | null {
   return null;
 }
 
+/**
+ * Why R §8 did not build with a join the reviewer accepted (A §8.4), or `null` for a shape this
+ * build knows not.
+ *
+ * These are not refusals of the *candidate* — the engine scored it and the reviewer said yes to
+ * it. They are refusals of the **placement**: the fragment is already somewhere else, or putting
+ * it here would push it through a third one. So they read as consequences («встал бы внутрь…»)
+ * and not as failed tests, which is the difference the reviewer has to act on: the pair is fine
+ * and something around it is not.
+ */
+function notUsed(text: string, t: TFunction): string | null {
+  const penetrates = PENETRATES.exec(text);
+  if (penetrates !== null) {
+    return t("reason.not_used_pen", { other: penetrates[1] });
+  }
+  const stronger = WITH_STRONGER.exec(text);
+  if (stronger !== null) {
+    return t("reason.not_used_stronger", { join: stronger[1], angle: stronger[2], distance: stronger[3] });
+  }
+  const assembled = WITH_ASSEMBLED.exec(text);
+  if (assembled !== null) {
+    return t("reason.not_used_assembled", { angle: assembled[1], distance: assembled[2] });
+  }
+  const merge = MERGE_DISAGREES.exec(text);
+  if (merge !== null) {
+    return t("reason.not_used_merge_disagrees", { join: merge[1], angle: merge[2], distance: merge[3] });
+  }
+  if (text === "would merge two groups (not supported)") {
+    return t("reason.not_used_merge");
+  }
+  if (text === "would merge two groups (only a confirmed join may)") {
+    return t("reason.not_used_merge_unconfirmed");
+  }
+  const constrained = CONSTRAINED.exec(text);
+  if (constrained !== null) {
+    // `Veto::key`'s two words. A pair the reviewer has just accepted cannot also be in
+    // `must_not_join` — the store replaces a pair's decision rather than holding two — but a
+    // `constraints.json` written by hand (A §2.1: the folder is the operator's) can hold both.
+    if (constrained[1] === "must_not_join") {
+      return t("reason.not_used_forbidden");
+    }
+    if (constrained[1] === "different_object") {
+      return t("reason.not_used_different");
+    }
+  }
+  return null;
+}
+
 /** One refusal as a sentence, or `null` when this build does not know that shape. */
 function sentence(text: string, t: TFunction): string | null {
   const redraw = REDRAW.exec(text);
@@ -144,7 +205,7 @@ function sentence(text: string, t: TFunction): string | null {
     // engine's own test asserts it), so the first half is one sentence and only the second varies.
     return half === null ? null : t("reason.no_arm", { arm: half });
   }
-  return null;
+  return notUsed(text, t);
 }
 
 /** One refusal as a sentence, falling back to the engine's own words. */

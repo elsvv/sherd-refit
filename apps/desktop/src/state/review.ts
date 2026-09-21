@@ -171,6 +171,14 @@ export interface ReviewState extends Undo {
   ready: boolean;
   /** Whether an answer to the last request is still on its way (A §8.2: «under a second»). */
   pending: boolean;
+  /**
+   * And whether that request is the slow one: R §9 over the unrefined groups (A §8.4, «≈30 с»).
+   * Apart from [`ReviewState.pending`] because the two are reported differently — a reassembly
+   * answers before anything could be drawn about it, a refinement is a job to watch in the
+   * status line — and neither the draft line nor the status line can tell them apart from the
+   * jobs store: the `stage` a session leaves there stands until the session ends.
+   */
+  refining: boolean;
   /** Decisions the session could not apply because their fragments are gone (A §8.2). */
   dropped: Decision[];
   /** The seam of the selected placement, or `null` while it is being asked for. */
@@ -218,6 +226,7 @@ function blank(): Omit<ReviewState, keyof ReviewActions> {
     past: [],
     future: [],
     pending: false,
+    refining: false,
     dropped: [],
     detail: null,
     selected: null,
@@ -377,12 +386,12 @@ export const useReview = create<ReviewState>()((set, get) => {
     },
 
     refine: () => {
-      set({ pending: true, error: null });
+      set({ pending: true, refining: true, error: null });
       void (async () => {
         try {
           await api.reviewRefine();
         } catch (e) {
-          set({ pending: false, error: toCommandError(e) });
+          set({ pending: false, refining: false, error: toCommandError(e) });
         }
       })();
     },
@@ -421,7 +430,9 @@ export const useReview = create<ReviewState>()((set, get) => {
           // A §2.1: the shell has already filed this over `assembly.json`; the window only has
           // to draw it.
           useAssembly.getState().show(assemblyOf(event));
-          set({ pending: false });
+          // The answer to a reassembly *and* to a refinement (A §8.4): whichever was asked for
+          // is over.
+          set({ pending: false, refining: false });
           break;
         case "pair_detail": {
           const detail = detailOf(event);
@@ -434,7 +445,7 @@ export const useReview = create<ReviewState>()((set, get) => {
           break;
         }
         case "request_failed":
-          set({ pending: false, error: { kind: "worker", message: event.message } });
+          set({ pending: false, refining: false, error: { kind: "worker", message: event.message } });
           break;
         default:
           // `stage` and `progress` while the match loads and while R §9 runs; the status line

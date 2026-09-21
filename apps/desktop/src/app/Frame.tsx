@@ -16,6 +16,7 @@ import AssemblyRight from "../modes/assembly/AssemblyRight";
 import InputCentre from "../modes/input/InputCentre";
 import InputLeft from "../modes/input/InputLeft";
 import InputRight from "../modes/input/InputRight";
+import DraftLine from "../modes/review/DraftLine";
 import ReviewCentre from "../modes/review/ReviewCentre";
 import ReviewLeft from "../modes/review/ReviewLeft";
 import ReviewRight from "../modes/review/ReviewRight";
@@ -70,7 +71,7 @@ function panesOf(mode: Mode, view: WorkspaceView): Panes {
       return {
         left: <ReviewLeft />,
         centre: <ReviewCentre view={view} />,
-        right: <ReviewRight />,
+        right: <ReviewRight view={view} />,
       };
   }
 }
@@ -385,6 +386,12 @@ export default function Frame({ view }: { view: WorkspaceView }) {
       </div>
 
       {logOpen ? <LogDrawer view={view} /> : null}
+
+      {/* A §8.4's draft line, between the log and the status line and only over the session that
+          can answer it — every button on it asks the warm engine something. It draws nothing at
+          all until there is a draft to talk about, so an untouched review shows the same foot as
+          the «Сборка» mode. */}
+      {reviewing === null ? null : <DraftLine view={view} />}
 
       <StatusLine view={view} status={status} />
 

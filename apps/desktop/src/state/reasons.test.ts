@@ -165,6 +165,41 @@ describe("explain (A §8.3: the engine's refusals as sentences)", () => {
   });
 });
 
+describe("explain (A §8.4: why an accepted join did not fit)", () => {
+  it("says what the placement ran into, not what the pair failed", () => {
+    expect(one("penetrates FY234003 (0.004)")).toBe("в этой позе фрагмент вошёл бы внутрь FY234003");
+    expect(one("inconsistent with the assembled poses (5.6 deg, 0.44 t)")).toBe(
+      "расходится с уже расставленными позами группы: 5.6° и 0.44 t",
+    );
+  });
+
+  it("keeps a join's two names as the engine wrote them — a name may hold a dash of its own", () => {
+    expect(one("inconsistent with stronger join FY234019-FZ234010-02 (3.1 deg, 0.20 t)")).toBe(
+      "расходится с более сильным стыком FY234019-FZ234010-02: 3.1° и 0.20 t",
+    );
+    expect(one("merging the two groups disagrees with join FY234001-FY234006 (9.0 deg, 1.10 t)")).toBe(
+      "объединение двух групп расходится со стыком FY234001-FY234006: 9.0° и 1.10 t",
+    );
+  });
+
+  it("tells the two group merges apart: the one the tool will not do, and the one the evidence does not allow", () => {
+    expect(one("would merge two groups (not supported)")).toBe("соединил бы две группы, а этого сборка пока не делает");
+    expect(one("would merge two groups (only a confirmed join may)")).toBe(
+      "соединил бы две группы — на это имеет право только подтверждённый ядром стык",
+    );
+  });
+
+  it("names the two vetoes of constraints.json, and leaves a third build's word alone", () => {
+    expect(one("refused by constraints.json (`must_not_join`)")).toBe(
+      "пара помечена в constraints.json как несоединяемая",
+    );
+    expect(one("refused by constraints.json (`different_object`)")).toBe(
+      "фрагменты отнесены в constraints.json к разным объектам",
+    );
+    expect(one("refused by constraints.json (`something_new`)")).toBe("refused by constraints.json (`something_new`)");
+  });
+});
+
 describe("headline (A §8.3: «Почему не подтверждён сам»)", () => {
   it("prefers the line about the arms, which is what «сам» means", () => {
     const held_ = held(["seam 4.0000 < 5", "no arm: support 0 < 1 and margin 1.00 < 2"]);

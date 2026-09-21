@@ -1,5 +1,7 @@
+import type { AssemblyDto } from "../../ipc/bindings/AssemblyDto";
 import type { CandidateRow } from "../../ipc/bindings/CandidateRow";
 import type { Decision } from "../../ipc/bindings/Decision";
+import type { UnplacedDto } from "../../ipc/bindings/UnplacedDto";
 import type { Verdict } from "../../ipc/bindings/Verdict";
 import { decisionOf } from "../../state/review";
 
@@ -143,6 +145,55 @@ export function candidateOf(
   const mine = candidates.filter((row) => pairKey(row.a, row.b) === key);
   const wanted = poseKey(pose);
   return mine.find((row) => poseKey(row.pose) === wanted) ?? mine.sort((one, other) => other.score - one.score)[0] ?? null;
+}
+
+/**
+ * Every pose the run scored for one pair, best first — A §8.3's «Другие позы пары» before the
+ * one on the screen is taken out of it.
+ *
+ * The inspector cannot take [`QueueRow.others`]: that list is relative to the *band's best*, and
+ * the reviewer may be looking at any of the poses («показать»). Here the pair is asked for whole
+ * and the shown one is dropped by the caller, so «Другие» always means «the other ones».
+ */
+export function posesOf(candidates: readonly CandidateRow[], a: string, b: string): CandidateRow[] {
+  const key = pairKey(a, b);
+  return candidates.filter((row) => pairKey(row.a, row.b) === key).sort((one, other) => other.score - one.score);
+}
+
+/** What an assembly adds up to (A §8.4's «стало 18 групп · без пары 78»). */
+export interface Tally {
+  /** Groups of two or more — what `RunCounts.groups` counts, so the two can be compared. */
+  groups: number;
+  /** Fragments the assembly left alone; each is a group of one in `assembly.json`. */
+  unpaired: number;
+}
+
+/**
+ * The draft line's two numbers. A group of one is not a group (`RunCounts` counts it under
+ * `unassembled`), and the line puts «стало» beside «было» — so the two must be counted the same
+ * way or a decision that changed nothing would read as one that lost a group.
+ */
+export function tally(assembly: AssemblyDto | null): Tally | null {
+  if (assembly === null) {
+    return null;
+  }
+  const groups = assembly.groups.filter((group) => group.members.length > 1).length;
+  return { groups, unpaired: assembly.groups.length - groups };
+}
+
+/**
+ * A §8.4's «N не встали»: the joins the reviewer **accepted** that the reassembly could not use.
+ *
+ * Not every `unplaced` pair — a run leaves plenty of its own, and the reviewer neither asked for
+ * those nor can do anything about them. The ones worth a warn chip are the ones they said yes to
+ * and that did not happen: a pair whose two fragments the accepted joins already place relative
+ * to each other (R §8's `InconsistentWithAssembled`), or one the greedy order dropped.
+ */
+export function notPlaced(assembly: AssemblyDto | null, decisions: readonly Decision[]): UnplacedDto[] {
+  if (assembly === null) {
+    return [];
+  }
+  return assembly.unplaced.filter((pair) => decisionOf(decisions, pair.a, pair.b)?.verdict === "accept");
 }
 
 /** What the run asked of a candidate, out of its own `params` (A §8.3's second column). */

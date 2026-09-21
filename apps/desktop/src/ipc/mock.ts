@@ -274,6 +274,21 @@ function candidateRows(): CandidateRow[] {
     });
   });
 
+  // A second pose for the queue's best pair (A §8.3's «Другие позы пары»). R §6's NMS keeps a
+  // rival placement when it is far enough from the winner, and the whole point of the arms is
+  // that a pair with two plausible poses is not confirmed by score alone — so one pair of the
+  // mock has one, and the inspector has something to offer «показать».
+  rows.push({
+    a: "FY234003",
+    b: "FY234010",
+    pose: between(4, 9),
+    score: 1.15,
+    scores: scores(0.26, 0.028, 3.8, 0.0024),
+    tier: "probable",
+    used: false,
+    evidence: evidence(["no arm: support 0 < 1 and margin 1.00 < 2"], null, 1.0),
+  });
+
   const rejected: [string, string][] = [
     ["FY234002", "FY234009"],
     ["FY234005", "FY234012"],
@@ -368,6 +383,20 @@ const STANDARD_SPEC: RunSpec = {
   memory_gb: null,
 };
 
+/**
+ * The thresholds a finished run resolved to, as `run.json`'s `params` holds them (R §1.1's names,
+ * with `tiers` as the 47th key). `Params` has forty-six of them and the window reads six: the
+ * four gates of R §6.5 that A §8.3's inspector puts beside a candidate's scores, and the tier
+ * pass's two arms. The rest would be dead weight in a fixture — a real `run.json` has them all.
+ */
+const PARAMS: Record<string, unknown> = {
+  min_tight: 0.25,
+  max_gap: 0.03,
+  max_pen: 0.005,
+  min_seam: 3.0,
+  tiers: { min_tight: 0.35, max_gap_t: 0.015, min_seam: 5.0, min_cont_n: 0.9, min_margin: 2.0, min_support: 1 },
+};
+
 /** Two digits, the way every timestamp below needs them. */
 function pad(value: number): string {
   return String(value).padStart(2, "0");
@@ -413,7 +442,9 @@ function runFile(
     finished,
     status,
     spec: { ...STANDARD_SPEC },
-    params: null,
+    // Filed when the run ends (A §2.1), so a run that failed or was stopped has none — which is
+    // also the shape A §8.3's inspector must survive: a limit column with nothing in it.
+    params: counts === null ? null : { ...PARAMS },
     input: { files: ALL.map(stamp), excluded: [] },
     engine: counts === null ? null : ENGINE,
     counts,
@@ -717,14 +748,21 @@ function playRun(runId: string): void {
     const finishedAt = timestamp(new Date());
     world.runs = world.runs.map((run) =>
       run.id === runId
-        ? { ...run, status: { state: "done" }, finished: finishedAt, counts: PLAYED_COUNTS, engine: ENGINE }
+        ? {
+            ...run,
+            status: { state: "done" },
+            finished: finishedAt,
+            counts: PLAYED_COUNTS,
+            engine: ENGINE,
+            params: { ...PARAMS },
+          }
         : run,
     );
     const done = store({ ...now, job: null });
     finish({
       job: "run",
       run_id: runId,
-      outcome: { Done: { counts: PLAYED_COUNTS, engine: ENGINE, params: null } },
+      outcome: { Done: { counts: PLAYED_COUNTS, engine: ENGINE, params: { ...PARAMS } } },
       view: done,
     });
   });

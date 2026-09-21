@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 
+import type { AssemblyDto } from "../../ipc/bindings/AssemblyDto";
 import type { CandidateRow } from "../../ipc/bindings/CandidateRow";
 import type { Decision } from "../../ipc/bindings/Decision";
 import type { Evidence } from "../../ipc/bindings/Evidence";
 import type { Scores } from "../../ipc/bindings/Scores";
-import { candidateOf, limitsOf, nextUndecided, queueRows, rowAt, scoreLines } from "./queue";
+import { candidateOf, limitsOf, nextUndecided, notPlaced, posesOf, queueRows, rowAt, scoreLines, tally } from "./queue";
 
 /** A pose that is only ever compared, never applied: the translation is what tells two apart. */
 function pose(x: number): CandidateRow["pose"] {
@@ -241,5 +242,62 @@ describe("scoreLines", () => {
   it("says nothing about a limit the run did not file", () => {
     const lines = scoreLines(row("A", "B", "probable", 1), limitsOf(null));
     expect(lines.find((line) => line.key === "seam")).toEqual({ key: "seam", value: "8.0 t", limit: null, ok: null });
+  });
+});
+
+/** An assembly of named groups, with whatever the reassembly could not place. */
+function assembled(groups: string[][], unplaced: [string, string][] = []): AssemblyDto {
+  return {
+    groups: groups.map((members) => ({ members, refined: false })),
+    poses: {},
+    joins: [],
+    unplaced: unplaced.map(([a, b]) => ({ a, b, reason: "inconsistent with the assembled poses" })),
+  };
+}
+
+describe("posesOf", () => {
+  const candidates = [
+    row("A", "B", "probable", 4, 1),
+    row("B", "A", "rejected", 9.5, 2),
+    row("A", "C", "probable", 8, 3),
+  ];
+
+  it("gathers every pose of one pair, best first, whichever way round it is named", () => {
+    expect(posesOf(candidates, "B", "A").map((one) => one.score)).toEqual([9.5, 4]);
+  });
+
+  it("answers nothing for a pair that was never scored", () => {
+    expect(posesOf(candidates, "A", "Z")).toEqual([]);
+  });
+});
+
+describe("tally", () => {
+  it("counts groups of two or more, and every singleton as a fragment with no partner", () => {
+    expect(tally(assembled([["A", "B", "C"], ["D", "E"], ["F"], ["G"]]))).toEqual({ groups: 2, unpaired: 2 });
+  });
+
+  it("has nothing to count before an assembly has arrived", () => {
+    expect(tally(null)).toBeNull();
+  });
+});
+
+describe("notPlaced", () => {
+  const assembly = assembled(
+    [["A", "B"], ["C"], ["D"]],
+    [
+      ["C", "D"],
+      ["E", "F"],
+    ],
+  );
+
+  it("keeps the accepted joins the reassembly could not use, however they are named", () => {
+    expect(notPlaced(assembly, [decided("D", "C", "accept")]).map((one) => [one.a, one.b])).toEqual([["C", "D"]]);
+  });
+
+  it("says nothing about a pair the reviewer never accepted", () => {
+    // `E–F` is the engine's own leftover and `C–D` was rejected: neither is the reviewer's to fix.
+    expect(notPlaced(assembly, [decided("C", "D", "reject")])).toEqual([]);
+    expect(notPlaced(assembly, [])).toEqual([]);
+    expect(notPlaced(null, [decided("C", "D", "accept")])).toEqual([]);
   });
 });

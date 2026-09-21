@@ -3,6 +3,7 @@
 //! files. Nothing here depends on Tauri, which is what lets all of it be tested headless.
 
 pub mod atomic;
+pub mod blender;
 pub mod decisions;
 pub mod eta;
 pub mod host;

@@ -1540,7 +1540,10 @@ pub fn write_placed_meshes(
     budget: Budget,
 ) -> Result<Vec<PathBuf>> {
     let every = vec![true; paths.len()];
-    write_placed_selected(out_dir, paths, names, poses, groups, &every, true, comment, budget)
+    let quiet = || {};
+    write_placed_selected(
+        out_dir, paths, names, poses, groups, &every, true, comment, budget, &quiet,
+    )
 }
 
 /// [`write_placed_meshes`] for the fragments `which` marks, with the merged files only when
@@ -1551,7 +1554,15 @@ pub fn write_placed_meshes(
 /// `run` writes the assembled ones unless `--placed-all` asks for the rest. `assembly_<k>.ply`
 /// repeats `placed/` in one file per group without the fragments' names, and `run` writes it on
 /// `--merged-meshes`. Every file written is byte for byte the file [`write_placed_meshes`] writes.
-#[allow(clippy::too_many_arguments, reason = "R §11.4's inputs, plus the two selections")]
+///
+/// `on_file` is called once for every mesh file this wrote, from the thread that wrote it and
+/// after the file is closed: it is how the output stage reports its progress (D §5, A §3.4). This
+/// is the one writer whose unit of work is a full-resolution scan read back from disk, so the
+/// count has to be kept *inside* the parallel loop — outside it there is one report at the end,
+/// which is no report. A callback and not a [`Watch`](crate::progress::Watch) because the stage's
+/// `total` counts files this function knows nothing about (`scene.glb`), and nothing here should
+/// have to be told about them. It must not panic and must not block: the whole stage waits on it.
+#[allow(clippy::too_many_arguments, reason = "R §11.4's inputs, the two selections, the counter")]
 pub fn write_placed_selected(
     out_dir: impl AsRef<Path>,
     paths: &[PathBuf],
@@ -1562,6 +1573,7 @@ pub fn write_placed_selected(
     merged: bool,
     comment: &str,
     budget: Budget,
+    on_file: &(dyn Fn() + Sync),
 ) -> Result<Vec<PathBuf>> {
     let out_dir = out_dir.as_ref();
     let placed_dir = out_dir.join("placed");
@@ -1586,6 +1598,7 @@ pub fn write_placed_selected(
             let mesh = place(path, &poses[n])?;
             let file = placed_dir.join(format!("{}.ply", names[n]));
             crate::io::writer::write_ply_with_comment(&file, &mesh, comment)?;
+            on_file();
             Ok(file)
         })
         .collect();
@@ -1613,6 +1626,7 @@ pub fn write_placed_selected(
         }
         let file = out_dir.join(format!("assembly_{k}.ply"));
         write_merged(&file, &members, comment)?;
+        on_file();
         written.push(file);
     }
     Ok(written)
@@ -1951,6 +1965,10 @@ mod tests {
         write_placed_meshes(&full, &paths, &names(), &poses, &groups, OPEN3D_COMMENT, budget)
             .expect("the full writer");
         let some = dir.join("some");
+        let counted = std::sync::atomic::AtomicUsize::new(0);
+        let count = || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        };
         let written = write_placed_selected(
             &some,
             &paths,
@@ -1961,8 +1979,10 @@ mod tests {
             false,
             OPEN3D_COMMENT,
             budget,
+            &count,
         )
         .expect("the selected writer");
+        assert_eq!(counted.load(std::sync::atomic::Ordering::Relaxed), 2, "one count per file");
         assert_eq!(written, vec![some.join("placed/one.ply"), some.join("placed/two.ply")]);
         assert!(!some.join("placed/three.ply").exists(), "the unmarked fragment gets none");
         assert!(!some.join("assembly_0.ply").exists(), "no merged file unless asked");
@@ -1983,9 +2003,15 @@ mod tests {
             true,
             OPEN3D_COMMENT,
             budget,
+            &count,
         )
         .expect("nothing but the merged file");
         assert_eq!(written, vec![none.join("assembly_0.ply")]);
+        assert_eq!(
+            counted.load(std::sync::atomic::Ordering::Relaxed),
+            3,
+            "the merged file is a mesh file too"
+        );
         assert!(!none.join("placed").exists(), "no empty placed/ directory");
         std::fs::remove_dir_all(&dir).ok();
     }

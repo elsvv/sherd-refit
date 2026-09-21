@@ -206,27 +206,43 @@ fn an_accepted_probable_join_is_placed_at_the_pose_that_was_accepted() {
     );
 }
 
+/// The slab under a reviewer's accepted `pieceA`–`pieceB` join: the match, its fragments and the
+/// reassembly, built once for the three tests that write it out with different output switches.
+///
+/// Once, because each of them would otherwise run the whole match and preprocess the collection a
+/// second time to learn nothing new: the three differ only in what [`session::write_reviewed`] is
+/// asked to write, and none of them touches what is here.
+fn reviewed_slab() -> &'static (MatchState, Vec<sherd_core::fragment::Fragment>, Reassembled) {
+    static REVIEWED: OnceLock<(MatchState, Vec<sherd_core::fragment::Fragment>, Reassembled)> =
+        OnceLock::new();
+    REVIEWED.get_or_init(|| {
+        let params = Params { tiers: Some(Thresholds::default()), ..Params::default() };
+        let (_, path) = slab_run("reviewed", &params);
+        let state = MatchState::load(&path).unwrap();
+        let chosen = *state.candidates.iter().find(|c| c.accepted).unwrap();
+        let m = chosen.transform;
+        let rows: Vec<String> = (0..4)
+            .map(|r| format!("[{:?},{:?},{:?},{:?}]", m[(r, 0)], m[(r, 1)], m[(r, 2)], m[(r, 3)]))
+            .collect();
+        let json = format!(
+            r#"{{"version":1,"must_join":[{{"a":"pieceA","b":"pieceB","pose":[{}]}}]}}"#,
+            rows.join(",")
+        );
+        let frags = fragments(&state.params);
+        let parsed: Constraints = serde_json::from_str(&json).unwrap();
+        let done = session::reassemble(Engine::REFERENCE, &frags, &state, Some(&parsed)).unwrap();
+        (state, frags, done)
+    })
+}
+
 #[test]
 fn a_reviewed_assembly_is_written_by_the_runs_own_writers() {
-    let params = Params { tiers: Some(Thresholds::default()), ..Params::default() };
-    let (_, path) = slab_run("reviewed", &params);
-    let state = MatchState::load(&path).unwrap();
-    let chosen = *state.candidates.iter().find(|c| c.accepted).unwrap();
-    let m = chosen.transform;
-    let rows: Vec<String> = (0..4)
-        .map(|r| format!("[{:?},{:?},{:?},{:?}]", m[(r, 0)], m[(r, 1)], m[(r, 2)], m[(r, 3)]))
-        .collect();
-    let json = format!(
-        r#"{{"version":1,"must_join":[{{"a":"pieceA","b":"pieceB","pose":[{}]}}]}}"#,
-        rows.join(",")
-    );
-    let frags = fragments(&state.params);
-    let parsed: Constraints = serde_json::from_str(&json).unwrap();
-    let done = session::reassemble(Engine::REFERENCE, &frags, &state, Some(&parsed)).unwrap();
+    let (state, frags, done) = reviewed_slab();
+    let frags = frags.as_slice();
 
     let refined = session::refine_poses(
         Engine::REFERENCE,
-        &frags,
+        frags,
         &done.assembly.groups,
         &done.assembly.poses,
         &done.used,
@@ -244,9 +260,8 @@ fn a_reviewed_assembly_is_written_by_the_runs_own_writers() {
         write_meshes: false,
         ..RunOptions::default()
     };
-    let written =
-        session::write_reviewed(&out, &slab(), &frags, &state, &done, &done.poses, &options)
-            .expect("the writers run");
+    let written = session::write_reviewed(&out, &slab(), frags, state, done, &done.poses, &options)
+        .expect("the writers run");
     for file in ["transforms.json", "report.json", "report.md", "transforms.csv", "joins.csv"] {
         assert!(written.iter().any(|p| p.ends_with(file)), "{file} is written");
     }
@@ -288,4 +303,73 @@ fn the_tier_pass_and_the_refinement_report_their_progress() {
         let (_, done, total) = last.unwrap_or_else(|| panic!("`{stage}` reported nothing"));
         assert!(*total > 0 && done == total, "`{stage}` ended at {done} of {total}");
     }
+}
+
+/// What the recorder was told about one stage, in the order it was told.
+fn reports_of<'a>(
+    seen: &'a [(String, usize, usize)],
+    stage: &str,
+) -> Vec<&'a (String, usize, usize)> {
+    seen.iter().filter(|(s, ..)| s == stage).collect()
+}
+
+/// A §3.4's last stage, which milestone 6 needs: an export's minutes go into the mesh files, and
+/// the window cannot draw a bar for a stage nobody reports.
+///
+/// The slab's accepted join places both its fragments, so `write_meshes` writes
+/// `placed/pieceA.ply` and `placed/pieceB.ply`, and `viewer` adds `scene.glb`: three files, one
+/// report each, ending at three of three.
+#[test]
+fn the_writers_report_one_report_per_mesh_file() {
+    let (state, frags, done) = reviewed_slab();
+    let recorder = std::sync::Arc::new(Recorder::default());
+    let out = scratch("output-progress");
+    let options = RunOptions {
+        params: state.params,
+        preview: false,
+        write_meshes: true,
+        viewer: true,
+        watch: Watch { cancel: None, progress: Some(recorder.clone()) },
+        ..RunOptions::default()
+    };
+    let written = session::write_reviewed(&out, &slab(), frags, state, done, &done.poses, &options)
+        .expect("the writers run");
+    for file in ["pieceA.ply", "pieceB.ply", "scene.glb"] {
+        assert!(written.iter().any(|p| p.ends_with(file)), "{file} is written");
+    }
+
+    let seen = recorder.0.lock().unwrap();
+    let output = reports_of(&seen, "output");
+    assert_eq!(output.len(), 3, "one report per mesh file, no more: {output:?}");
+    assert!(output.iter().all(|(_, _, total)| *total == 3), "the total is settled: {output:?}");
+    // The placed meshes are written in parallel, so the reports arrive in whatever order the
+    // threads finished — but each count is reported exactly once, and the last is the last file.
+    let mut counts: Vec<usize> = output.iter().map(|(_, done, _)| *done).collect();
+    let last = *counts.last().expect("three reports");
+    counts.sort_unstable();
+    assert_eq!(counts, [1, 2, 3], "every file moved the count by one: {output:?}");
+    assert_eq!(last, 3, "the stage ends at the file it ends at: `scene.glb`");
+}
+
+/// With no meshes to write there is no stage: a bar over `0` of `0` is worse than no bar, and the
+/// tables and the report are written from what the session already holds.
+#[test]
+fn with_no_meshes_the_output_stage_is_never_reported() {
+    let (state, frags, done) = reviewed_slab();
+    let recorder = std::sync::Arc::new(Recorder::default());
+    let out = scratch("output-progress-tables");
+    let options = RunOptions {
+        params: state.params,
+        preview: false,
+        write_meshes: false,
+        viewer: false,
+        watch: Watch { cancel: None, progress: Some(recorder.clone()) },
+        ..RunOptions::default()
+    };
+    let written = session::write_reviewed(&out, &slab(), frags, state, done, &done.poses, &options)
+        .expect("the writers run");
+    assert!(written.iter().any(|p| p.ends_with("report.md")), "the report is still written");
+    assert!(!out.join("placed").exists(), "and no mesh is");
+    let seen = recorder.0.lock().unwrap();
+    assert!(reports_of(&seen, "output").is_empty(), "nothing to count: {seen:?}");
 }

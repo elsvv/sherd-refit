@@ -1177,19 +1177,48 @@ pub(crate) fn write_outputs(
         review: done.review,
         thickness: done.thickness,
     };
-    if options.write_meshes {
-        let which =
-            if options.placed_all { vec![true; done.names.len()] } else { export.assembled() };
+    // A §3.4 left this stage's progress to the app's export, and this is it. Its unit is a **mesh
+    // file**, because those are the only writes here that read a full-resolution scan back from
+    // disk — on a museum's collection they are the minutes and everything else below is a second
+    // — and `total` is settled before the first of them, so a bar drawn from it never moves
+    // backwards. With no mesh file to write there is no stage at all: `0 of 0` is worse than
+    // silence, and the tables are written from what the run already holds.
+    let which = options.write_meshes.then(|| {
+        if options.placed_all { vec![true; done.names.len()] } else { export.assembled() }
+    });
+    let meshes_total = which.as_ref().map_or(0, |w| {
+        w.iter().filter(|&&w| w).count()
+            + if options.merged_meshes {
+                done.assembly.groups.iter().filter(|g| g.len() > 1).count()
+            } else {
+                0
+            }
+            + usize::from(options.viewer)
+    });
+    let meshes_done = AtomicUsize::new(0);
+    // Called from whichever thread finished a file, `preprocess`-style; nothing but an atomic add
+    // and the caller's callback happens under it.
+    let wrote_mesh = || {
+        if meshes_total > 0 {
+            options.watch.advance(
+                "output",
+                meshes_done.fetch_add(1, Ordering::Relaxed) + 1,
+                meshes_total,
+            );
+        }
+    };
+    if let Some(which) = which.as_ref() {
         written.extend(write_placed_selected(
             out_dir,
             &paths,
             done.names,
             done.poses,
             &done.assembly.groups,
-            &which,
+            which,
             options.merged_meshes,
             crate::io::writer::DEFAULT_COMMENT,
             options.memory,
+            &wrote_mesh,
         )?);
     }
     if options.preview {
@@ -1218,6 +1247,7 @@ pub(crate) fn write_outputs(
             options.viewer_faces,
             options.memory,
         )?;
+        wrote_mesh();
         written.push(scene.path.clone());
         written.push(crate::export::viewer::write_viewer(out_dir, &export, &joins, &scene)?);
     }

@@ -90,21 +90,35 @@ export function sphereOf(object: Object3D): Sphere {
   return new Box3().setFromObject(object).getBoundingSphere(new Sphere());
 }
 
-/** The clear colour, from the palette of `styles.css` — the viewport is dark in both themes. */
-function viewportColour(): Color {
-  const fallback = new Color(VIEWPORT_FALLBACK);
+/**
+ * One colour of the palette of `styles.css` as three.js wants it, or `fallback` when there is no
+ * document, no stylesheet yet, or nothing three.js can read under that name.
+ *
+ * Every colour the two viewers put on the GPU comes through here rather than as a literal, which
+ * is what lets the seam's «плотно / в пределах зазора / дальше» be the same three tokens as the
+ * legend's dots beside it (A §8.3). The tokens differ between the two themes, so whoever calls
+ * this also has to say when it is read again — the stage does it when `data-theme` changed and
+ * never per frame, because reading a custom property costs a style recalculation.
+ */
+export function tokenColour(token: string, fallback: number): Color {
+  const back = new Color(fallback);
   if (typeof document === "undefined") {
-    return fallback;
+    return back;
   }
-  const raw = getComputedStyle(document.documentElement).getPropertyValue("--viewport").trim();
+  const raw = getComputedStyle(document.documentElement).getPropertyValue(token).trim();
   if (raw === "") {
-    return fallback;
+    return back;
   }
   try {
     return new Color(raw);
   } catch {
-    return fallback;
+    return back;
   }
+}
+
+/** The theme the palette is currently in; `""` is the default, light one. */
+export function themeName(): string {
+  return typeof document === "undefined" ? "" : (document.documentElement.dataset.theme ?? "");
 }
 
 /**
@@ -393,12 +407,12 @@ export class Stage {
    * attribute that decides it has actually changed — never on every frame of an orbit.
    */
   private syncClearColour(): void {
-    const theme = document.documentElement.dataset.theme ?? "";
+    const theme = themeName();
     if (theme === this.themeSeen) {
       return;
     }
     this.themeSeen = theme;
-    this.renderer.setClearColor(viewportColour());
+    this.renderer.setClearColor(tokenColour("--viewport", VIEWPORT_FALLBACK));
   }
 
   /**

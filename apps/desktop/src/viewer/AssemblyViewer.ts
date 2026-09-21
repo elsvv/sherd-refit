@@ -3,11 +3,15 @@ import {
   BufferGeometry,
   Color,
   DoubleSide,
+  Float32BufferAttribute,
   Group,
   type Material,
+  Matrix4,
   Mesh,
   MeshStandardMaterial,
   type Object3D,
+  Points,
+  PointsMaterial,
   Raycaster,
   Sphere,
   Vector2,
@@ -17,11 +21,30 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
 
 import type { AssemblyDto } from "../ipc/bindings/AssemblyDto";
+import type { PairDetailDto } from "../ipc/bindings/PairDetailDto";
 import { fragmentColour, groupColour, UNPAIRED_COLOUR } from "./colours";
 import { type Disc, packDiscs } from "./layout";
 import { rowsToMatrix4 } from "./matrix";
+import {
+  contactColour,
+  ghostMatrix,
+  PAIR_A_COLOUR,
+  PAIR_B_COLOUR,
+  SEAM_COLOUR,
+  separationOffset,
+} from "./pair";
 import { principalAxes } from "./principal";
-import { disposeObject, FROM, isMesh, materialsOf, sphereOf, Stage, viewDirection } from "./stage";
+import {
+  disposeObject,
+  FROM,
+  isMesh,
+  materialsOf,
+  sphereOf,
+  Stage,
+  themeName,
+  tokenColour,
+  viewDirection,
+} from "./stage";
 
 /**
  * Picking against 600 000 faces, once and for the whole window (A §7.2). `acceleratedRaycast`
@@ -59,6 +82,19 @@ const SELECT_LIFT = 0.26;
 
 /** How far a pointer may travel between down and up and still count as a click and not an orbit. */
 const CLICK_SLOP = 4;
+
+/**
+ * How big one contact point or one seam voxel is drawn, in CSS pixels, and flat: a seam of five
+ * thousand samples read at arm's length is a texture, and a point that shrinks with distance
+ * turns the far half of it into nothing. Three pixels is the smallest dot that still has a hue.
+ */
+const POINT_SIZE = 3;
+
+/** How much of the fragment under it a ghost lets through (A §7.2: «translucent»). */
+const GHOST_OPACITY = 0.42;
+
+/** The pose of the fragment a pair is shown *in the frame of*: A stands still, B moves (R §0). */
+const IDENTITY = new Matrix4();
 
 /** The fragment the pointer is on, the one that is chosen, or neither. */
 type Emphasis = "none" | "hover" | "select";
@@ -126,6 +162,25 @@ interface GroupNode {
   radius: number;
 }
 
+/** What «Пара» is showing (A §8.3): the two fragments, and the matrix that puts B into A's frame. */
+interface Pair {
+  readonly a: Member;
+  readonly b: Member;
+  /** `p_a = T · p_b`, the candidate's own matrix (R §0). */
+  readonly pose: Matrix4;
+  /** What tells a new pair from the same pair asked for twice — a re-render must not re-frame. */
+  readonly key: string;
+}
+
+/** What the camera was doing before «Пара» took the viewport over, so that leaving gives it back. */
+interface Parked {
+  position: Vector3;
+  up: Vector3;
+  target: Vector3;
+  near: number;
+  far: number;
+}
+
 /** Reusable scratch, so that a hover or a frame allocates nothing. */
 const TMP_BOX = new Box3();
 const TMP_V = new Vector3();
@@ -159,6 +214,34 @@ export class AssemblyViewer {
 
   /** The materials of «Цвет: фрагменты» and «Цвет: группы», one per colour and emphasis. */
   private readonly palette = new Map<string, MeshStandardMaterial>();
+
+  /**
+   * «Пара» (A §8.3), and the node it hangs on. The node never moves, so its frame **is** A's
+   * frame — which is the frame `PairDetail` gives its points in, and why they can be children of
+   * it with no matrix of their own.
+   */
+  private pair: Pair | null = null;
+  private readonly pairNode = new Group();
+  private separation = 0;
+
+  /** The seam over that pair, the two clouds that draw it, and the theme they were coloured for. */
+  private detail: PairDetailDto | null = null;
+  private contactCloud: Points | null = null;
+  private seamCloud: Points | null = null;
+  private detailTheme: string | null = null;
+  /** One material for both clouds: the colours are per vertex, so the size is all they differ in. */
+  private readonly pointMaterial = new PointsMaterial({
+    size: POINT_SIZE,
+    sizeAttenuation: false,
+    vertexColors: true,
+  });
+
+  /** A candidate's partner where the candidate would put it (A §7.2), and what every ghost wears. */
+  private readonly ghostNode = new Group();
+  private ghostMaterial: MeshStandardMaterial | null = null;
+
+  /** Where the camera stood before a pair took the viewport; `null` outside «Пара». */
+  private parked: Parked | null = null;
 
   private assembly: AssemblyDto | null = null;
   private colourMode: ColourMode = "scan";
@@ -203,12 +286,18 @@ export class AssemblyViewer {
     this.stage = new Stage(container, {
       onRender: () => {
         this.placeLabels();
+        this.syncDetailTheme();
       },
       onUserMove: () => {
         this.userMoved = true;
       },
     });
     this.stage.scene.add(this.root);
+    // Both stand at the origin for good: a ghost carries its own world matrix and the pair's
+    // node is A's frame, which is the frame `PairDetail`'s points already come in.
+    this.pairNode.visible = false;
+    this.ghostNode.matrixAutoUpdate = false;
+    this.root.add(this.pairNode, this.ghostNode);
     this.raycaster.firstHitOnly = true;
 
     // The label layer is positioned against the container, so the container has to be a
@@ -320,19 +409,9 @@ export class AssemblyViewer {
 
     for (const member of this.order) {
       member.group = of.get(member.name) ?? -1;
-      member.placed = this.pose(member);
-      const group = this.groups[member.group];
-      if (group === undefined) {
-        this.root.remove(member.holder);
-        member.holder.removeFromParent();
-      } else {
-        group.members.push(member);
-        group.node.add(member.holder);
-      }
-      this.measure(member);
+      this.groups[member.group]?.members.push(member);
     }
-    this.repaint();
-    this.relayout();
+    this.rehang();
   }
 
   /** «Цвет: скан / фрагменты / группы» (`C`). */
@@ -379,6 +458,131 @@ export class AssemblyViewer {
     }
     this.explode = want;
     this.relayout();
+  }
+
+  /**
+   * «Пара» (A §8.3): the two fragments of one candidate alone in the viewport, A at the identity
+   * in grey and B at the candidate's pose in orange — the two colours of the engine's own review
+   * images, so that the screen and `review/<a>__<b>.png` read as one join and not as two.
+   *
+   * Everything else goes away and nothing is reloaded: the two fragments keep the display meshes
+   * the run already put on the GPU and are simply given another matrix and another material,
+   * which is what lets a reviewer walk a queue of thirty-nine pairs without waiting once.
+   *
+   * `null` puts the run back exactly as it was — the layout, the colour mode, what was hidden,
+   * and the camera, which is parked on the way in: a pair is framed on the origin, and coming
+   * back to an assembly spread over a plane at that zoom would look like an empty viewport.
+   *
+   * The pose comes from `candidates.json` over IPC. One that is not four rows of four finite
+   * numbers, or a name the collection does not have, leaves the run on screen rather than
+   * putting a `NaN` into the scene graph.
+   */
+  showPair(pair: { a: string; b: string; pose: number[][] } | null): void {
+    if (pair === null) {
+      this.leavePair();
+      return;
+    }
+    const a = this.members.get(pair.a);
+    const b = this.members.get(pair.b);
+    if (a === undefined || b === undefined || a === b) {
+      this.leavePair();
+      return;
+    }
+    const key = `${pair.a}\u0000${pair.b}\u0000${JSON.stringify(pair.pose)}`;
+    if (this.pair?.key === key) {
+      return;
+    }
+    let pose: Matrix4;
+    try {
+      pose = rowsToMatrix4(pair.pose);
+    } catch {
+      this.leavePair();
+      return;
+    }
+    if (this.pair === null) {
+      this.park();
+    }
+    // A ghost belongs to the assembly it is a ghost against; in «Пара» there is no assembly.
+    this.clearGhost();
+    this.pair = { a, b, pose, key };
+    this.rehang();
+    this.drawDetail();
+    // Every pair is framed, whether or not the user has moved the camera before: the whole of
+    // this screen is «look at this one join», and the next one is somewhere else.
+    this.fit();
+  }
+
+  /**
+   * The seam of the placement on screen (A §8.3): B's fracture samples coloured by R §6.1's own
+   * classes — green under the tight limit, amber under the gap limit, red beyond — and R §6.2's
+   * seam voxels in white, as two point clouds in A's frame.
+   *
+   * A pair whose working mesh has no triangle has no surfaces and so no seam at all
+   * (`sherd_core::review::seam_view`), and an answer may arrive after the reviewer has clicked
+   * the next row: an empty cloud and a seam belonging to another pair are both drawn as nothing,
+   * neither as an error.
+   */
+  setPairDetail(detail: PairDetailDto | null): void {
+    this.detail = detail;
+    this.drawDetail();
+  }
+
+  /** «Разъединить» for a pair, 0…1: B pushed off A along the line between the two centroids. */
+  setPairSeparation(amount: number): void {
+    const want = Number.isFinite(amount) ? Math.min(Math.max(amount, 0), 1) : 0;
+    if (this.separation === want) {
+      return;
+    }
+    this.separation = want;
+    if (this.pair !== null) {
+      this.relayout();
+    }
+  }
+
+  /**
+   * A ghost of `name` where a candidate would put it (A §7.2): the fragment drawn translucent at
+   * `world(anchor) · pose`, or at `world(anchor) · pose⁻¹` when the candidate names the two
+   * fragments the other way round — which is what the inspector's rows show on hover (A §7.3).
+   *
+   * It is a clone of the display mesh and not a second load: the geometry is shared with the
+   * fragment it ghosts and is never this method's to give back. There is no ghost while «Пара»
+   * is on, because there is nothing there for it to be a ghost *against*.
+   */
+  setGhost(ghost: { name: string; anchor: string; pose: number[][]; flip: boolean } | null): void {
+    this.clearGhost();
+    this.stage.invalidate();
+    if (ghost === null || this.pair !== null) {
+      return;
+    }
+    const member = this.members.get(ghost.name);
+    const anchor = this.members.get(ghost.anchor);
+    const object = member?.object ?? null;
+    const on = anchor?.object ?? null;
+    if (anchor === undefined || object === null || on === null || !this.shows(anchor)) {
+      return;
+    }
+    on.updateWorldMatrix(true, false);
+    let where: Matrix4;
+    try {
+      where = ghostMatrix(on.matrixWorld, ghost.pose, ghost.flip);
+    } catch {
+      return; // a candidate's pose is data from outside; no ghost is better than a wrong one
+    }
+    const clone = object.clone();
+    // The GLB's own hierarchy keeps its matrices; only the root's is the run's pose, and the
+    // ghost's place is the node's instead.
+    clone.matrixAutoUpdate = false;
+    clone.matrix.identity();
+    clone.matrixWorldNeedsUpdate = true;
+    const material = this.ghost();
+    clone.traverse((child) => {
+      if (isMesh(child)) {
+        child.material = material;
+      }
+    });
+    this.ghostNode.matrix.copy(where);
+    this.ghostNode.matrixWorldNeedsUpdate = true;
+    this.ghostNode.add(clone);
   }
 
   /** The chosen fragment, from the tree or from a click in the viewport. */
@@ -467,12 +671,22 @@ export class AssemblyViewer {
       material.dispose();
     }
     this.palette.clear();
+    this.pointMaterial.dispose();
+    this.ghostMaterial?.dispose();
+    this.ghostMaterial = null;
     this.labelLayer.remove();
     this.stage.dispose();
   }
 
   /** Everything one load put in the scene, out of it and off the GPU. */
   private clear(): void {
+    // Before the geometries go: a ghost is a clone that shares them, and one left hanging would
+    // be drawn out of buffers the driver has already been given back.
+    this.clearGhost();
+    this.releasePoints();
+    this.pair = null;
+    this.detail = null;
+    this.parked = null;
     for (const member of this.order) {
       this.release(member);
       member.holder.removeFromParent();
@@ -486,6 +700,87 @@ export class AssemblyViewer {
     this.owner.clear();
     this.arrived = 0;
     this.hovered = null;
+  }
+
+  /** Whether a fragment is one of the two «Пара» is showing. */
+  private inPair(member: Member): boolean {
+    return this.pair !== null && (member === this.pair.a || member === this.pair.b);
+  }
+
+  /**
+   * Who hangs under what, given the pair: the two fragments of «Пара» under its node, everything
+   * else under its group's, and a fragment the assembly gave no group to under nothing at all.
+   *
+   * `Object3D.add` takes a child off its previous parent, so this is also what moves a fragment
+   * out of a group and back into it.
+   */
+  private reparent(): void {
+    for (const member of this.order) {
+      if (this.inPair(member)) {
+        this.pairNode.add(member.holder);
+        continue;
+      }
+      const group = this.groups[member.group];
+      if (group === undefined) {
+        member.holder.removeFromParent();
+      } else {
+        group.node.add(member.holder);
+      }
+    }
+  }
+
+  /**
+   * After the assembly or the pair changed: where every fragment hangs, what matrix it wears,
+   * how big it is, what colour it is, and where the whole lot stands. The order matters — a box
+   * is measured through the parents a fragment has *now*, so the reparenting comes first.
+   */
+  private rehang(): void {
+    this.reparent();
+    for (const member of this.order) {
+      member.placed = this.pose(member);
+      this.measure(member);
+    }
+    this.repaint();
+    this.relayout();
+  }
+
+  /** Back out of «Пара» to the run, camera and all. */
+  private leavePair(): void {
+    if (this.pair === null) {
+      return;
+    }
+    this.pair = null;
+    this.rehang();
+    this.drawDetail();
+    this.unpark();
+  }
+
+  /** Remembers where the camera is, so that leaving «Пара» is not a new view of the assembly. */
+  private park(): void {
+    this.parked = {
+      position: this.stage.camera.position.clone(),
+      up: this.stage.camera.up.clone(),
+      target: this.stage.controls.target.clone(),
+      near: this.stage.camera.near,
+      far: this.stage.camera.far,
+    };
+  }
+
+  /** And puts it back. */
+  private unpark(): void {
+    const parked = this.parked;
+    this.parked = null;
+    if (parked === null) {
+      return;
+    }
+    this.stage.camera.position.copy(parked.position);
+    this.stage.camera.up.copy(parked.up);
+    this.stage.camera.near = parked.near;
+    this.stage.camera.far = parked.far;
+    this.stage.camera.updateProjectionMatrix();
+    this.stage.controls.target.copy(parked.target);
+    this.stage.controls.update();
+    this.stage.invalidate();
   }
 
   /**
@@ -544,8 +839,9 @@ export class AssemblyViewer {
     this.relayout();
     // The view widens as the collection arrives, so that the first sherd in is not a close-up
     // with the other hundred and fifty outside the frame for the next few seconds. The moment
-    // the user touches the controls this stops: nothing moves a camera a person is holding.
-    if (!this.userMoved) {
+    // the user touches the controls this stops: nothing moves a camera a person is holding —
+    // except in «Пара», where the two fragments *are* the screen and one of them just arrived.
+    if (!this.userMoved || this.inPair(member)) {
       this.fit();
     }
   }
@@ -557,6 +853,18 @@ export class AssemblyViewer {
    * with it; the poses come from `assembly.json` and are data from outside.
    */
   private pose(member: Member): boolean {
+    // «Пара» overrides the run for its two fragments and for nothing else (A §8.3): A stands at
+    // the identity, which makes the scene's frame A's frame, and B wears the candidate's matrix.
+    const pair = this.pair;
+    if (pair !== null && (member === pair.a || member === pair.b)) {
+      if (member.object === null) {
+        return true;
+      }
+      member.object.matrixAutoUpdate = false;
+      member.object.matrix.copy(member === pair.a ? IDENTITY : pair.pose);
+      member.object.matrixWorldNeedsUpdate = true;
+      return true;
+    }
     const rows = this.assembly?.poses[member.name];
     if (rows === undefined || member.object === null) {
       return rows !== undefined;
@@ -586,22 +894,26 @@ export class AssemblyViewer {
     if (world.isEmpty()) {
       return;
     }
-    const parent = this.groups[member.group];
-    TMP_V.copy(member.holder.position);
-    if (parent !== undefined) {
-      TMP_V.add(parent.node.position);
+    member.box.copy(world).translate(this.offset(member, TMP_V).negate());
+  }
+
+  /**
+   * How far the two pure translations above a fragment have carried it: its own «Разъединить»
+   * push and its group's place on the plane. «Пара»'s node never moves, so a fragment under it
+   * carries only its own push — which is the whole of the separation slider.
+   */
+  private offset(member: Member, into: Vector3): Vector3 {
+    into.copy(member.holder.position);
+    if (this.inPair(member)) {
+      return into;
     }
-    member.box.copy(world).translate(TMP_V.negate());
+    const parent = this.groups[member.group];
+    return parent === undefined ? into : into.add(parent.node.position);
   }
 
   /** A fragment's box where the world sees it now. */
   private worldBox(member: Member, into: Box3): Box3 {
-    TMP_V.copy(member.holder.position);
-    const parent = this.groups[member.group];
-    if (parent !== undefined) {
-      TMP_V.add(parent.node.position);
-    }
-    return into.copy(member.box).translate(TMP_V);
+    return into.copy(member.box).translate(this.offset(member, TMP_V));
   }
 
   /**
@@ -610,6 +922,12 @@ export class AssemblyViewer {
    * where `packDiscs` puts the groups it ends up making.
    */
   private relayout(): void {
+    const pair = this.pair;
+    if (pair !== null) {
+      this.layoutPair(pair);
+      return;
+    }
+    this.pairNode.visible = false;
     // What is visible at all, first: a hidden group takes no space on the plane.
     for (const [index, group] of this.groups.entries()) {
       group.node.visible =
@@ -678,6 +996,33 @@ export class AssemblyViewer {
     this.stage.invalidate();
   }
 
+  /**
+   * The same for «Пара» (A §8.3), where there is no plane to pack: the groups go dark, the two
+   * fragments stand in the candidate's own arrangement, and «Разъединить» pushes B off A along
+   * the line between their centroids — the only thing the slider does here, since a pair is not
+   * a group being opened up but two pieces being taken apart.
+   */
+  private layoutPair(pair: Pair): void {
+    this.pairNode.visible = true;
+    for (const group of this.groups) {
+      group.node.visible = false;
+    }
+    for (const member of this.order) {
+      member.holder.position.set(0, 0, 0);
+      member.holder.visible = this.inPair(member) && member.object !== null && member.placed;
+    }
+    if (this.separation > 0 && !pair.a.box.isEmpty() && !pair.b.box.isEmpty()) {
+      // How far a full slider pushes: the radius of the larger of the two pieces — the same
+      // scale «Разъединить» uses over a group, so the two sliders of the app feel like one.
+      const radius = (box: Box3): number => box.getBoundingSphere(new Sphere()).radius;
+      const span = Math.max(radius(pair.a.box), radius(pair.b.box));
+      const from = pair.a.box.getCenter(new Vector3());
+      const to = pair.b.box.getCenter(new Vector3());
+      pair.b.holder.position.copy(separationOffset(from, to, span, this.separation));
+    }
+    this.stage.invalidate();
+  }
+
   /** What every fragment is wearing, from scratch — a colour mode or a new assembly changed it. */
   private repaint(): void {
     for (const member of this.order) {
@@ -702,6 +1047,16 @@ export class AssemblyViewer {
    */
   private paint(member: Member): void {
     const lift = LIFT[this.emphasisOf(member)];
+    // «Пара» is not a fourth colour mode but the review images' own two colours, and it wins
+    // over whichever mode the «Сборка» screen was left in (A §8.3).
+    const pair = this.pair;
+    if (pair !== null && (member === pair.a || member === pair.b)) {
+      const material = this.shared(member === pair.a ? PAIR_A_COLOUR : PAIR_B_COLOUR, lift);
+      for (const skin of member.skins) {
+        skin.mesh.material = material;
+      }
+      return;
+    }
     if (this.colourMode === "scan") {
       for (const skin of member.skins) {
         skin.mesh.material = skin.scan;
@@ -758,7 +1113,125 @@ export class AssemblyViewer {
 
   /** Whether a fragment is on screen at all: its group is shown, and it has a mesh and a pose. */
   private shows(member: Member): boolean {
-    return member.holder.visible && (this.groups[member.group]?.node.visible ?? false);
+    if (!member.holder.visible) {
+      return false;
+    }
+    return this.inPair(member) ? this.pairNode.visible : (this.groups[member.group]?.node.visible ?? false);
+  }
+
+  /**
+   * The seam over the pair on screen (A §8.3), rebuilt from scratch: two clouds of a few
+   * thousand points each are cheaper to make again than to diff, and they change only when the
+   * reviewer picks another row or the palette changes under them.
+   *
+   * A seam that names another pair is dropped rather than drawn. `PairDetail` is answered
+   * asynchronously by the session, and a reviewer walking the queue with `A` and `X` will have
+   * moved on by the time a slow one lands; the wrong seam on the right pair is the one mistake
+   * on this screen a person cannot see.
+   */
+  private drawDetail(): void {
+    this.releasePoints();
+    // Before the early returns: a seam that has just been taken off the screen is a change, and
+    // a viewer that draws on demand has to be told about it as much as about one that arrived.
+    this.stage.invalidate();
+    const pair = this.pair;
+    const detail = this.detail;
+    if (pair === null || detail === null || detail.a !== pair.a.name || detail.b !== pair.b.name) {
+      return;
+    }
+    this.detailTheme = themeName();
+    const cache = new Map<string, Color>();
+    const of = (token: string, fallback: number): Color => {
+      const known = cache.get(token);
+      if (known !== undefined) {
+        return known;
+      }
+      const colour = tokenColour(token, fallback);
+      cache.set(token, colour);
+      return colour;
+    };
+    this.contactCloud = this.cloud(detail.contact, (index) => {
+      const row = contactColour(detail.contact_class[index] ?? Number.NaN);
+      return of(row.token, row.fallback);
+    });
+    const white = new Color(SEAM_COLOUR);
+    this.seamCloud = this.cloud(detail.seam, () => white);
+  }
+
+  /**
+   * One cloud of points in A's frame. Everything here came over IPC as `f32` triples: a triple
+   * that is not three finite numbers is left out rather than written into the buffer, where one
+   * `NaN` would take the whole cloud's bounding sphere — and with it the framing — with it.
+   */
+  private cloud(points: readonly (readonly number[])[], colourAt: (index: number) => Color): Points | null {
+    const xyz: number[] = [];
+    const rgb: number[] = [];
+    points.forEach((point, index) => {
+      const [x, y, z] = point;
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+        return;
+      }
+      const colour = colourAt(index);
+      xyz.push(x ?? 0, y ?? 0, z ?? 0);
+      rgb.push(colour.r, colour.g, colour.b);
+    });
+    if (xyz.length === 0) {
+      return null;
+    }
+    const geometry = new BufferGeometry();
+    geometry.setAttribute("position", new Float32BufferAttribute(xyz, 3));
+    geometry.setAttribute("color", new Float32BufferAttribute(rgb, 3));
+    const cloud = new Points(geometry, this.pointMaterial);
+    // The pair's node stands at the origin and never moves, so it *is* A's frame — which is the
+    // frame `sherd_core::review::seam_view` gives these points in. No matrix of their own.
+    this.pairNode.add(cloud);
+    return cloud;
+  }
+
+  /** The two clouds' geometries back to the GPU; the material they wear is the viewer's own. */
+  private releasePoints(): void {
+    for (const cloud of [this.contactCloud, this.seamCloud]) {
+      if (cloud !== null) {
+        cloud.removeFromParent();
+        cloud.geometry.dispose();
+      }
+    }
+    this.contactCloud = null;
+    this.seamCloud = null;
+    this.detailTheme = null;
+  }
+
+  /**
+   * The three contact colours are tokens of `styles.css` and the two themes give them different
+   * values, so a theme switched with a pair on screen has to be caught. Same rule as the stage's
+   * clear colour: only when the attribute that decides it changed, never per frame.
+   */
+  private syncDetailTheme(): void {
+    if (this.detailTheme !== null && this.detailTheme !== themeName()) {
+      this.drawDetail();
+    }
+  }
+
+  /** A ghost's clone off the scene. It shares the fragment's geometry — nothing here is its own. */
+  private clearGhost(): void {
+    this.ghostNode.clear();
+  }
+
+  /**
+   * What every ghost wears: B's orange of the review images, translucent and writing no depth,
+   * so that the fragment it is proposed against reads through it rather than fighting it.
+   */
+  private ghost(): MeshStandardMaterial {
+    this.ghostMaterial ??= new MeshStandardMaterial({
+      color: new Color(PAIR_B_COLOUR),
+      roughness: 0.9,
+      metalness: 0,
+      side: DoubleSide,
+      transparent: true,
+      opacity: GHOST_OPACITY,
+      depthWrite: false,
+    });
+    return this.ghostMaterial;
   }
 
   /**

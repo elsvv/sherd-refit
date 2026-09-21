@@ -28,11 +28,20 @@ export interface AssemblyState {
   candidates: CandidateRow[];
   /** Whether the two files are on their way. */
   loading: boolean;
-  /** A refusal that is not «this run has no such file». */
+  /**
+   * A refusal that is not «this run has no such file». Read by [`Frame`], which puts it in A §10's
+   * danger banner, and by the «Сборка» centre, which must not offer «Здесь появится сборка» over
+   * a run that assembled something the window could not read.
+   */
   error: CommandError | null;
 
   /** Reads a run's two files. The last call wins, however the earlier ones finish. */
   load(runId: string): Promise<void>;
+  /**
+   * Puts the banner away without touching the run (A §10: a `CommandError` is the one thing the
+   * user may dismiss). The next [`load`] clears it again on its own.
+   */
+  dismissError(): void;
   /** Back to no run shown — the workspace was closed, or the selection was cleared. */
   clear(): void;
 }
@@ -92,6 +101,10 @@ export const useAssembly = create<AssemblyState>()((set) => {
         loading: false,
         error: assembly.error ?? candidates.error,
       });
+    },
+
+    dismissError: () => {
+      set({ error: null });
     },
 
     clear: () => {

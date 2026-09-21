@@ -16,6 +16,7 @@ import AssemblyRight from "../modes/assembly/AssemblyRight";
 import InputCentre from "../modes/input/InputCentre";
 import InputLeft from "../modes/input/InputLeft";
 import InputRight from "../modes/input/InputRight";
+import { useAssembly } from "../state/assembly";
 import { useJobs } from "../state/jobs";
 import type { Status } from "../state/status";
 import { deriveStatus } from "../state/status";
@@ -151,6 +152,7 @@ export default function Frame({ view }: { view: WorkspaceView }) {
   const logOpen = useUi((state) => state.logOpen);
   const selectedRunId = useWorkspace((state) => state.selectedRunId);
   const error = useWorkspace((state) => state.error);
+  const runError = useAssembly((state) => state.error);
   const lastFailure = useJobs((state) => state.lastFailure);
 
   // What the launch sheet should open with, over the last run's own sheet; `null` is «closed».
@@ -262,6 +264,26 @@ export default function Frame({ view }: { view: WorkspaceView }) {
       detail: error.message,
       onDismiss: () => {
         useWorkspace.getState().setError(null);
+      },
+    });
+  }
+  // A §10: a run whose `assembly.json` or `candidates.json` is there but will not be read — a
+  // half-written file, a workspace closed under the load — is a refusal, and without saying it
+  // the window would draw a run that assembled twelve fragments as one that assembled nothing,
+  // or a fragment with eleven scored joins as one with none. A file a run never wrote is not
+  // this: [`useAssembly`] turns that (kind `io`) into no error at all.
+  //
+  // Here and not only in the «Сборка» centre, because either of the two files can be the one
+  // that failed and the other can have arrived: a run drawn in 3D with its candidates missing
+  // has nothing empty on the screen to hang the sentence on. The wording is the run's own and
+  // not `error.<kind>`'s, whose `json` says «the workspace file», which this is not.
+  if (runError !== null) {
+    banners.push({
+      tone: "danger",
+      text: t("banner.run_unreadable"),
+      detail: runError.message,
+      onDismiss: () => {
+        useAssembly.getState().dismissError();
       },
     });
   }

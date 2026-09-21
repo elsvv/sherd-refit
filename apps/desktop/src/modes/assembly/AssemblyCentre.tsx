@@ -42,6 +42,7 @@ export default function AssemblyCentre({ view }: { view: WorkspaceView }) {
   const assembly = useAssembly((state) => state.assembly);
   const runId = useAssembly((state) => state.runId);
   const loading = useAssembly((state) => state.loading);
+  const error = useAssembly((state) => state.error);
 
   const colour = useUi((state) => state.assemblyColour);
   const layout = useUi((state) => state.assemblyLayout);
@@ -101,9 +102,14 @@ export default function AssemblyCentre({ view }: { view: WorkspaceView }) {
   }, [assembly, view.fragments, view.fragments_dir]);
 
   if (assembly === null) {
+    // «Здесь появится сборка» is the empty room of a run that assembled nothing (A §4), and a
+    // run whose `assembly.json` would not be read is not that: saying it here would tell the
+    // user their fragments did not fit. The reason and the file's own words are the banner's
+    // (A §10); this line only has to stop lying.
+    const nothing = error === null ? t("assembly.will_appear") : t("assembly.unreadable");
     return (
       <div className="flex h-full w-full items-center justify-center px-6 text-center text-xs text-viewport-text">
-        {loading ? t("assembly.reading") : t("assembly.will_appear")}
+        {loading ? t("assembly.reading") : nothing}
       </div>
     );
   }

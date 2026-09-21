@@ -127,6 +127,7 @@ function SectionRow({
 export default function AssemblyLeft() {
   const { t } = useTranslation();
   const assembly = useAssembly((state) => state.assembly);
+  const error = useAssembly((state) => state.error);
   const query = useUi((state) => state.assemblyQuery);
   const open = useUi((state) => state.assemblyOpen);
   const hidden = useUi((state) => state.assemblyHidden);
@@ -212,8 +213,16 @@ export default function AssemblyLeft() {
         className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-1 py-1"
       >
         {rows.length === 0 ? (
+          // Three emptinesses, and they are not the same: nothing assembled yet, nothing that
+          // the search matches, and a file that would not be read — the last of which the
+          // centre and A §10's banner also say, and this pane must not contradict them with
+          // «Здесь появится сборка».
           <p className="px-1 py-2 text-[11px] text-muted">
-            {assembly === null ? t("assembly.will_appear") : t("assembly.nothing_matches")}
+            {assembly !== null
+              ? t("assembly.nothing_matches")
+              : error === null
+                ? t("assembly.will_appear")
+                : t("assembly.unreadable")}
           </p>
         ) : (
           <div className="relative w-full" style={{ height: `${String(virtualizer.getTotalSize())}px` }}>

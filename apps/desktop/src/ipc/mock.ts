@@ -652,6 +652,24 @@ function unwritten(runId: string, file: string): Promise<never> {
   return refuse("io", `${WORKSPACE_PATH}/runs/${runId}/${file}: файл не найден`);
 }
 
+/**
+ * The other refusal a run's file can give: it is there and it will not parse (`{ kind: "json" }`),
+ * which A §10 makes a banner rather than «nothing to draw».
+ *
+ * Asked for with `?corrupt=assembly`, `?corrupt=candidates` or `?corrupt=both` on the dev URL,
+ * because no amount of clicking reaches a half-written file — and the state has a screen of its
+ * own, which `tools/look.mjs` has to be able to open.
+ */
+function corrupted(runId: string, file: string): Promise<never> {
+  return refuse("json", `${WORKSPACE_PATH}/runs/${runId}/${file}: EOF while parsing an object at line 84 column 3`);
+}
+
+/** Whether `?corrupt=` names `file` (or `both`). */
+function isCorrupt(file: "assembly" | "candidates"): boolean {
+  const asked = new URLSearchParams(window.location.search).get("corrupt");
+  return asked === file || asked === "both";
+}
+
 /** A few lines of `tracing`, with the `WARN` and `ERROR` tokens A §10's level filter looks for. */
 function engineLog(run: RunFile | null): string {
   const id = run?.id ?? "prepare";
@@ -802,12 +820,18 @@ export const mockApi: Api = {
 
   runAssembly: (runId) => {
     const run = runOf(runId);
-    return run?.status.state === "done" ? Promise.resolve(ASSEMBLY) : unwritten(runId, "assembly.json");
+    if (run?.status.state !== "done") {
+      return unwritten(runId, "assembly.json");
+    }
+    return isCorrupt("assembly") ? corrupted(runId, "assembly.json") : Promise.resolve(ASSEMBLY);
   },
 
   runCandidates: (runId) => {
     const run = runOf(runId);
-    return run?.status.state === "done" ? Promise.resolve(CANDIDATES) : unwritten(runId, "candidates.json");
+    if (run?.status.state !== "done") {
+      return unwritten(runId, "candidates.json");
+    }
+    return isCorrupt("candidates") ? corrupted(runId, "candidates.json") : Promise.resolve(CANDIDATES);
   },
 
   runLog: (runId, maxLines) => {

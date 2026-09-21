@@ -312,6 +312,7 @@
     "stale_included_one": "{{count}} brought back",
     "stale_included_other": "{{count}} brought back",
     "job_failed": "Preparation failed.",
+    "run_unreadable": "This run's files cannot be read.",
     "dismiss": "Dismiss"
   },
   "drop": {
@@ -342,6 +343,7 @@
     "show_one": "Show this one alone",
     "nothing_matches": "Nothing matches this search",
     "will_appear": "The assembly will appear here",
+    "unreadable": "This run's assembly could not be read",
     "reading": "Reading the assembly…",
     "previous": "the previous assembly",
     "toolbar": "What to show",

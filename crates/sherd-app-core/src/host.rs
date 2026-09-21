@@ -99,13 +99,45 @@ impl Canceller {
     /// work and says `Failed` with [`FailKind::Cancelled`]; a worker already gone is not an error
     /// — its exit is what [`Worker::next`] will report anyway.
     pub fn cancel(&self) {
-        let Ok(mut pipe) = self.stdin.lock() else { return };
-        let Some(stdin) = pipe.as_mut() else { return };
-        // Through serde, so the request the host writes and the one the worker parses cannot
-        // drift apart.
-        let Ok(line) = serde_json::to_string(&Request::Cancel) else { return };
-        let _ = writeln!(stdin, "{line}").and_then(|()| stdin.flush());
+        let _ = write_request(&self.stdin, &Request::Cancel);
     }
+}
+
+/// Everything else a window may say to a job that is already running (A §2.2): a review session's
+/// `Reassemble`, `PairDetail`, `Refine` and `Close`.
+///
+/// The same pipe and the same reason as [`Canceller`] — [`drive`] owns the worker for the whole
+/// session, so the thread that has a question cannot reach it — with one difference: a cancel
+/// that arrives too late has simply happened anyway, while a question the worker never heard has
+/// an answer the window is still waiting for. This one therefore says whether the line went out.
+#[derive(Clone, Debug)]
+pub struct Requester {
+    stdin: Pipe,
+}
+
+impl Requester {
+    /// Sends one request.
+    ///
+    /// # Errors
+    ///
+    /// [`AppError::Worker`] when the worker is over, its pipe is gone, or the line cannot be
+    /// written — the three ways a session stops being able to answer.
+    pub fn send(&self, request: &Request) -> Result<()> {
+        write_request(&self.stdin, request)
+    }
+}
+
+/// One request down the worker's stdin, through serde, so that the line the host writes and the
+/// one the worker parses cannot drift apart.
+fn write_request(pipe: &Pipe, request: &Request) -> Result<()> {
+    let gone = || AppError::Worker("the engine process is not listening".to_owned());
+    let mut pipe = pipe.lock().map_err(|_| gone())?;
+    let stdin = pipe.as_mut().ok_or_else(gone)?;
+    let line = serde_json::to_string(request)
+        .map_err(|e| AppError::Worker(format!("the request does not serialise: {e}")))?;
+    writeln!(stdin, "{line}")
+        .and_then(|()| stdin.flush())
+        .map_err(|e| AppError::Worker(format!("the request could not be sent: {e}")))
 }
 
 impl Worker {
@@ -203,6 +235,14 @@ impl Worker {
     /// the worker's life does not hold the pipe open — dropping the worker closes it either way.
     pub fn canceller(&self) -> Canceller {
         Canceller { stdin: Arc::clone(&self.stdin) }
+    }
+
+    /// A handle that asks this worker questions, for the thread that will not be holding it.
+    ///
+    /// Take it before handing the worker to [`drive`], for the same reason [`Worker::canceller`]
+    /// is taken then: a review session is driven on one thread and clicked on another (A §8).
+    pub fn requester(&self) -> Requester {
+        Requester { stdin: Arc::clone(&self.stdin) }
     }
 
     /// Asks the job to stop (A §2.2), for a caller that still holds the worker — before
@@ -475,14 +515,18 @@ fn append(log: Option<&Mutex<std::fs::File>>, line: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::Canceller;
+    use super::{Canceller, Requester};
 
     /// A §2.2: «Отменить» is pressed while [`super::drive`] holds the worker, so the handle has to
     /// outlive that borrow and cross to the window's own thread. Nothing else about the cancel is
     /// testable without a process — `tests/worker_e2e.rs` does that part.
+    ///
+    /// A review session's questions come from the same place and go down the same pipe (A §8),
+    /// so its handle has to travel exactly as far.
     #[test]
     fn a_cancel_handle_leaves_the_thread_that_drives_the_run() {
         const fn goes_anywhere<T: Clone + Send + Sync + 'static>() {}
         goes_anywhere::<Canceller>();
+        goes_anywhere::<Requester>();
     }
 }

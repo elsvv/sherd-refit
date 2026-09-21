@@ -18,6 +18,7 @@ use sherd_core::pipeline::RunOptions;
 use sherd_core::report::FragmentStats;
 use sherd_core::tiers::{Evidence, Thresholds, Tier};
 
+pub use crate::decisions::{Decision, DecisionsFile};
 pub use crate::run::{EngineInfo, FailKind, RunCounts, StageTime};
 
 /// The protocol this build speaks. A window that reads another number fails the job with
@@ -44,6 +45,9 @@ pub enum Job {
     Prepare(PrepareJob),
     /// One run of the pipeline into `runs/<run_id>/` (A §7).
     Run(RunJob),
+    /// A review session over a finished run (A §8): the fragments and the saved match loaded
+    /// once, then [`Request`]s answered until the window says [`Request::Close`].
+    Review(ReviewJob),
 }
 
 /// The `Prepare` job's sheet.
@@ -82,12 +86,66 @@ pub struct RunJob {
     pub constraints: Option<Constraints>,
 }
 
+/// The `Review` job's sheet (A §8.4). A session, not a run: nothing new is matched and nothing is
+/// written into the run's folder — the worker answers questions about a match that already exists.
+///
+/// It carries the same four preprocessing numbers a [`PrepareJob`] does, because a session that
+/// finds a fragment missing from `cache/` preprocesses it exactly as a run would, and a working
+/// mesh built at another face budget or another seed is not the one the match was made on.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReviewJob {
+    /// The workspace folder; the run's own folder is `runs/<run_id>/` under it.
+    pub workspace: PathBuf,
+    /// The input folder, resolved by the host.
+    pub input: PathBuf,
+    /// The run being reviewed — the folder [`crate::worker::MATCH_STATE_FILE`] is read from.
+    pub run_id: String,
+    /// Scans the workspace leaves out.
+    pub excluded: BTreeSet<String>,
+    /// Faces of the working mesh, as the run used.
+    pub target_faces: usize,
+    /// R §10's seed, as the run used.
+    pub seed: u64,
+    /// The memory budget in gigabytes, or `None` for [`sherd_core::memory::Budget`]'s own guess.
+    pub memory_gb: Option<f64>,
+    /// Worker threads; 0 is rayon's default.
+    pub workers: usize,
+}
+
 /// What the window can say to a worker that is already on a job.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Everything but [`Request::Cancel`] belongs to a review session (A §8): a `Prepare` and a `Run`
+/// read their input once and answer nothing else. Not `Eq`, because a decision carries a pose.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
 pub enum Request {
     /// Raise D §5's flag. The job ends at its next unit of work.
     Cancel,
+    /// R §8 again under these decisions (A §8.2), without matching a pair. Answered with
+    /// [`Event::Assembly`], preceded by [`Event::Dropped`] when a decision names a fragment the
+    /// collection no longer has.
+    Reassemble {
+        /// The decisions as they stand — the whole list, because the window owns undo and redo.
+        decisions: DecisionsFile,
+    },
+    /// The seam of one placement, measured but not drawn (A §2.2). Answered with
+    /// [`Event::PairDetail`].
+    PairDetail {
+        /// The fragment the pose maps *into*.
+        a: String,
+        /// The fragment the pose moves.
+        b: String,
+        /// `T`: `p_a = T · p_b`, row-major — the same matrix a [`CandidateRow`] carries.
+        pose: [[f64; 4]; 4],
+    },
+    /// R §9 over the groups these decisions left unrefined (A §8.4). Answered with
+    /// [`Event::Assembly`], in which every group of two or more is `refined`.
+    Refine {
+        /// The decisions the assembly to refine is built from.
+        decisions: DecisionsFile,
+    },
+    /// The session is over: the worker answers [`Event::Done`] and exits.
+    Close,
 }
 
 /// The launch sheet's executor (A §7.4), which is `sherd_core::Backend` with serde on it — the
@@ -252,8 +310,33 @@ pub enum Event {
     },
     /// One fragment of a `Prepare` is preprocessed and its display mesh is written (A §5).
     FragmentReady(FragmentInfo),
-    /// What was assembled, as the window draws it (A §8).
+    /// A review session has the collection and the match in memory and will answer requests
+    /// (A §8): the window may open the screen. Said once, by [`Job::Review`] and nothing else.
+    Ready {
+        /// Fragments loaded.
+        fragments: usize,
+        /// Candidates the saved match holds.
+        candidates: usize,
+    },
+    /// What was assembled, as the window draws it (A §8). A run says it once, at its end; a
+    /// review session says it again for every `Reassemble` and every `Refine`.
     Assembly(AssemblyDto),
+    /// The seam of the placement a `PairDetail` asked about (A §8.3).
+    PairDetail(PairDetailDto),
+    /// Decisions a `Reassemble` could not carry, because a fragment they name is not in the
+    /// collection any more (A §8.5). Said before the [`Event::Assembly`] that ignores them, so
+    /// that the window can tell the reviewer what was quietly left out.
+    Dropped {
+        /// The decisions that were not applied, as they stand in the file.
+        decisions: Vec<Decision>,
+    },
+    /// One request of a session could not be answered — a pose that is not rigid, a pair the
+    /// collection does not have. The session stays open: the next request is still served, which
+    /// is what tells this apart from [`Event::Failed`].
+    RequestFailed {
+        /// Why, in the engine's words.
+        message: String,
+    },
     /// The job is over and it went well. The three blocks are a run's; `Info` fills none of them.
     Done {
         /// What the run found.
@@ -395,6 +478,32 @@ pub struct UnplacedDto {
     pub reason: String,
 }
 
+/// The seam of one placement, as the «Ревью» screen draws it (A §2.2's `PairDetail`, A §8.3):
+/// [`sherd_core::review::SeamView`] on the wire.
+///
+/// `f32` triples and not `f64`: every number here goes straight into a `THREE.BufferAttribute`,
+/// which is `Float32Array`, and B's fracture samples are five thousand points — half the JSON for
+/// the same picture. The two limits stay `f64` because they are printed, not drawn.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PairDetailDto {
+    /// The fragment the pose maps into, drawn at the identity.
+    pub a: String,
+    /// The fragment the pose moves.
+    pub b: String,
+    /// B's fracture samples at the pose, in A's frame (R §3.5.2).
+    pub contact: Vec<[f32; 3]>,
+    /// One class per contact point: 0 under the tight limit, 1 under the gap limit, 2 beyond
+    /// (R §6.1, R §6.5) — the green, yellow and red of the engine's own review images.
+    pub contact_class: Vec<u8>,
+    /// Centres of R §6.2's seam voxels, in A's frame.
+    pub seam: Vec<[f32; 3]>,
+    /// The pair's tight limit, in the meshes' own length unit (R §1.2).
+    pub tight: f64,
+    /// The pair's gap limit, in the same unit.
+    pub gap: f64,
+}
+
 /// One row of `candidates.json` (A §4), the index the review screen works from: a row carries
 /// everything A §8.3 puts on the screen for one candidate, so that opening a join reads a few
 /// hundred kilobytes and never the 54 000 rows of `report.json`.
@@ -445,6 +554,62 @@ mod tests {
             r#"{"event":"progress","stage":"matching","done":7,"total":190}"#
         );
         assert_eq!(serde_json::to_string(&Request::Cancel).unwrap(), r#"{"request":"cancel"}"#);
+    }
+
+    /// A §2.2: a review session's requests and answers cross the same pipe as everything else —
+    /// one tagged line each, and each one readable back into the value it was written from.
+    #[test]
+    fn a_review_sessions_requests_and_events_are_one_tagged_line_each() {
+        let round = |request: &Request| {
+            let line = serde_json::to_string(request).unwrap();
+            assert_eq!(&serde_json::from_str::<Request>(&line).unwrap(), request);
+            line
+        };
+        let pose = [
+            [1.0, 0.0, 0.0, 0.5],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        assert_eq!(
+            round(&Request::PairDetail { a: "pieceA".into(), b: "pieceB".into(), pose }),
+            r#"{"request":"pair_detail","a":"pieceA","b":"pieceB","pose":[[1.0,0.0,0.0,0.5],[0.0,1.0,0.0,0.0],[0.0,0.0,1.0,0.0],[0.0,0.0,0.0,1.0]]}"#
+        );
+        assert_eq!(
+            round(&Request::Reassemble { decisions: DecisionsFile::default() }),
+            r#"{"request":"reassemble","decisions":{"version":1,"decisions":[]}}"#
+        );
+        assert_eq!(
+            round(&Request::Refine { decisions: DecisionsFile::default() }),
+            r#"{"request":"refine","decisions":{"version":1,"decisions":[]}}"#
+        );
+        assert_eq!(round(&Request::Close), r#"{"request":"close"}"#);
+
+        let ready = Event::Ready { fragments: 155, candidates: 54_000 };
+        let line = serde_json::to_string(&ready).unwrap();
+        assert_eq!(line, r#"{"event":"ready","fragments":155,"candidates":54000}"#);
+        assert_eq!(serde_json::from_str::<Event>(&line).unwrap(), ready);
+        let detail = Event::PairDetail(PairDetailDto {
+            a: "pieceA".into(),
+            b: "pieceB".into(),
+            contact: vec![[1.0, 2.0, 3.0]],
+            contact_class: vec![0],
+            seam: Vec::new(),
+            tight: 0.35,
+            gap: 1.5,
+        });
+        let line = serde_json::to_string(&detail).unwrap();
+        assert!(line.starts_with(r#"{"event":"pair_detail","a":"pieceA""#), "{line}");
+        assert_eq!(serde_json::from_str::<Event>(&line).unwrap(), detail);
+        assert_eq!(
+            serde_json::to_string(&Event::Dropped { decisions: Vec::new() }).unwrap(),
+            r#"{"event":"dropped","decisions":[]}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Event::RequestFailed { message: "no such pair".into() })
+                .unwrap(),
+            r#"{"event":"request_failed","message":"no such pair"}"#
+        );
     }
 
     /// A §7.4: «Стандарт» is the CLI's defaults, threshold for threshold.

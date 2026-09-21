@@ -5,11 +5,13 @@
 //! hard kill must exist behind the cooperative cancel.
 
 mod prepare;
+mod review;
 mod run;
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::Path;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -154,6 +156,8 @@ pub(crate) fn app_failure(error: &crate::AppError) -> Failure {
 ///
 /// After the job line the input is read on a thread of its own: a `cancel` request raises D §5's
 /// flag, and so does the end of the input — a window that died leaves no 3 GB orphan (A §2.1).
+/// Every other request goes into a channel the job may read; a `Prepare` and a `Run` never do,
+/// and the reader keeps draining stdin either way, because a full pipe would stop the window.
 pub fn serve(mut input: impl BufRead + Send + 'static, output: impl Write + Send + 'static) -> i32 {
     let emitter = Emitter::new(output);
     emitter.emit(&Event::Hello {
@@ -173,15 +177,22 @@ pub fn serve(mut input: impl BufRead + Send + 'static, output: impl Write + Send
 
     let cancel = Cancel::new();
     let flag = cancel.clone();
+    let (sender, requests) = mpsc::channel::<Request>();
     std::thread::spawn(move || {
         for line in input.lines() {
             match line.as_deref().map(str::trim).map(serde_json::from_str::<Request>) {
                 Ok(Ok(Request::Cancel)) => flag.cancel(),
+                // A job that is not a session has dropped the receiver; the send then fails and
+                // the line is forgotten, which is what «`Prepare` and `Run` ignore it» means.
+                Ok(Ok(request)) => drop(sender.send(request)),
                 Ok(Err(_)) => {} // an unknown request is ignored, not fatal: the window may be newer
                 Err(_) => break,
             }
         }
-        flag.cancel(); // end of input: the host is gone
+        // End of input: the host is gone. The flag stops a run, and the closed channel ends a
+        // session's loop — which is the same thing said to the two kinds of job.
+        flag.cancel();
+        drop(sender);
     });
 
     let watch = Watch {
@@ -189,8 +200,9 @@ pub fn serve(mut input: impl BufRead + Send + 'static, output: impl Write + Send
         progress: Some(Arc::new(WorkerProgress::new(emitter.clone()))),
     };
     let context = Context { emitter: emitter.clone(), cancel, watch };
-    let outcome =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(job, &context)));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        dispatch(job, requests, &context)
+    }));
     match outcome {
         Ok(Ok(done)) => {
             emitter.emit(&done);
@@ -238,7 +250,12 @@ fn fail(emitter: &Emitter, failure: &Failure) -> i32 {
 }
 
 /// Runs the job; the `Event` it returns is the job's `Done`.
-fn dispatch(job: Job, context: &Context) -> Result<Event, Failure> {
+///
+/// `requests` is the channel the input reader forwards everything but `cancel` into. Only
+/// [`Job::Review`] reads it; for the other three it is dropped here, which is what makes the
+/// reader's `send` fail and the request disappear instead of piling up behind a job that is 80
+/// minutes long.
+fn dispatch(job: Job, requests: Receiver<Request>, context: &Context) -> Result<Event, Failure> {
     match job {
         Job::Info { adapter, selftest } => {
             context.emitter.emit(&Event::Info {
@@ -253,6 +270,7 @@ fn dispatch(job: Job, context: &Context) -> Result<Event, Failure> {
         }
         Job::Prepare(job) => prepare::prepare(&job, context),
         Job::Run(job) => run::run(&job, context),
+        Job::Review(job) => review::review(&job, requests, context),
     }
 }
 

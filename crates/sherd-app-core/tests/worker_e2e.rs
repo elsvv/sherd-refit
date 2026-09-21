@@ -1,11 +1,16 @@
 //! A §11: the worker driven headless, through a real process and real pipes, on `fixtures/slab`.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use sherd_app_core::host::{self, Outcome, Worker, WorkerCommand};
-use sherd_app_core::protocol::{BackendChoice, Event, FailKind, FragmentInfo, RunSpec};
+use sherd_app_core::decisions::{Decision, DecisionsFile, Verdict};
+use sherd_app_core::host::{self, HostEvent, Outcome, Worker, WorkerCommand};
+use sherd_app_core::protocol::{
+    BackendChoice, CandidateRow, Event, FailKind, FragmentInfo, Job, Request, ReviewJob, RunSpec,
+};
 use sherd_app_core::run::{RunFile, RunStatus};
 use sherd_app_core::workspace::Workspace;
+use sherd_core::tiers::Tier;
 
 fn slab() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/slab/input")
@@ -111,6 +116,154 @@ fn a_cancelled_run_ends_as_cancelled() {
     assert!(matches!(outcome, Outcome::Failed { kind: FailKind::Cancelled, .. }), "{outcome:?}");
     host::finish_run(&ws, &mut run, &outcome, now()).unwrap();
     assert_eq!(RunFile::load(&ws.run_dir(&run.id)).unwrap().status, RunStatus::Cancelled);
+}
+
+/// The next event the session says that `want` is interested in.
+///
+/// A `failed` or a `request_failed` that nobody was waiting for is the end of the test and not
+/// something to wait past: the session is meant to answer every one of these, and its own
+/// sentence is the best report of why it did not.
+fn wait_for(worker: &mut Worker, want: impl Fn(&Event) -> bool) -> Event {
+    loop {
+        match worker.next() {
+            Some(HostEvent::Event(event)) => {
+                if want(&event) {
+                    return event;
+                }
+                assert!(
+                    !matches!(event, Event::Failed { .. } | Event::RequestFailed { .. }),
+                    "{event:?}"
+                );
+            }
+            other => panic!("the session ended before it answered: {other:?}"),
+        }
+    }
+}
+
+/// The session's answer to whatever was just asked.
+fn assembly(worker: &mut Worker) -> sherd_app_core::protocol::AssemblyDto {
+    match wait_for(worker, |e| matches!(e, Event::Assembly(_))) {
+        Event::Assembly(assembly) => assembly,
+        other => unreachable!("{other:?}"),
+    }
+}
+
+/// One decision about the pair, as the window would file it (A §8.1).
+fn decided(a: &str, b: &str, verdict: Verdict, pose: Option<[[f64; 4]; 4]>) -> DecisionsFile {
+    let mut file = DecisionsFile::default();
+    file.set(Decision {
+        a: a.to_owned(),
+        b: b.to_owned(),
+        verdict,
+        pose,
+        source: Some("probable".to_owned()),
+        bulk: false,
+        at: "2026-09-21T12:00:00+03:00".to_owned(),
+        carried_from: None,
+    });
+    file
+}
+
+/// A §8: the review session end to end — the match loaded once, a decision answered with an
+/// assembly, the seam of that placement measured, R §9 over what the decision left unrefined, and
+/// a refined group that survives the next reassembly.
+#[test]
+fn a_review_session_answers_a_decision_with_an_assembly_and_keeps_what_it_refined() {
+    let ws = workspace("review");
+    let job = host::prepare_job(&ws, &cpu()).unwrap();
+    let mut worker = Worker::spawn(&command(), &job, None).unwrap();
+    assert!(matches!(host::drive(&mut worker, |_| {}), Outcome::Done { .. }));
+
+    // The shipped rule places nothing on this slab — its one join is probable — which is exactly
+    // the starting point a review exists for.
+    let (mut run, mut worker) =
+        host::start_run(&ws, &command(), &cpu(), None, None, now()).unwrap();
+    let dir = ws.run_dir(&run.id);
+    let outcome = host::drive(&mut worker, |event| {
+        if let Event::Assembly(assembly) = event {
+            host::save_assembly(&dir, assembly).unwrap();
+        }
+    });
+    host::finish_run(&ws, &mut run, &outcome, now()).unwrap();
+    assert!(matches!(outcome, Outcome::Done { .. }), "{outcome:?}");
+    let rows: Vec<CandidateRow> =
+        sherd_app_core::atomic::read_json(&dir.join("candidates.json")).unwrap();
+    let join = rows.iter().find(|r| r.tier == Tier::Probable).expect("the slab's join is probable");
+
+    let session = Job::Review(ReviewJob {
+        workspace: ws.root().to_owned(),
+        input: slab(),
+        run_id: run.id.clone(),
+        excluded: BTreeSet::new(),
+        target_faces: cpu().target_faces,
+        seed: cpu().seed,
+        memory_gb: None,
+        workers: 0,
+    });
+    let mut worker = Worker::spawn(&command(), &session, None).unwrap();
+    let ask = worker.requester();
+    let ready = wait_for(&mut worker, |e| matches!(e, Event::Ready { .. }));
+    assert!(matches!(ready, Event::Ready { fragments: 2, candidates } if candidates >= 1));
+
+    // Accepted: R §8 builds with the pinned pose and the two pieces are one group.
+    let accepted = decided(&join.a, &join.b, Verdict::Accept, Some(join.pose));
+    ask.send(&Request::Reassemble { decisions: accepted.clone() }).unwrap();
+    let one = assembly(&mut worker);
+    assert_eq!(one.groups.len(), 1, "{:?}", one.groups);
+    assert_eq!(one.groups[0].members.len(), 2);
+    assert!(!one.groups[0].refined, "a reassembly refines nothing (A §8.4)");
+    assert!(one.unplaced.is_empty(), "{:?}", one.unplaced);
+    assert_eq!(one.joins.len(), 1);
+
+    // The seam of that placement, as the screen draws it.
+    ask.send(&Request::PairDetail { a: join.a.clone(), b: join.b.clone(), pose: join.pose })
+        .unwrap();
+    let detail = match wait_for(&mut worker, |e| matches!(e, Event::PairDetail(_))) {
+        Event::PairDetail(detail) => detail,
+        other => unreachable!("{other:?}"),
+    };
+    assert_eq!(detail.contact.len(), detail.contact_class.len());
+    assert!(!detail.contact.is_empty() && !detail.seam.is_empty());
+    assert!(0.0 < detail.tight && detail.tight < detail.gap);
+    assert!(detail.contact_class.iter().any(|&c| c == 0), "the accepted pose has tight contact");
+
+    // R §9 over the one unrefined group.
+    ask.send(&Request::Refine { decisions: accepted.clone() }).unwrap();
+    let refined = assembly(&mut worker);
+    assert!(refined.groups[0].refined, "the group R §9 has just walked is refined");
+    assert_ne!(refined.poses, one.poses, "and full resolution moved it");
+
+    // The same decision again: the group is the same group, so it keeps R §9's poses (A §8.4).
+    ask.send(&Request::Reassemble { decisions: accepted }).unwrap();
+    let again = assembly(&mut worker);
+    assert!(again.groups[0].refined);
+    assert_eq!(again.poses, refined.poses, "the merge gives back what refinement found");
+
+    // Rejected instead: nothing is built, and nothing is refined either.
+    ask.send(&Request::Reassemble { decisions: decided(&join.a, &join.b, Verdict::Reject, None) })
+        .unwrap();
+    let none = assembly(&mut worker);
+    assert!(none.joins.is_empty(), "{:?}", none.joins);
+    assert!(none.groups.iter().all(|g| g.members.len() == 1 && !g.refined), "{:?}", none.groups);
+
+    // A request the session cannot answer is one request's problem: it says so and stays open.
+    let unknown = Request::PairDetail { a: join.a.clone(), b: "notHere".into(), pose: join.pose };
+    ask.send(&unknown).unwrap();
+    let refused = wait_for(&mut worker, |e| matches!(e, Event::RequestFailed { .. }));
+    assert!(matches!(&refused, Event::RequestFailed { message } if message.contains("notHere")));
+
+    ask.send(&Request::Close).unwrap();
+    assert!(matches!(
+        wait_for(&mut worker, |e| matches!(e, Event::Done { .. })),
+        Event::Done { .. }
+    ));
+    let mut code = None;
+    while let Some(next) = worker.next() {
+        if let HostEvent::Exited { code: status } = next {
+            code = status;
+        }
+    }
+    assert_eq!(code, Some(0), "a session that was closed ended well");
 }
 
 /// A §2.1: a window that dies leaves no orphan — the end of stdin is a cancel.

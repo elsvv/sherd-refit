@@ -197,8 +197,13 @@ pub(crate) fn assembly_dto(
 
 /// A pose as the protocol carries it: row-major, which is the order `transforms.json` writes and
 /// the viewer reads.
-fn pose_rows(pose: &Matrix4<f64>) -> [[f64; 4]; 4] {
+pub(crate) fn pose_rows(pose: &Matrix4<f64>) -> [[f64; 4]; 4] {
     std::array::from_fn(|r| std::array::from_fn(|c| pose[(r, c)]))
+}
+
+/// The same the other way round, for a pose that came in over the wire.
+pub(crate) fn pose_matrix(rows: &[[f64; 4]; 4]) -> Matrix4<f64> {
+    Matrix4::from_fn(|r, c| rows[r][c])
 }
 
 /// Which candidates the index keeps, as ascending indices: every confirmed and probable one, and

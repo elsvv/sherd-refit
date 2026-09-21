@@ -7,6 +7,7 @@ pub mod decisions;
 pub mod eta;
 pub mod host;
 pub mod protocol;
+pub mod review;
 pub mod run;
 pub mod snapshot;
 pub mod view;

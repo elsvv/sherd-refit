@@ -142,8 +142,13 @@ fn a_seam_view_is_the_numbers_the_verification_judged_the_pose_by() {
     // sample B has, and on this slab two thirds of them lie on faces pointing away from A and
     // come back from beyond the facing window. Of the points it shows as contact at all — green
     // and yellow — a pose R §6.5 accepted is mostly green.
-    let tight = view.contact_class.iter().filter(|&&c| c == 0).count();
-    let near = tight + view.contact_class.iter().filter(|&&c| c == 1).count();
+    // Counted in one fold rather than two `filter().count()` passes: over a `Vec<u8>` clippy reads
+    // the latter as a byte count and asks for the `bytecount` crate, which this test does not need.
+    let (tight, near) = view.contact_class.iter().fold((0usize, 0usize), |(t, n), &c| match c {
+        0 => (t + 1, n + 1),
+        1 => (t, n + 1),
+        _ => (t, n),
+    });
     assert!(tight * 2 > near, "a join R §6.5 accepted is mostly tight: {tight} of {near}");
     assert!(!view.seam.is_empty(), "R §6.2 counted a shared seam");
     assert!(0.0 < view.tight && view.tight < view.gap, "{} < {}", view.tight, view.gap);

@@ -253,7 +253,7 @@ fn a_review_session_answers_a_decision_with_an_assembly_and_keeps_what_it_refine
     assert_eq!(detail.contact.len(), detail.contact_class.len());
     assert!(!detail.contact.is_empty() && !detail.seam.is_empty());
     assert!(0.0 < detail.tight && detail.tight < detail.gap);
-    assert!(detail.contact_class.iter().any(|&c| c == 0), "the accepted pose has tight contact");
+    assert!(detail.contact_class.contains(&0), "the accepted pose has tight contact");
 
     // R §9 over the one unrefined group.
     ask.send(&Request::Refine { decisions: accepted.clone() }).unwrap();

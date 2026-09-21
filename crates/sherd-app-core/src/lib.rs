@@ -4,6 +4,7 @@
 
 pub mod atomic;
 pub mod decisions;
+pub mod eta;
 pub mod host;
 pub mod protocol;
 pub mod run;

@@ -3,12 +3,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use nalgebra::Matrix4;
 use sherd_core::Params;
 use sherd_core::assembly::constraints::Constraints;
 use sherd_core::executor::Engine;
+use sherd_core::matching::scales::Scales;
 use sherd_core::memory::Budget;
 use sherd_core::pipeline::{self, RunOptions, RunSummary};
 use sherd_core::progress::Watch;
+use sherd_core::review;
 use sherd_core::session::{self, MatchState, Reassembled};
 use sherd_core::tiers::{Thresholds, Tier};
 
@@ -112,6 +115,46 @@ fn a_rejected_join_splits_its_group() {
     let out = reassembled(&state, Some(r#"{"version":1,"must_not_join":[["pieceA","pieceB"]]}"#));
     assert!(out.assembly.groups.iter().all(|g| g.len() == 1));
     assert!(out.used.is_empty());
+}
+
+/// A §2.2's `PairDetail`: the window draws the seam live, and it must draw R §6's own numbers.
+///
+/// The review image (`review.rs`) is the same measurement rendered server-side, so this is the
+/// guard that the two say the same thing about a pose: a placement the run accepted is mostly
+/// green, and the same pair left where the two files put it is nowhere tight.
+#[test]
+fn a_seam_view_is_the_numbers_the_verification_judged_the_pose_by() {
+    let (_, path) = accepted_run();
+    let state = MatchState::load(path).unwrap();
+    let frags = fragments(&state.params);
+    let best = state
+        .candidates
+        .iter()
+        .filter(|c| c.accepted)
+        .max_by(|x, y| x.score().total_cmp(&y.score()))
+        .expect("the slab has an accepted candidate");
+    let (a, b) = (&frags[best.a as usize], &frags[best.b as usize]);
+
+    let view = review::seam_view(Engine::REFERENCE, a, b, &best.transform, &state.params);
+    assert_eq!(view.contact.len(), view.contact_class.len(), "one class per contact point");
+    assert!(!view.contact.is_empty(), "the pair has fracture samples to colour");
+    // R §6.1's `tightB` is a fraction of B's *facing* samples; the view colours every fracture
+    // sample B has, and on this slab two thirds of them lie on faces pointing away from A and
+    // come back from beyond the facing window. Of the points it shows as contact at all — green
+    // and yellow — a pose R §6.5 accepted is mostly green.
+    let tight = view.contact_class.iter().filter(|&&c| c == 0).count();
+    let near = tight + view.contact_class.iter().filter(|&&c| c == 1).count();
+    assert!(tight * 2 > near, "a join R §6.5 accepted is mostly tight: {tight} of {near}");
+    assert!(!view.seam.is_empty(), "R §6.2 counted a shared seam");
+    assert!(0.0 < view.tight && view.tight < view.gap, "{} < {}", view.tight, view.gap);
+    // The two limits are R §1.2's own for this pair, not a distance the viewer invented.
+    let scales = Scales::for_fragments(&state.params, a, b);
+    assert_eq!((view.tight, view.gap), (scales.tight, scales.gap));
+
+    // The identity pose leaves the two pieces where their own files put them, which is apart.
+    let apart = review::seam_view(Engine::REFERENCE, a, b, &Matrix4::identity(), &state.params);
+    assert_eq!(apart.contact.len(), view.contact.len(), "the same samples, drawn elsewhere");
+    assert!(apart.contact_class.iter().all(|&c| c != 0), "nothing touches at the identity pose");
 }
 
 #[test]

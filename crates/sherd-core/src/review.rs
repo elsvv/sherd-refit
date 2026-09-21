@@ -13,6 +13,12 @@
 //! against the pair's own `tight` and gap limit. A picture that disagreed with the table under it
 //! would be worse than no picture.
 //!
+//! # The same measurement without the picture
+//!
+//! The desktop app draws the seam itself, live, at a pose the person is still moving, so it asks
+//! for [`seam_view`] — A §2.2's `PairDetail` — instead of a PNG. Both come out of the one private
+//! function `seam_of`, so the screen and the image cannot start disagreeing about a join.
+//!
 //! # What is drawn, and for which pairs
 //!
 //! One image per **pair**, for the pair's representative candidate (`tiers::representatives`) when
@@ -156,6 +162,63 @@ pub fn write_review_images(
     Ok((written, index))
 }
 
+/// What a review image draws of one placement, as numbers (A §2.2's `PairDetail`).
+///
+/// The desktop app's «Ревью» screen draws this seam itself, live, at a pose the person may still
+/// be moving (A §8.2), so it needs the measurement without the picture. Nothing in it is computed
+/// for the window: the classes are R §6.1's own point-to-surface distances against the pair's own
+/// limits and the seam is R §6.2's own voxels — the same two things
+/// [`write_review_images`] colours — which is what keeps the screen and the table of scores under
+/// it from telling a conservator two different stories about one join.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SeamView {
+    /// B's fracture samples at the pose, in A's frame (R §3.5.2).
+    pub contact: Vec<[f64; 3]>,
+    /// One class per contact point: 0 under the tight limit, 1 under the gap limit, 2 beyond
+    /// (R §6.1, R §6.5) — the green, yellow and red of the image's own legend.
+    pub contact_class: Vec<u8>,
+    /// Centres of R §6.2's seam voxels, in A's frame.
+    pub seam: Vec<[f64; 3]>,
+    /// The pair's tight limit, in the meshes' own length unit (R §1.2), so that a viewer can say
+    /// what the colours mean without resolving the scales again.
+    pub tight: f64,
+    /// The pair's gap limit, in the same unit.
+    pub gap: f64,
+}
+
+/// The seam and the contact colouring of one pose of one pair, measured but not drawn (A §2.2).
+///
+/// The app's review session answers `PairDetail` with this: it holds the fragments already, the
+/// pose is one the person may have just refined, and the window draws the points itself. The pair
+/// is rebuilt from the two fragments (R §4.2's arrays at `t_pair`) because such a caller has no
+/// [`Pair`] — the same work every review image does before it renders, and the reason A §2.2
+/// budgets a second for the request.
+///
+/// A pair either of whose working meshes has no triangle has no fracture tree and no scores: it
+/// gives an empty view rather than an error, as its image is drawn without a seam, so a review of
+/// a collection with one such fragment stays usable.
+#[must_use]
+pub fn seam_view(
+    engine: Engine<'_>,
+    a: &Fragment,
+    b: &Fragment,
+    transform: &Matrix4<f64>,
+    params: &Params,
+) -> SeamView {
+    let pair = Pair::build(a, b, params);
+    let sc = pair.scales;
+    match pair.surfaces() {
+        Some((sa, sb)) => seam_of(engine, &sa, &sb, transform, &sc),
+        None => SeamView {
+            contact: Vec::new(),
+            contact_class: Vec::new(),
+            seam: Vec::new(),
+            tight: sc.tight,
+            gap: sc.gap,
+        },
+    }
+}
+
 /// The sentence roadmap item 4's object pass demoted this pair with, if it demoted it.
 ///
 /// Audit §D.2 asks for the object numbers to be *"in the report and the review image"*, and this
@@ -190,14 +253,9 @@ fn pair_evidence(
     let transform = &candidate.transform;
     let (seam, contact, contact_class, views) = match pair.surfaces() {
         Some((sa, sb)) => {
-            let voxel = sc.t / SEAM_VOXEL;
-            let seam: Vec<[f64; 3]> = seam_cells(&sa, &sb, transform, &sc)
-                .into_iter()
-                .map(|c| centre_of(c, voxel))
-                .collect();
-            let (contact, contact_class) = contact_map(engine, &sa, &sb, transform, &sc);
+            let measured = seam_of(engine, &sa, &sb, transform, &sc);
             let views = pair_views(&sa, &sb, transform, &sc);
-            (seam, contact, contact_class, views)
+            (measured.seam, measured.contact, measured.contact_class, views)
         }
         // A fragment whose working mesh has no triangle has no fracture tree and no scores; the
         // image is then the two point clouds and the caption, which is still worth writing.
@@ -212,6 +270,26 @@ fn pair_evidence(
         points: REVIEW_POINTS,
         seed: params.seed,
     }
+}
+
+/// A [`SeamView`] from surfaces the caller already holds (R §6.1, R §6.2).
+///
+/// The one place the seam voxels and the contact classes are measured: the PNG of
+/// [`write_review_images`] and the app's `PairDetail` both come through here, so neither can start
+/// saying something the other does not. It takes [`Surfaces`] rather than fragments because a
+/// review image has already built the pair and must not build it twice.
+fn seam_of(
+    engine: Engine<'_>,
+    a: &Surfaces<'_>,
+    b: &Surfaces<'_>,
+    transform: &Matrix4<f64>,
+    sc: &Scales,
+) -> SeamView {
+    let voxel = sc.t / SEAM_VOXEL;
+    let seam: Vec<[f64; 3]> =
+        seam_cells(a, b, transform, sc).into_iter().map(|c| centre_of(c, voxel)).collect();
+    let (contact, contact_class) = contact_map(engine, a, b, transform, sc);
+    SeamView { contact, contact_class, seam, tight: sc.tight, gap: sc.gap }
 }
 
 /// The centre of R §6.2's voxel `cell`, which is indexed by `⌊p / voxel⌋` on a grid at the origin.

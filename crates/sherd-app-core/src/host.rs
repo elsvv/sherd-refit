@@ -66,6 +66,12 @@ pub enum HostEvent {
 /// from it. `None` once the process is over and the pipe has been let go of.
 type Pipe = Arc<Mutex<Option<ChildStdin>>>;
 
+/// The process itself, shared between the worker and every [`Killer`] taken from it — the same
+/// arrangement as [`Pipe`] and for the same reason: [`drive`] owns the worker while it runs, so a
+/// second thread can only reach the child through a handle. `None` once it has been reaped, which
+/// is what keeps a [`Killer`] from signalling a pid the OS has since given to somebody else.
+type Process = Arc<Mutex<Option<Child>>>;
+
 /// A running worker: the process, the pipe the window talks back through, and the threads that
 /// turn its two output streams into events and into `engine.log`.
 ///
@@ -74,7 +80,7 @@ type Pipe = Arc<Mutex<Option<ChildStdin>>>;
 /// [`Canceller`] does not keep that pipe open — see [`Worker::canceller`].
 #[derive(Debug)]
 pub struct Worker {
-    child: Child,
+    child: Process,
     // Kept for the worker's whole life: closing it cancels the job, so it is let go of only once
     // the process is over. Behind a lock because a `Canceller` writes to it from the window's
     // thread while `drive` is reading events on another.
@@ -125,6 +131,36 @@ impl Requester {
     /// written — the three ways a session stops being able to answer.
     pub fn send(&self, request: &Request) -> Result<()> {
         write_request(&self.stdin, request)
+    }
+}
+
+/// The last word a window has over a job that is not listening any more: end the process
+/// (A §10's hard kill, behind the cooperative cancel).
+///
+/// A [`Canceller`] and a [`Requester`] both *ask*, and both need a worker that still reads its
+/// input. When one does not — wedged in a driver, swapping, or stuck on a disk — there has to be
+/// something that does not depend on it, or a session A §8.4 calls a cache would be able to
+/// refuse every run for the rest of the app's life. This is that something: it signals the child
+/// and returns, leaving the reaping to the thread inside [`drive`], which is where the worker
+/// and its readers already are.
+#[derive(Clone, Debug)]
+pub struct Killer {
+    child: Process,
+}
+
+impl Killer {
+    /// Ends the process now. Does **not** wait for it: the job's own thread is in [`drive`] and
+    /// will see the stream end, reap the child and free whatever it holds — waiting here would
+    /// be a second thread waiting on the same `wait(2)` for nothing.
+    ///
+    /// A worker already over is not an error, exactly as a late [`Canceller::cancel`] is not: the
+    /// child is gone from the slot by then and there is nothing to signal.
+    pub fn kill(&self) {
+        if let Ok(mut slot) = self.child.lock()
+            && let Some(child) = slot.as_mut()
+        {
+            let _ = child.kill();
+        }
     }
 }
 
@@ -220,7 +256,7 @@ impl Worker {
             }
         });
         Ok(Self {
-            child,
+            child: Arc::new(Mutex::new(Some(child))),
             stdin: Arc::new(Mutex::new(Some(stdin))),
             events,
             readers: vec![reading, copying],
@@ -246,6 +282,16 @@ impl Worker {
         Requester { stdin: Arc::clone(&self.stdin) }
     }
 
+    /// A handle that ends this worker, for the thread that will not be holding it.
+    ///
+    /// Taken beside [`Worker::canceller`] and used only after it: A §10's hard kill is what
+    /// stands behind the cooperative cancel when a worker has stopped reading its input, and
+    /// A §8.4 needs it — a review session that will not close must not be able to refuse the
+    /// run the user has just asked for.
+    pub fn killer(&self) -> Killer {
+        Killer { child: Arc::clone(&self.child) }
+    }
+
     /// Asks the job to stop (A §2.2), for a caller that still holds the worker — before
     /// [`drive`], or in a test. Same line as [`Canceller::cancel`].
     pub fn cancel(&mut self) {
@@ -256,8 +302,8 @@ impl Worker {
     /// that nothing is still writing into the run's folder when this returns.
     pub fn kill(&mut self) {
         self.close_stdin();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.killer().kill();
+        let _ = self.reap();
         // The pipes are closed now, so both readers reach their end; joining them is what makes
         // "nothing is still writing into the run's folder" true of `engine.log` as well.
         for reader in self.readers.drain(..) {
@@ -272,6 +318,17 @@ impl Worker {
         if let Ok(mut pipe) = self.stdin.lock() {
             *pipe = None;
         }
+    }
+
+    /// Takes the child out of the shared slot and waits for it, answering its exit code — `None`
+    /// where a signal ended it, or where somebody has reaped it already.
+    ///
+    /// The lock is **not** held across the wait: the child is taken first and waited for after,
+    /// so a [`Killer`] firing in the meantime finds an empty slot and blocks on nothing. Which is
+    /// the right answer for it — a process whose stdout has ended is a process on its way out.
+    fn reap(&self) -> Option<i32> {
+        let child = self.child.lock().ok().and_then(|mut slot| slot.take());
+        child?.wait().ok().and_then(|status| status.code())
     }
 
     /// The next thing that happened: an event, then [`HostEvent::Exited`] once, then `None`.
@@ -291,7 +348,7 @@ impl Worker {
         // Its stdout is closed, so the process is over or a breath away from it: let go of stdin,
         // reap it, and collect the readers, so that `engine.log` is whole before anyone reads it.
         self.close_stdin();
-        let code = self.child.wait().ok().and_then(|status| status.code());
+        let code = self.reap();
         for reader in self.readers.drain(..) {
             let _ = reader.join();
         }

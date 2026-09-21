@@ -116,6 +116,37 @@ fn a_cancelled_run_ends_as_cancelled() {
     assert_eq!(RunFile::load(&ws.run_dir(&run.id)).unwrap().status, RunStatus::Cancelled);
 }
 
+/// A §10's hard kill, through the handle the shell keeps beside the canceller: a worker that has
+/// stopped reading its input is ended anyway, from a thread that is not the one driving it.
+///
+/// This is what A §8.4 stands on — a review session may be a cache and may never be a reason to
+/// refuse a run — and what a cancel cannot do on its own: `Cancel` is a line down the same pipe
+/// the wedged worker is not reading.
+#[test]
+fn a_worker_is_killed_through_its_handle_while_another_thread_drives_it() {
+    let ws = workspace("kill");
+    let job = host::prepare_job(&ws, &cpu()).unwrap();
+    let mut worker = Worker::spawn(&command(), &job, None).unwrap();
+    let killer = worker.killer();
+    // At `Hello` the worker has a preprocessing of the slab ahead of it — seconds of work this
+    // kill lands in the middle of, whatever the machine. The thread is the point: `drive` owns
+    // the worker on this one, exactly as the job thread owns it while the window asks for a run.
+    let outcome = host::drive(&mut worker, |event| {
+        if matches!(event, Event::Hello { .. }) {
+            let killer = killer.clone();
+            std::thread::spawn(move || killer.kill()).join().unwrap();
+        }
+    });
+    assert!(
+        matches!(&outcome, Outcome::Failed { kind: FailKind::Crashed, message }
+            if message.contains("killed")),
+        "{outcome:?}"
+    );
+    // And a handle that outlives its worker signals nothing: the child has been reaped, so there
+    // is no pid left here to send a second kill to.
+    killer.kill();
+}
+
 /// The next event the session says that `want` is interested in.
 ///
 /// A `failed` or a `request_failed` that nobody was waiting for is the end of the test and not

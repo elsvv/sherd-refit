@@ -13,7 +13,8 @@
 //! worker may not touch (A §2.1) — `assembly.json` the moment the groups are reported, `run.json`
 //! closed when it is over, and what it measured taught to A §6's calibration. A review session
 //! (A §8) adds the other half of the slot: a handle the window's questions go down, and the
-//! rule that a `Prepare` or a run closes the session rather than being refused by it.
+//! rule that a `Prepare` or a run closes the session rather than being refused by it — and ends
+//! the process outright when asking twice has got no answer.
 //!
 //! Around all three sits the machine A §6 asks for, and none of it is the job: the computer is
 //! kept awake while a worker runs, the dock shows how far along it is, and a job that ends behind
@@ -66,10 +67,17 @@ const AWAKE_APP: &str = "Sherd Refit";
 ///
 /// Ten seconds is far more than a session needs: idle, it reads `Close` at once and exits; busy,
 /// D §5's flag ends its request at the next unit of work. What the bound is really for is the
-/// case where neither happens — a worker wedged in a driver or a disk — and there «ядро занято»
-/// is the truth, not a refusal to be worked around.
+/// case where neither happens — a worker wedged in a driver or a disk — and there the session is
+/// killed, because a cache may cost the user ten seconds and may not cost them their run.
 const SESSION_CLOSE_WAIT: Duration = Duration::from_secs(10);
-/// How often the slot is looked at while waiting for that. Short enough that the usual close is
+/// How long the slot is waited for after that kill.
+///
+/// The process is gone by then: its stdout is closed, `host::drive` returns at the next line and
+/// the job thread has only its own last few steps left — freeing the slot among them. Two
+/// seconds is that with room to spare. Longer would be waiting on a thread that is stuck
+/// somewhere else entirely, and there «ядро занято» really is the truth.
+const SESSION_KILL_WAIT: Duration = Duration::from_secs(2);
+/// How often the slot is looked at while waiting for either. Short enough that the usual close is
 /// not noticeable, long enough that ten seconds is five hundred cheap locks and not a spin.
 const SESSION_CLOSE_POLL: Duration = Duration::from_millis(20);
 
@@ -307,8 +315,9 @@ struct Started {
 ///
 /// A review session in the slot is **closed first** and waited for (A §8.4): a warm session is a
 /// cache over a finished run, never a reason to refuse the work the user has just asked for. The
-/// wait is bounded by [`SESSION_CLOSE_WAIT`]; a session that will not go by then is a worker that
-/// is genuinely stuck, and that is `busy`.
+/// wait is bounded by [`SESSION_CLOSE_WAIT`], and a session that will not go by then is killed —
+/// a wedged worker over a run that has already finished may cost the user those ten seconds and
+/// may not cost them the run they have just launched.
 ///
 /// # Errors
 ///
@@ -340,8 +349,10 @@ pub(crate) fn start(
         }
     };
     let canceller = worker.canceller();
-    // Only a session is ever asked anything; see [`crate::state::JobSlot::requester`].
+    // Only a session is ever asked anything — or ended from under the user; see
+    // [`crate::state::JobSlot::requester`] and [`crate::state::JobSlot::killer`].
     let requester = (job == JobKind::Review).then(|| worker.requester());
+    let killer = (job == JobKind::Review).then(|| worker.killer());
     let mut run_file = run;
 
     let held_by_thread = app.clone();
@@ -412,7 +423,7 @@ pub(crate) fn start(
         // Nothing to undo: the worker was moved into the closure, and dropping a `Worker` kills
         // and reaps the process it holds.
         .map_err(|e| AppError::Worker(format!("the job's thread could not be started: {e}")))?;
-    *slot = Some(JobSlot { kind: job, run_id: run_id.clone(), canceller, requester });
+    *slot = Some(JobSlot { kind: job, run_id: run_id.clone(), canceller, requester, killer });
     // The slot is let go of here and not at the end of the function: what follows is an emit,
     // and no lock of this app is held across one ([`crate::state`]).
     drop(slot);
@@ -439,46 +450,81 @@ pub(crate) fn start(
 /// to do it ([`finish`]), so holding it here would be a deadlock and not a wait; the slot is
 /// looked at, let go of, and looked at again.
 ///
-/// Two ways of asking, in this order: `Close`, which an idle session reads at once and answers by
-/// ending well; and then, half way through the budget, D §5's flag, because a session in the
-/// middle of R §9 will not read `Close` until that is over. Whichever ends it, the session's own
-/// thread files nothing and frees the slot exactly as a run's does.
+/// Three ways of ending it, in this order, each for a session the one before it could not reach:
+/// `Close`, which an idle session reads at once and answers by ending well; half way through the
+/// budget, D §5's flag, because a session in the middle of R §9 will not read `Close` until that
+/// is over; and, once [`SESSION_CLOSE_WAIT`] is spent, [`host::Killer::kill`] — A §10's hard
+/// kill — because the two before it both need a worker that is still reading its input, and one
+/// wedged in a driver or on a disk is reading nothing. A §8.4 leaves no room for the alternative:
+/// a session is a cache over a run that has already finished, and a cache that can refuse a run
+/// is worse than no cache. Whichever of the three ends it, the session's own thread files
+/// nothing and frees the slot in [`finish`] exactly as a run's does; killed, the only difference
+/// is the outcome the window is handed — A §10's `crashed`, which is what happened.
 ///
 /// # Errors
 ///
-/// [`CommandError`] of kind `busy` when the session is still there after [`SESSION_CLOSE_WAIT`],
-/// or `worker` when the job slot is poisoned.
+/// [`CommandError`] of kind `busy` when the slot is still full [`SESSION_KILL_WAIT`] after the
+/// kill — which is no longer a session standing in the way but the job thread itself stuck,
+/// somewhere the window cannot reach — or `worker` when the job slot is poisoned.
 fn close_session(state: &AppState) -> Result<(), CommandError> {
     let session = {
         let slot = state.job()?;
         slot.as_ref()
             .filter(|job| job.kind == JobKind::Review)
-            .map(|job| (job.requester.clone(), job.canceller.clone()))
+            .map(|job| (job.requester.clone(), job.canceller.clone(), job.killer.clone()))
     };
-    let Some((requester, canceller)) = session else { return Ok(()) };
+    let Some((requester, canceller, killer)) = session else { return Ok(()) };
     if let Some(requester) = requester.as_ref() {
         // A session already over is not an error: its thread is on its way to the slot anyway.
         let _ = requester.send(&Request::Close);
     }
-    let deadline = Instant::now() + SESSION_CLOSE_WAIT;
-    let mut flagged = false;
+    if wait_for_slot(state, SESSION_CLOSE_WAIT, || canceller.cancel())? {
+        return Ok(());
+    }
+    tracing::warn!("the review session is not answering; the engine process is being ended");
+    if let Some(killer) = killer.as_ref() {
+        killer.kill();
+    }
+    if wait_for_slot(state, SESSION_KILL_WAIT, || ())? {
+        return Ok(());
+    }
+    tracing::error!("the review session's thread has not let the job slot go after the kill");
+    Err(CommandError::busy())
+}
+
+/// Waits up to `budget` for the job slot to empty, calling `halfway` once when half of it has
+/// gone by; answers whether the slot is free.
+///
+/// **No lock is held while waiting.** The thread that has to empty the slot takes that very lock
+/// to do it ([`finish`]), so holding it here would be a deadlock and not a wait; the slot is
+/// looked at, let go of, and looked at again [`SESSION_CLOSE_POLL`] later.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `worker` when the job slot is poisoned.
+fn wait_for_slot(
+    state: &AppState,
+    budget: Duration,
+    halfway: impl FnOnce(),
+) -> Result<bool, CommandError> {
+    let deadline = Instant::now() + budget;
+    let mut halfway = Some(halfway);
     loop {
         let freed = { state.job()?.is_none() };
         if freed {
-            return Ok(());
+            return Ok(true);
         }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            break;
+            return Ok(false);
         }
-        if !flagged && left <= SESSION_CLOSE_WAIT / 2 {
-            flagged = true;
-            canceller.cancel();
+        if left <= budget / 2
+            && let Some(halfway) = halfway.take()
+        {
+            halfway();
         }
         std::thread::sleep(SESSION_CLOSE_POLL.min(left));
     }
-    tracing::warn!("the review session did not close; the worker is not answering");
-    Err(CommandError::busy())
 }
 
 /// Starts a `Prepare` (A §5: the preprocessing every run needs anyway, and the thumbnails, display

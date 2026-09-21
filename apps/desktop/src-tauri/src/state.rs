@@ -20,7 +20,7 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use sherd_app_core::host::{Canceller, Requester};
+use sherd_app_core::host::{Canceller, Killer, Requester};
 use sherd_app_core::view::{JobKind, JobView};
 use sherd_app_core::workspace::Workspace;
 
@@ -47,6 +47,16 @@ pub(crate) struct JobSlot {
     /// `None` for the two jobs that answer no questions, so that a `review_apply` arriving while
     /// a run is on is refused here rather than writing a line into a worker that ignores it.
     pub(crate) requester: Option<Requester>,
+    /// How to end it outright (A §10's hard kill), for a [`JobKind::Review`].
+    ///
+    /// A session is a cache over a finished run and never a reason to refuse work (A §8.4), so
+    /// the «Подготовить» or the run that finds one in the slot must be able to have the slot
+    /// whatever state the session's worker is in — asking it to close is the first move, and this
+    /// is what happens when asking gets no answer ([`crate::jobs`]'s `close_session`).
+    ///
+    /// `None` for a `Prepare` and a run: those are the user's own work, and what stops them is
+    /// «Отменить» (A §2.2), never another command taking the worker out from under them.
+    pub(crate) killer: Option<Killer>,
 }
 
 impl JobSlot {

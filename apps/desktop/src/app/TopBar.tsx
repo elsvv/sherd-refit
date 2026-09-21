@@ -14,6 +14,7 @@ import { useWorkspace } from "../state/workspace";
 import type { ButtonVariant } from "../ui/Button";
 import Button, { FOCUS_RING } from "../ui/Button";
 import Chip from "../ui/Chip";
+import Dialog from "../ui/Dialog";
 import IconButton from "../ui/IconButton";
 
 /** The three modes of A §7.3, left to right, which is also the order of the `1` `2` `3` keys. */
@@ -204,16 +205,44 @@ function MenuItem({
  * the three mode tabs with their own counts, the two pane toggles, and the one action A §5's
  * table gives the current status.
  */
-export default function TopBar({ view, status }: { view: WorkspaceView; status: Status }) {
+export default function TopBar({
+  view,
+  status,
+  onAssemble,
+}: {
+  view: WorkspaceView;
+  status: Status;
+  /** Opens A §7.4's launch sheet, with whatever the action wants changed in it. */
+  onAssemble: () => void;
+}) {
   const { t } = useTranslation();
   const mode = useUi((state) => state.mode);
   const leftOpen = useUi((state) => state.leftOpen);
   const rightOpen = useUi((state) => state.rightOpen);
 
+  // «Отменить» asks before it stops a run, and says «Останавливается…» until the worker is gone:
+  // D §5's cancel is a flag the job reads at its next unit of work, so a click is a request and
+  // not an ending, and a button that stayed «Отменить» would invite a second one.
+  const [asking, setAsking] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const job = view.job;
+  useEffect(() => {
+    if (job === null) {
+      setAsking(false);
+      setStopping(false);
+    }
+  }, [job]);
+
   const warnings = view.fragments.filter((fragment) => fragment.warnings.length > 0).length;
 
   const pickInput = () => {
     pickAndLinkInput(t("action.pick_input_title"));
+  };
+
+  const stop = () => {
+    setAsking(false);
+    setStopping(true);
+    void useJobs.getState().cancel();
   };
 
   const primary = ((): PrimaryAction | null => {
@@ -223,12 +252,16 @@ export default function TopBar({ view, status }: { view: WorkspaceView; status: 
       case "input_missing":
         return { label: t("action.relink"), variant: "primary", run: pickInput };
       case "preparing":
+        // A preparation loses a few minutes of thumbnails and can be asked for again from the
+        // banner; only a run is worth a question of its own (A §6).
+        return { label: stopping ? t("run.stopping") : t("action.cancel"), variant: "danger", disabled: stopping, run: stop };
       case "running":
         return {
-          label: t("action.cancel"),
+          label: stopping ? t("run.stopping") : t("action.cancel"),
           variant: "danger",
+          disabled: stopping,
           run: () => {
-            void useJobs.getState().cancel();
+            setAsking(true);
           },
         };
       case "unprepared":
@@ -240,25 +273,20 @@ export default function TopBar({ view, status }: { view: WorkspaceView; status: 
           },
         };
       case "ready":
-        // A §5's «Собрать…», which opens milestone 4's launch sheet. The tab and the button are
-        // both here so the shape of the finished app is visible from this milestone on.
-        return {
-          label: t("action.assemble"),
-          variant: "primary",
-          disabled: true,
-          tooltip: t("action.assemble_soon"),
-          run: () => {
-            /* milestone 4 */
-          },
-        };
+        return { label: t("action.assemble"), variant: "primary", run: onAssemble };
       case "current":
+        // A §5: with the result current the action is still there, in the second voice — nothing
+        // needs doing, and re-running the same input is a deliberate act.
+        return { label: t("action.regenerate"), variant: "ghost", run: onAssemble };
       case "stale":
-      case "draft":
+        return { label: t("action.regenerate"), variant: "primary", run: onAssemble };
       case "failed":
       case "cancelled":
       case "interrupted":
-        // Every one of these needs a run to exist, and milestone 3 starts none. Their actions
-        // («Перегенерировать…», «Показать лог», «Уточнить позы») belong to milestones 4 and 5.
+        return { label: t("action.repeat"), variant: "primary", run: onAssemble };
+      case "draft":
+        // «Уточнить позы» is milestone 5's: it refines the poses of the assembly the review has
+        // changed, and there is no review yet.
         return null;
     }
   })();
@@ -325,7 +353,7 @@ export default function TopBar({ view, status }: { view: WorkspaceView; status: 
 
       {primary === null ? null : (
         // The tooltip goes on a wrapper as well: a disabled button gets no mouse events of its
-        // own in every engine, and «Сборка — в следующей версии» is the whole point of showing it.
+        // own in every engine, and a disabled action that cannot say why is just a dead button.
         <span title={primary.tooltip}>
           <Button
             variant={primary.variant}
@@ -337,6 +365,33 @@ export default function TopBar({ view, status }: { view: WorkspaceView; status: 
           </Button>
         </span>
       )}
+
+      {asking ? (
+        <Dialog
+          title={t("run.cancel_title")}
+          width={380}
+          onClose={() => {
+            setAsking(false);
+          }}
+          footer={
+            <>
+              <span className="flex-1" />
+              <Button
+                onClick={() => {
+                  setAsking(false);
+                }}
+              >
+                {t("run.cancel_keep")}
+              </Button>
+              <Button variant="danger" onClick={stop}>
+                {t("run.cancel_confirm")}
+              </Button>
+            </>
+          }
+        >
+          <p className="text-xs leading-snug">{t("run.cancel_body")}</p>
+        </Dialog>
+      ) : null}
     </header>
   );
 }

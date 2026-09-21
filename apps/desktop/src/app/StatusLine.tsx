@@ -10,21 +10,28 @@ import Meter from "../ui/Meter";
  * `m:ss`, the way the mock-up writes «прошло 6:41». Hours would need an `h:mm:ss` of their own;
  * a `Prepare` that ran for an hour is a bug report, not a layout problem, so the minutes simply
  * keep counting.
+ *
+ * Exported for [`RunOverlay`], which writes the very same «прошло 6:41» over the viewport: two
+ * clocks on one screen that disagree by a second would be the app's own bug report.
  */
-function elapsedText(ms: number): string {
+export function elapsedText(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
   const seconds = total % 60;
   return `${String(Math.floor(total / 60))}:${String(seconds).padStart(2, "0")}`;
 }
 
 /**
- * Ticks once a second while a job runs, and not at all between jobs — the window must not wake up
- * every second to redraw a line that cannot change (the engine may be using the same machine).
+ * `Date.now()`, re-read once a second while `running` and not at all otherwise — the window must
+ * not wake up every second to redraw a line that cannot change (the engine may be using the same
+ * machine).
+ *
+ * A moment and not an elapsed span, because A §6's «осталось ≈» is a function of *now* as much as
+ * the elapsed time is, and the overlay must not run a second clock of its own.
  */
-function useElapsed(startedAt: number | null): number {
+export function useNow(running: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (startedAt === null) {
+    if (!running) {
       return;
     }
     setNow(Date.now());
@@ -34,8 +41,8 @@ function useElapsed(startedAt: number | null): number {
     return () => {
       window.clearInterval(id);
     };
-  }, [startedAt]);
-  return startedAt === null ? 0 : Math.max(0, now - startedAt);
+  }, [running]);
+  return now;
 }
 
 /**
@@ -48,9 +55,13 @@ export default function StatusLine({ view, status }: { view: WorkspaceView; stat
   const stage = useJobs((state) => state.stage);
   const progress = useJobs((state) => state.progress);
   const startedAt = useJobs((state) => state.startedAt);
-  const elapsed = useElapsed(startedAt);
+  const now = useNow(startedAt !== null);
+  const elapsed = startedAt === null ? 0 : Math.max(0, now - startedAt);
 
   const running = view.job !== null;
+  // A run has A §6's card over the viewport, which says the stage, the counts and the bar in full;
+  // repeating all three down here would be the same fact twice on one screen, a second apart.
+  const overlaid = status.kind === "running";
   const stageProgress = stage === null ? undefined : progress[stage];
   const stageName = stage === null ? null : t(`stage.${stage}`, { defaultValue: stage });
 
@@ -60,7 +71,7 @@ export default function StatusLine({ view, status }: { view: WorkspaceView; stat
     <footer className="flex h-[26px] shrink-0 items-center gap-3 border-t border-border bg-panel-2 px-3 text-xs text-muted">
       <span className="shrink-0 text-text">{t(`status.${status.kind}`)}</span>
 
-      {running && stageName !== null ? (
+      {running && !overlaid && stageName !== null ? (
         <>
           <span className="truncate">{stageName}</span>
           {stageProgress === undefined ? null : (

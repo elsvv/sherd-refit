@@ -1,12 +1,13 @@
 import clsx from "clsx";
 import type { TFunction } from "i18next";
 import type { ReactNode } from "react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { api } from "../ipc";
 import type { Unlisten } from "../ipc/api";
 import { toCommandError } from "../ipc/api";
+import type { RunSpec } from "../ipc/bindings/RunSpec";
 import type { StaleDiff } from "../ipc/bindings/StaleDiff";
 import type { WorkspaceView } from "../ipc/bindings/WorkspaceView";
 import InputCentre from "../modes/input/InputCentre";
@@ -21,6 +22,8 @@ import { useWorkspace } from "../state/workspace";
 import Button from "../ui/Button";
 import type { BannerAction, BannerProps } from "./Banner";
 import Banner from "./Banner";
+import LaunchSheet from "./LaunchSheet";
+import RunOverlay from "./RunOverlay";
 import StatusLine from "./StatusLine";
 import TopBar, { pickAndLinkInput } from "./TopBar";
 
@@ -140,6 +143,11 @@ export default function Frame({ view }: { view: WorkspaceView }) {
   const error = useWorkspace((state) => state.error);
   const lastFailure = useJobs((state) => state.lastFailure);
 
+  // What the launch sheet should open with, over the last run's own sheet; `null` is «closed».
+  // The frame owns it because more than one place opens the sheet — the top bar's action now,
+  // A §10's «Повторить на CPU» next — and only one of them may be up at a time.
+  const [sheet, setSheet] = useState<Partial<RunSpec> | null>(null);
+
   // Milestone 3 loads no assembly, so no group of one can be waiting for refinement (A §8.4).
   const status: Status = deriveStatus(view, selectedRunId, false);
   const panes: Panes = panesOf(mode, view);
@@ -189,7 +197,13 @@ export default function Frame({ view }: { view: WorkspaceView }) {
 
   return (
     <div className="flex h-full flex-col bg-bg">
-      <TopBar view={view} status={status} />
+      <TopBar
+        view={view}
+        status={status}
+        onAssemble={() => {
+          setSheet({});
+        }}
+      />
       {banners.map((banner, i) => (
         // Two banners of the same tone can only differ by their text, which is what keys them.
         <Banner key={`${banner.tone}-${String(i)}-${banner.text}`} {...banner} />
@@ -209,6 +223,7 @@ export default function Frame({ view }: { view: WorkspaceView }) {
           )}
         >
           {status.kind === "empty" ? <DropZone /> : panes.centre}
+          {status.kind === "running" ? <RunOverlay view={view} /> : null}
         </main>
 
         {rightOpen ? (
@@ -217,6 +232,16 @@ export default function Frame({ view }: { view: WorkspaceView }) {
       </div>
 
       <StatusLine view={view} status={status} />
+
+      {sheet === null ? null : (
+        <LaunchSheet
+          view={view}
+          patch={sheet}
+          onClose={() => {
+            setSheet(null);
+          }}
+        />
+      )}
     </div>
   );
 }

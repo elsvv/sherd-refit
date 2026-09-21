@@ -38,6 +38,19 @@
     "refine": "Refinement",
     "output": "Files"
   },
+  "strip": {
+    "preprocess": "Preparation",
+    "matching": "Matching",
+    "tiers": "Confidence",
+    "assembly": "Assembly",
+    "refine": "Refinement",
+    "output": "Files"
+  },
+  "duration": {
+    "seconds": "{{n}} s",
+    "minutes": "{{n}} min",
+    "hours": "{{h}} h {{m}} min"
+  },
   "welcome": {
     "tagline": "Assembling 3D scans of ceramic fragments",
     "create": "Create a workspace…",
@@ -85,9 +98,89 @@
     "prepare": "Prepare",
     "cancel": "Cancel",
     "assemble": "Assemble…",
-    "assemble_soon": "Assembly comes in the next version",
+    "regenerate": "Regenerate…",
+    "repeat": "Run again…",
     "relink": "Point at the folder again",
     "retry_prepare": "Prepare again"
+  },
+  "dialog": {
+    "close": "Close"
+  },
+  "sheet": {
+    "title": "Assembling the collection",
+    "preset": "Preset",
+    "preset_standard": "Standard",
+    "preset_standard_hint": "the engine's own thresholds",
+    "preset_thorough": "Thorough",
+    "preset_thorough_hint": "match twice with different seeds and keep only what both runs agreed on; about twice the time",
+    "preset_custom": "Custom parameters",
+    "preset_custom_hint": "the eleven thresholds below",
+    "backend": "Compute",
+    "backend_auto": "Auto",
+    "backend_cpu": "CPU",
+    "backend_gpu": "GPU",
+    "params": "Parameters",
+    "estimate_title": "Estimate",
+    "estimate": "≈ {{time}} on this machine ({{pairs}})",
+    "estimate_none": "An estimate will appear a minute into the run — this is the first assembly on this machine.",
+    "estimate_loading": "Working out the estimate…",
+    "pairs_one": "up to {{n}} pair",
+    "pairs_other": "up to {{n}} pairs",
+    "reset": "reset",
+    "default": "default {{value}}",
+    "out_of_range": "The value has to be between {{min}} and {{max}}.",
+    "need_number": "A number is needed.",
+    "invalid": "Fix the marked parameters",
+    "on": "on",
+    "off": "off",
+    "submit": "Assemble",
+    "cancel": "Cancel"
+  },
+  "param": {
+    "seed": {
+      "label": "Seed",
+      "hint": "Seed of every random draw: the three per-fragment samplers, the coarse probe and the partner search. Another seed lays the collection out slightly differently."
+    },
+    "target_faces": {
+      "label": "Faces in the working mesh",
+      "hint": "How many faces of each scan survive into the matching. Full resolution goes only into the refinement."
+    },
+    "tiers": {
+      "label": "Confidence bands",
+      "hint": "Probe every accepted join once more and sort the joins into bands; only the confirmed band is assembled. Costs about half a run again."
+    },
+    "agree_seeds": {
+      "label": "Agreeing runs",
+      "hint": "How many independent runs at different seeds have to confirm a join at the same placement. 0 and 1 are off; 2 is «Thorough»."
+    },
+    "thick_ratio": {
+      "label": "Wall-thickness ratio",
+      "hint": "A pair is skipped when the two wall thicknesses differ by more than this factor."
+    },
+    "min_tight": {
+      "label": "Tight contact, minimum",
+      "hint": "The tight-contact fraction below which a join is not accepted."
+    },
+    "max_gap": {
+      "label": "Fracture gap, maximum",
+      "hint": "The median fracture gap, in wall thicknesses; the pair's limit is the larger of k·t and the scan's resolution."
+    },
+    "min_seam": {
+      "label": "Seam length, minimum",
+      "hint": "The shortest shared seam, in wall thicknesses."
+    },
+    "max_pen": {
+      "label": "Penetration, maximum",
+      "hint": "The penetrating surface fraction above which a join is not accepted."
+    },
+    "workers": {
+      "label": "Threads",
+      "hint": "Worker threads. 0 means one per core minus one."
+    },
+    "memory_gb": {
+      "label": "Memory, GB",
+      "hint": "Gigabytes the scans may occupy at once during preprocessing. Empty means half of the machine's memory."
+    }
   },
   "input": {
     "files_one": "{{count}} file",
@@ -138,6 +231,20 @@
   },
   "job": {
     "elapsed": "elapsed {{time}}"
+  },
+  "run": {
+    "starting": "Starting the engine…",
+    "remaining": "≈ {{time}} left",
+    "remaining_soon": "a time estimate will appear shortly",
+    "pairs_done": "{{done}} of {{total}} pairs",
+    "units_done": "{{done}} of {{total}}",
+    "backend": "Compute: {{backend}}",
+    "strip": "Run stages",
+    "stopping": "Stopping…",
+    "cancel_title": "Stop the assembly?",
+    "cancel_body": "The pairs already matched will not be kept.",
+    "cancel_confirm": "Stop",
+    "cancel_keep": "Keep going"
   },
   "banner": {
     "input_missing": "The folder with the scans is unavailable: it has moved, or its disk is disconnected.",

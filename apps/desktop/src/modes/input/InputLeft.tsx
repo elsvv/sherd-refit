@@ -126,7 +126,14 @@ function Cell({
       <span className={clsx("flex min-w-0 items-baseline gap-1", grid ? "w-full justify-center" : "flex-1")}>
         <span className={clsx("truncate text-[11px]", row.excluded && "line-through")}>{name}</span>
         {row.warnings > 0 ? (
-          <span className="shrink-0 text-warn" role="img" aria-label={t("counts.warnings", { n: row.warnings })}>
+          // The same 11 px as the name: at the inherited body size the sign's line box is 2.8 px
+          // taller than the name's, which the thumbnail above absorbs (it is the `flex-1`), and
+          // the tiles of one grid row then stop sharing a bottom edge.
+          <span
+            className="shrink-0 text-[11px] text-warn"
+            role="img"
+            aria-label={t("counts.warnings", { n: row.warnings })}
+          >
             ⚠
           </span>
         ) : null}

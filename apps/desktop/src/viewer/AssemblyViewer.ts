@@ -873,7 +873,9 @@ export class AssemblyViewer {
    *
    * Under that many, the names still have to be kept off one another: two fragments a hand's width
    * apart in the pot are a few pixels apart on screen, and two names printed over each other say
-   * less than one name does. The one in front wins, which is the one whose fragment the eye is on.
+   * less than one name does. The one in front wins, which is the one whose fragment the eye is on
+   * — except for the chosen fragment, whose name is placed before every other, because the one
+   * name a person who has just clicked a fragment is looking for is that one.
    */
   private placeLabels(): void {
     if (!this.labelsOn) {
@@ -904,7 +906,9 @@ export class AssemblyViewer {
         depth: TMP_V.z,
       });
     }
-    wanted.sort((a, b) => a.depth - b.depth);
+    const chosen = this.selected;
+    const first = (name: string): number => (name === chosen ? 0 : 1);
+    wanted.sort((a, b) => first(a.name) - first(b.name) || a.depth - b.depth);
 
     const taken: { left: number; right: number; top: number; bottom: number }[] = [];
     let used = 0;

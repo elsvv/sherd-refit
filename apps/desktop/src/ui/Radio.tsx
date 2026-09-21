@@ -21,6 +21,12 @@ export interface RadioProps<T extends string> {
   onChange: (value: T) => void;
   /** `card` is A §7.4's three preset cards; `inline` the «Авто · CPU · GPU» row. */
   variant?: "card" | "inline" | undefined;
+  /**
+   * Whether the whole group is out of reach — A §9.1's export dialog while it is writing. On the
+   * `<fieldset>` and not on each input, because that is what a fieldset is for: the browser
+   * disables everything inside it and takes the lot out of the tab order in one attribute.
+   */
+  disabled?: boolean | undefined;
 }
 
 /**
@@ -32,12 +38,30 @@ export interface RadioProps<T extends string> {
  * The ring is drawn on the label through `has-[:focus-visible]`, since the input itself is not on
  * the screen: without it the keyboard would be moving a focus nobody can see (A §7.1).
  */
-export default function Radio<T extends string>({ name, legend, value, options, onChange, variant = "card" }: RadioProps<T>) {
+export default function Radio<T extends string>({
+  name,
+  legend,
+  value,
+  options,
+  onChange,
+  variant = "card",
+  disabled = false,
+}: RadioProps<T>) {
   const card = variant === "card";
   return (
-    <fieldset>
+    <fieldset disabled={disabled} className={clsx(disabled && "opacity-45")}>
       <legend className="mb-1.5 text-[10px] tracking-wide text-muted uppercase">{legend}</legend>
-      <div className={clsx(card ? "grid grid-cols-3 gap-1.5" : "flex flex-wrap items-center gap-1.5")}>
+      {/* One column per card, so a choice between two is two halves and not two thirds with a
+          hole beside them (A §9.1's «Папка результата» / «Только таблицы и отчёт»). */}
+      <div
+        className={clsx(
+          card
+            ? options.length === 2
+              ? "grid grid-cols-2 gap-1.5"
+              : "grid grid-cols-3 gap-1.5"
+            : "flex flex-wrap items-center gap-1.5",
+        )}
+      >
         {options.map((option) => {
           const chosen = option.value === value;
           return (

@@ -9,6 +9,7 @@ import type { Decision } from "../ipc/bindings/Decision";
 import type { Event as EngineEvent } from "../ipc/bindings/Event";
 import type { PairDetailDto } from "../ipc/bindings/PairDetailDto";
 import { useAssembly } from "./assembly";
+import { useExport } from "./export";
 
 /**
  * The reviewer's own state (A §8): which run is being reviewed, what has been decided about its
@@ -452,9 +453,19 @@ export const useReview = create<ReviewState>()((set, get) => {
           }
           break;
         }
-        case "request_failed":
+        case "request_failed": {
+          // A §9.1's export is one more request of this same session, and its four refusals —
+          // the folder is not empty, it is a file, there is no room, a scan has gone — belong
+          // to the dialog that is showing the folder they are about. Said here as well they
+          // would be a second banner over the window, under a heading («Не удалось запустить
+          // ядро») that is about the worker and not about a folder the user can now change.
+          const exporting = useExport.getState();
+          if (exporting.phase === "running" && exporting.runId === payload.run_id) {
+            break;
+          }
           set({ pending: false, refining: false, error: { kind: "worker", message: event.message } });
           break;
+        }
         default:
           // `stage` and `progress` while the match loads and while R §9 runs; the status line
           // reads those from the jobs store, as it does for every other job.

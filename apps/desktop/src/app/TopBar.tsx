@@ -5,12 +5,15 @@ import { useTranslation } from "react-i18next";
 
 import { api } from "../ipc";
 import { toCommandError } from "../ipc/api";
+import type { ResolutionDto } from "../ipc/bindings/ResolutionDto";
 import type { RunFile } from "../ipc/bindings/RunFile";
 import type { WorkspaceView } from "../ipc/bindings/WorkspaceView";
 import { queueRows } from "../modes/review/queue";
 import { useAssembly } from "../state/assembly";
+import { useExport } from "../state/export";
 import { useJobs } from "../state/jobs";
 import { useReview } from "../state/review";
+import { useSettings } from "../state/settings";
 import type { Status } from "../state/status";
 import type { Language, Mode, Theme } from "../state/ui";
 import { useUi } from "../state/ui";
@@ -88,28 +91,30 @@ interface PrimaryAction {
   run: () => void;
 }
 
-/** The menu behind the workspace name: where to go, and the two settings A §7.4 keeps. */
-function WorkspaceMenu({ name }: { name: string }) {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  const box = useRef<HTMLDivElement>(null);
-  const theme = useUi((state) => state.theme);
-  const language = useUi((state) => state.language);
-
-  // A menu that stays open after the pointer has gone elsewhere is a menu in the way; Escape is
-  // the keyboard's way out of the same corner.
+/**
+ * Closes a menu when the pointer goes elsewhere or `Escape` is pressed. A menu that stays open
+ * after the cursor has left is a menu in the way, and the keyboard needs the same way out; both
+ * menus of the bar want exactly this, so it is written once.
+ */
+function useDismiss(open: boolean, close: () => void, box: React.RefObject<HTMLDivElement | null>): void {
+  // The callback as the last render gave it, so the listeners are installed once per opening
+  // and not again on every render of the bar.
+  const latest = useRef(close);
+  useEffect(() => {
+    latest.current = close;
+  });
   useEffect(() => {
     if (!open) {
       return;
     }
     const onPointerDown = (e: PointerEvent) => {
       if (e.target instanceof Node && box.current?.contains(e.target) !== true) {
-        setOpen(false);
+        latest.current();
       }
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        setOpen(false);
+        latest.current();
       }
     };
     window.addEventListener("pointerdown", onPointerDown);
@@ -118,7 +123,20 @@ function WorkspaceMenu({ name }: { name: string }) {
       window.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [open]);
+  }, [open, box]);
+}
+
+/** The menu behind the workspace name: where to go, the settings screen, and A §7.4's two. */
+function WorkspaceMenu({ name }: { name: string }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  const theme = useUi((state) => state.theme);
+  const language = useUi((state) => state.language);
+
+  useDismiss(open, () => {
+    setOpen(false);
+  }, box);
 
   const openAnother = () => {
     setOpen(false);
@@ -171,6 +189,16 @@ function WorkspaceMenu({ name }: { name: string }) {
           >
             {t("menu.close")}
           </MenuItem>
+          {/* A §7.4's settings screen. The two rows below it stay where they are: язык and тема
+              are one keystroke away here and the screen is where they are explained. */}
+          <MenuItem
+            onClick={() => {
+              setOpen(false);
+              useSettings.getState().setOpen(true);
+            }}
+          >
+            {t("menu.settings")}
+          </MenuItem>
           <MenuLabel>{t("menu.language")}</MenuLabel>
           {languages.map((code) => (
             <MenuItem
@@ -201,6 +229,69 @@ function WorkspaceMenu({ name }: { name: string }) {
   );
 }
 
+/**
+ * A §9's «Экспорт»: the dialog that writes the reviewed assembly, and the two ways into Blender
+ * for the assembly as a whole (A §9.2's «вся сборка»; «эта группа» is the group inspector's,
+ * beside the group it is about).
+ *
+ * A menu and not a button, because A §9 gives this corner three actions and only one of them is
+ * a dialog. It is drawn only over a finished run — there is nothing to export out of a run that
+ * assembled nothing — rather than shown disabled, because unlike a mode tab it is not part of
+ * the frame's furniture.
+ */
+function ExportMenu({ runId, onExport }: { runId: string; onExport: () => void }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  const busy = useExport((state) => state.blenderBusy);
+
+  useDismiss(open, () => {
+    setOpen(false);
+  }, box);
+
+  const blender = (resolution: ResolutionDto) => () => {
+    setOpen(false);
+    void useExport.getState().openInBlender(runId, { kind: "all" }, resolution);
+  };
+
+  return (
+    <div className="relative" ref={box}>
+      <Button
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => {
+          setOpen(!open);
+        }}
+      >
+        {t("topbar.export")}
+        <ChevronDown size={14} aria-hidden="true" />
+      </Button>
+      {open ? (
+        <div
+          role="menu"
+          className="absolute top-full right-0 z-20 mt-1 w-72 rounded-md border border-border bg-panel p-1 shadow-lg"
+        >
+          <MenuItem
+            onClick={() => {
+              setOpen(false);
+              onExport();
+            }}
+          >
+            {t("export.open")}
+          </MenuItem>
+          <MenuLabel>{t("blender.menu")}</MenuLabel>
+          <MenuItem disabled={busy} onClick={blender("full")}>
+            {`${t("blender.all")} · ${t("blender.full")}`}
+          </MenuItem>
+          <MenuItem disabled={busy} onClick={blender("display")}>
+            {`${t("blender.all")} · ${t("blender.display")}`}
+          </MenuItem>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /** A heading inside the menu; not focusable, because there is nothing to do with it. */
 function MenuLabel({ children }: { children: string }) {
   return <div className="mt-1 px-2 pt-1 pb-0.5 text-[10px] tracking-wide text-muted uppercase">{children}</div>;
@@ -210,10 +301,12 @@ function MenuLabel({ children }: { children: string }) {
 function MenuItem({
   children,
   checked,
+  disabled,
   onClick,
 }: {
   children: string;
   checked?: boolean;
+  disabled?: boolean;
   onClick: () => void;
 }) {
   return (
@@ -221,8 +314,13 @@ function MenuItem({
       type="button"
       role={checked === undefined ? "menuitem" : "menuitemradio"}
       aria-checked={checked}
+      disabled={disabled ?? false}
       onClick={onClick}
-      className={clsx("flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs hover:bg-panel-2", FOCUS_RING)}
+      className={clsx(
+        "flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs hover:bg-panel-2",
+        "disabled:cursor-default disabled:opacity-45 disabled:hover:bg-transparent",
+        FOCUS_RING,
+      )}
     >
       <span className="w-3 text-accent">{checked === true ? "•" : ""}</span>
       <span className="truncate">{children}</span>
@@ -239,11 +337,14 @@ export default function TopBar({
   view,
   status,
   onAssemble,
+  onExport,
 }: {
   view: WorkspaceView;
   status: Status;
   /** Opens A §7.4's launch sheet, with whatever the action wants changed in it. */
   onAssemble: () => void;
+  /** Opens A §9.1's export dialog over the run being shown. */
+  onExport: () => void;
 }) {
   const { t } = useTranslation();
   const mode = useUi((state) => state.mode);
@@ -408,6 +509,10 @@ export default function TopBar({
       >
         <PanelRight size={14} aria-hidden="true" />
       </IconButton>
+
+      {/* A §9: the work leaves the app from here, and only for a run that has something to
+          leave with — the very same «finished run» the «Сборка» tab is drawn for. */}
+      {assembled === null ? null : <ExportMenu runId={assembled.id} onExport={onExport} />}
 
       {primary === null ? null : (
         // The tooltip goes on a wrapper as well: a disabled button gets no mouse events of its

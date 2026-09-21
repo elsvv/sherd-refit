@@ -8,6 +8,7 @@ import type { FailKind } from "../ipc/bindings/FailKind";
 import type { FragmentInfo } from "../ipc/bindings/FragmentInfo";
 import type { RunSpec } from "../ipc/bindings/RunSpec";
 import type { StageSample } from "./eta";
+import { useExport } from "./export";
 import { useReview } from "./review";
 import { useUi } from "./ui";
 import { useWorkspace } from "./workspace";
@@ -282,10 +283,14 @@ export async function listenToEngine(): Promise<Unlisten> {
     // to the strip: one subscription for the window's whole life, fanned out here, rather than
     // a second one that the review screen would have to remember to take down.
     useReview.getState().applyEvent(payload);
+    // And A §9.1's export, which is one more request of that same session: its progress and its
+    // ending arrive on this channel and nowhere else.
+    useExport.getState().applyEvent(payload);
   });
   const offFinished = await api.onEngineFinished((payload) => {
     useJobs.getState().applyFinished(payload);
     useReview.getState().applyFinished(payload);
+    useExport.getState().applyFinished(payload);
   });
   // A failure belongs to the workspace it happened in (A §10: the banner names a run of *this*
   // collection). Opening another workspace, creating one or closing this one must not leave it

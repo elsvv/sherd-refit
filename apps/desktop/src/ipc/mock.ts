@@ -1,6 +1,7 @@
 import type { AssemblyDto } from "./bindings/AssemblyDto";
 import type { CandidateRow } from "./bindings/CandidateRow";
 import type { Decision } from "./bindings/Decision";
+import type { ExportWhat } from "./bindings/ExportWhat";
 import type { FileStamp } from "./bindings/FileStamp";
 import type { FragmentInfo } from "./bindings/FragmentInfo";
 import type { GroupDto } from "./bindings/GroupDto";
@@ -12,6 +13,7 @@ import type { RunFile } from "./bindings/RunFile";
 import type { RunSpec } from "./bindings/RunSpec";
 import type { RunStatus } from "./bindings/RunStatus";
 import type { RunView } from "./bindings/RunView";
+import type { Settings } from "./bindings/Settings";
 import type { StaleDiff } from "./bindings/StaleDiff";
 import type { UnplacedDto } from "./bindings/UnplacedDto";
 import type { Warning } from "./bindings/Warning";
@@ -589,6 +591,8 @@ const world: {
    * inspector shows them, and A §8.5's «Перенести решения ревью (N)» has an N.
    */
   decisions: Record<string, Decision[]>;
+  /** A §11's settings, which the shell keeps in the app's config folder and this keeps in memory. */
+  settings: Settings;
 } = {
   view: null,
   runs: [],
@@ -600,6 +604,7 @@ const world: {
   review: { runId: null, baseline: ASSEMBLY, assembly: ASSEMBLY, readyAt: 0 },
   filed: {},
   decisions: {},
+  settings: { version: 1, backend: "auto", memory_gb: null, workers: 0, blender_path: null },
 };
 
 /** Refuses the way the shell refuses: a plain `{ kind, message }`, never an `Error`. */
@@ -1189,6 +1194,24 @@ function answer(ms: number, run: () => void): void {
   at(Math.max(0, world.review.readyAt - Date.now()) + ms, run);
 }
 
+/**
+ * Opens a session over a finished run and starts playing its loading, whoever asked: entering
+ * the «Ревью» mode, or an «Экспорт» from the top bar with no session open at all (A §9.1 — the
+ * shell opens one by itself).
+ */
+function openReview(runId: string): void {
+  closeSession();
+  // A §8.4: the session's baseline is `assembly.json` as it stands — the run's own assembly, or
+  // the draft a reviewer left there last time.
+  const standing = world.filed[runId] ?? ASSEMBLY;
+  world.review = { runId, baseline: standing, assembly: standing, readyAt: Date.now() + REVIEW_OPEN_MS };
+  const view = held();
+  if (view !== null) {
+    store({ ...view, job: { kind: "review", run_id: runId } });
+  }
+  playReviewOpen(runId);
+}
+
 /** Plays the opening of a session: the collection loaded from the cache, then `ready` (A §8). */
 function playReviewOpen(runId: string): void {
   playStage("review", runId, 0, REVIEW_OPEN_MS, "preprocess", ALL.length);
@@ -1198,6 +1221,95 @@ function playReviewOpen(runId: string): void {
       run_id: runId,
       event: { event: "ready", fragments: ALL.length, candidates: CANDIDATES.length },
     });
+  });
+}
+
+/** How long A §9.1's «сначала уточняются позы» takes in the mock. */
+const EXPORT_REFINE_MS = 900;
+/** And the writing itself, which is where a real export's minutes go (A §9.1, M6.2's `output`). */
+const EXPORT_WRITE_MS = 2000;
+/** And a `Tables` export, which writes no mesh and therefore reports no stage at all. */
+const EXPORT_TABLES_MS = 400;
+/** What the mock's files come to, in bytes — the order of magnitude a real folder export is. */
+const EXPORT_BYTES = 222_298_112;
+
+/**
+ * Every file an export of this kind writes, relative to `dest` and with `/` between the parts —
+ * as `Event::Exported.files` carries them, and as the dialog counts them (A §9.1).
+ *
+ * The tables, the report and `transforms.json` are written whatever the kind; the meshes are
+ * what «Папка результата» adds, and its three opt-ins add the rest.
+ */
+function exportFiles(what: ExportWhat): string[] {
+  const files = ["report.json", "report.md", "transforms.json", "README.txt"];
+  if (what.kind === "tables") {
+    return files;
+  }
+  const placed = GROUPS.filter((members) => members.length > 1).flat();
+  files.push("scene.glb", "viewer.html");
+  for (const name of what.placed_all ? NAMES : placed) {
+    files.push(`placed/${name}.ply`);
+  }
+  GROUPS.forEach((members, k) => {
+    if (members.length > 1 && what.merged_meshes) {
+      files.push(`assembly_${String(k)}.ply`);
+    }
+    if (members.length > 1 && what.previews) {
+      files.push(`preview_${String(k)}.png`);
+    }
+  });
+  return files;
+}
+
+/**
+ * Plays A §9.1's export: the refinement first — whose assembly *is* the run's new baseline, as
+ * the real session's is — then the `output` stage for a folder export and nothing for a tables
+ * one, then `exported`.
+ *
+ * A destination outside the workspace's own `exports/` is **refused**, in the engine's words
+ * and in English as the worker says them (A §9.1's first sentence). There is no file system here
+ * to find a folder full in, and the one folder this mock can honestly call «not empty» is the
+ * one `pickFolder` answers with — the scans themselves. Which makes the refusal reachable by
+ * hand, the point of the mock: «Выбрать…» and then «Экспортировать» shows the sentence, the
+ * dialog staying up and the session going on serving, exactly as a real one does.
+ */
+function playExport(runId: string, what: ExportWhat, dest: string): void {
+  // Everything below is measured from the moment the session can read the line, exactly as
+  // [`answer`] measures one request: an export asked for with no session open waits for it.
+  const from = Math.max(0, world.review.readyAt - Date.now());
+  if (!dest.includes("/exports/")) {
+    // Before the refinement and not after it, as `Session::on_export` refuses: a folder that is
+    // not empty is said in milliseconds, and an export that never happened must leave the
+    // window's assembly where it was.
+    at(from, () => {
+      emit({
+        job: "review",
+        run_id: runId,
+        event: {
+          event: "request_failed",
+          message: `${dest} is not empty; an export needs a new or empty folder`,
+        },
+      });
+    });
+    return;
+  }
+  const drafts = world.review.assembly.groups.filter((group) => group.members.length > 1 && !group.refined);
+  playStage("review", runId, from, EXPORT_REFINE_MS, "refine", Math.max(1, drafts.length));
+  at(from + EXPORT_REFINE_MS, () => {
+    const refined = allRefined(world.review.assembly);
+    world.review = { ...world.review, baseline: refined, assembly: refined };
+    world.filed[runId] = refined;
+    emit({ job: "review", run_id: runId, event: { event: "assembly", ...refined } });
+  });
+  const files = exportFiles(what);
+  const meshes = files.filter((file) => file.endsWith(".ply") || file.endsWith(".glb")).length;
+  const writing = what.kind === "folder" ? EXPORT_WRITE_MS : EXPORT_TABLES_MS;
+  if (what.kind === "folder" && meshes > 0) {
+    playStage("review", runId, from + EXPORT_REFINE_MS, writing, "output", meshes);
+  }
+  at(from + EXPORT_REFINE_MS + writing, () => {
+    const bytes = what.kind === "folder" ? EXPORT_BYTES : 98_304;
+    emit({ job: "review", run_id: runId, event: { event: "exported", dest, files, bytes } });
   });
 }
 
@@ -1384,16 +1496,7 @@ export const mockApi: Api = {
       // with the same `io` a missing file gives.
       return unwritten(runId, "match.state");
     }
-    closeSession();
-    // A §8.4: the session's baseline is `assembly.json` as it stands — the run's own assembly,
-    // or the draft a reviewer left there last time.
-    const standing = world.filed[runId] ?? ASSEMBLY;
-    world.review = { runId, baseline: standing, assembly: standing, readyAt: Date.now() + REVIEW_OPEN_MS };
-    const held_ = held();
-    if (held_ !== null) {
-      store({ ...held_, job: { kind: "review", run_id: runId } });
-    }
-    playReviewOpen(runId);
+    openReview(runId);
     return Promise.resolve();
   },
 
@@ -1478,6 +1581,90 @@ export const mockApi: Api = {
     }
     world.runs = world.runs.filter((run) => run.id !== runId);
     return put(view);
+  },
+
+  // A §9.1's suggestion: inside the workspace, dated to the minute as a run's id is.
+  exportDefaultDest: (what) => {
+    const view = held();
+    if (view === null) {
+      return refuse("no_workspace", "нет открытого воркспейса");
+    }
+    const now = new Date();
+    const pad = (n: number): string => String(n).padStart(2, "0");
+    const stamp = `${String(now.getFullYear())}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+    return Promise.resolve(`${view.root}/exports/${stamp}_${what.kind}`);
+  },
+
+  exportStart: (runId, what, dest) => {
+    const view = held();
+    if (view === null) {
+      return refuse("no_workspace", "нет открытого воркспейса");
+    }
+    if (view.job !== null && view.job.kind !== "review") {
+      return refuse("busy", "ядро занято другой задачей");
+    }
+    if (runOf(runId)?.status.state !== "done") {
+      return unwritten(runId, "match.state");
+    }
+    // As the shell's own check: a folder to write gigabytes into is named in full or not at all.
+    if (!dest.startsWith("/")) {
+      return refuse("io", `${dest}: нужен полный путь к папке, а не относительный`);
+    }
+    // A §9.1: the export opens a session over the run when there is none — from the top bar,
+    // with «Ревью» never entered, this is the ordinary case.
+    if (world.review.runId !== runId) {
+      openReview(runId);
+    }
+    playExport(runId, what, dest);
+    return Promise.resolve();
+  },
+
+  // A §9.2: no Blender on a machine that is a browser tab, which is the answer a real machine
+  // without one gives too — the script is written either way and «Показать в папке» is offered.
+  blenderOpen: (runId, scope) => {
+    const view = held();
+    if (view === null) {
+      return refuse("no_workspace", "нет открытого воркспейса");
+    }
+    const now = new Date();
+    const pad = (n: number): string => String(n).padStart(2, "0");
+    const stamp = `${String(now.getFullYear())}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+    const where = scope.kind === "all" ? "" : `-${String(scope.index)}`;
+    return Promise.resolve({
+      launched: false,
+      script: `${view.root}/exports/${stamp}_blender${where}/open_in_blender.py`,
+      blender: null,
+    });
+  },
+
+  // There is no file manager behind a browser tab; the call answers so that the button it is
+  // under can be pressed and seen to do nothing worse than nothing.
+  reveal: () => Promise.resolve(),
+
+  settingsGet: () => Promise.resolve(world.settings),
+
+  settingsSet: (settings) => {
+    // As `settings::write`: an unusable limit is refused before anything is remembered, and the
+    // `version` is the shell's own and never the window's.
+    const usable =
+      (settings.memory_gb === null || (Number.isFinite(settings.memory_gb) && settings.memory_gb > 0)) &&
+      settings.workers >= 0 &&
+      settings.workers <= 1024;
+    if (!usable) {
+      return refuse("json", "settings.json: такой лимит приложение не прочитало бы обратно");
+    }
+    world.settings = { ...settings, version: 1 };
+    return Promise.resolve(world.settings);
+  },
+
+  // A browser can only offer a download, which is what A §7.2's «Снимок PNG» was before the
+  // shell had a save dialog.
+  savePng: (name, dataUrl) => {
+    const link = document.createElement("a");
+    link.href = dataUrl;
+    link.download = name;
+    link.click();
+    return Promise.resolve();
   },
 
   // What the shell hands over once it has parsed the engine's `info`: the card, not the prose.

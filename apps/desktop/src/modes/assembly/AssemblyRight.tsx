@@ -13,6 +13,7 @@ import type { RunFile } from "../../ipc/bindings/RunFile";
 import type { Verdict } from "../../ipc/bindings/Verdict";
 import type { WorkspaceView } from "../../ipc/bindings/WorkspaceView";
 import { useAssembly } from "../../state/assembly";
+import { useExport } from "../../state/export";
 import { decisionOf, useReview } from "../../state/review";
 import { useUi } from "../../state/ui";
 import { useWorkspace } from "../../state/workspace";
@@ -435,8 +436,18 @@ function FragmentInspector({
 }
 
 /** The selected group: what is in it, how many joins hold it together, and «Показать одну». */
-function GroupInspector({ assembly, index }: { assembly: AssemblyDto; index: number }) {
+function GroupInspector({
+  assembly,
+  index,
+  runId,
+}: {
+  assembly: AssemblyDto;
+  index: number;
+  /** The run this group belongs to; `null` while none is selected, which takes Blender away. */
+  runId: string | null;
+}) {
   const { t } = useTranslation();
+  const blenderBusy = useExport((state) => state.blenderBusy);
   const group = assembly.groups[index];
   if (group === undefined) {
     // The run changed under the selection — the inspector says nothing rather than about nothing.
@@ -468,6 +479,28 @@ function GroupInspector({ assembly, index }: { assembly: AssemblyDto; index: num
           {t("assembly.show_one")}
         </Button>
       </div>
+
+      {/* A §9.2's «эта группа»: the whole point of opening one group in Blender is that it is
+          the group being looked at, so the two resolutions are offered here and not in a menu
+          at the other end of the window. */}
+      {runId === null ? null : (
+        <>
+          <Heading>{t("blender.menu")}</Heading>
+          <div className="mt-1 flex flex-wrap gap-1.5">
+            {(["full", "display"] as const).map((resolution) => (
+              <Button
+                key={resolution}
+                disabled={blenderBusy}
+                onClick={() => {
+                  void useExport.getState().openInBlender(runId, { kind: "group", index }, resolution);
+                }}
+              >
+                {t(`blender.${resolution}`)}
+              </Button>
+            ))}
+          </div>
+        </>
+      )}
 
       <Heading>{t("assembly.members")}</Heading>
       {group.members.map((name) => (
@@ -603,7 +636,7 @@ export default function AssemblyRight({ view }: { view: WorkspaceView }) {
           decisions={decisions}
         />
       ) : assembly !== null && selectedGroup !== null ? (
-        <GroupInspector assembly={assembly} index={selectedGroup} />
+        <GroupInspector assembly={assembly} index={selectedGroup} runId={selectedRunId} />
       ) : run !== undefined ? (
         <RunSummary run={run} t={t} />
       ) : (

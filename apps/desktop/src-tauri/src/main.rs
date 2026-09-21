@@ -70,6 +70,7 @@ fn main() {
             commands::reveal,
             commands::settings_get,
             commands::settings_set,
+            commands::snapshot_save,
         ])
         .run(tauri::generate_context!())
         .expect("the window could not be opened");

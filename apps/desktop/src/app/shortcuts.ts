@@ -3,6 +3,7 @@ import { create } from "zustand";
 
 import { decide } from "../modes/review/ReviewCentre";
 import { useReview } from "../state/review";
+import { useSettings } from "../state/settings";
 import { useUi } from "../state/ui";
 import { useWorkspace } from "../state/workspace";
 import { assembledRun, MODES, modeEnabled } from "./TopBar";
@@ -110,6 +111,15 @@ export function useShortcuts(): void {
         } else {
           useReview.getState().undo();
         }
+        return;
+      }
+
+      // A §7.4's settings screen, on the key every desktop app opens its preferences with. It
+      // is matched on `event.code` like the rest: the comma is the same physical key on a
+      // Russian layout, where it types «б».
+      if (e.code === "Comma" && mod && !otherMod && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        useSettings.getState().setOpen(true);
         return;
       }
 

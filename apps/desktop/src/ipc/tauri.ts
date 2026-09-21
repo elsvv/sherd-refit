@@ -1,15 +1,17 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 
 import type { AssemblyDto } from "./bindings/AssemblyDto";
 import type { CandidateRow } from "./bindings/CandidateRow";
 import type { DecisionsFile } from "./bindings/DecisionsFile";
+import type { Settings } from "./bindings/Settings";
 import type { WorkspaceView } from "./bindings/WorkspaceView";
 import type {
   Api,
   AppInfo,
+  BlenderOutcome,
   CalibrationView,
   EngineEventPayload,
   EngineFinishedPayload,
@@ -79,6 +81,42 @@ export const tauriApi: Api = {
   },
   reviewClose: async () => {
     await invoke("review_close");
+  },
+
+  // A §9's two exports and A §11's settings. `exportStart` and `blenderOpen` take the run the
+  // window is showing: which run is selected is the window's own state, and the shell opens the
+  // session for it.
+  exportDefaultDest: (what) => invoke<string>("export_default_dest", { what }),
+  exportStart: async (runId, what, dest) => {
+    await invoke("export_start", { runId, what, dest });
+  },
+  blenderOpen: (runId, scope, resolution) =>
+    invoke<BlenderOutcome>("blender_open", { runId, scope, resolution }),
+  reveal: async (path) => {
+    await invoke("reveal", { path });
+  },
+  settingsGet: () => invoke<Settings>("settings_get"),
+  settingsSet: (settings) => invoke<Settings>("settings_set", { settings }),
+
+  /**
+   * «Снимок PNG» through the OS's own save dialog. The webview cannot write a file and a
+   * `<a download>` inside a Tauri window downloads nowhere, so the path is asked for here and
+   * the bytes are written by the shell — which is also the only side that may touch a folder
+   * the user picked outside the workspace (A §2.1).
+   *
+   * The data URL is split rather than parsed: `HTMLCanvasElement.toDataURL` writes exactly
+   * `data:image/png;base64,…`, and anything else is not a PNG this window drew.
+   */
+  savePng: async (name, dataUrl) => {
+    const png = dataUrl.slice(dataUrl.indexOf(",") + 1);
+    if (!dataUrl.startsWith("data:image/png;base64,") || png.length === 0) {
+      return;
+    }
+    const path = await save({ defaultPath: name, filters: [{ name: "PNG", extensions: ["png"] }] });
+    if (path === null) {
+      return;
+    }
+    await invoke("snapshot_save", { path, png });
   },
 
   pickFolder: async (title) => {

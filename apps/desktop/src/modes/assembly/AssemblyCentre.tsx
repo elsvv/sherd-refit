@@ -3,9 +3,11 @@ import { useTranslation } from "react-i18next";
 
 import { useFitSignal } from "../../app/shortcuts";
 import { api } from "../../ipc";
+import { toCommandError } from "../../ipc/api";
 import type { WorkspaceView } from "../../ipc/bindings/WorkspaceView";
 import { useAssembly } from "../../state/assembly";
 import { useUi } from "../../state/ui";
+import { useWorkspace } from "../../state/workspace";
 import Chip from "../../ui/Chip";
 import type { AssemblyViewHandle } from "../../viewer/AssemblyView";
 import AssemblyView from "../../viewer/AssemblyView";
@@ -119,16 +121,21 @@ export default function AssemblyCentre({ view }: { view: WorkspaceView }) {
    * «Снимок PNG». The canvas is drawn without `preserveDrawingBuffer`, so its pixels are readable
    * only in the turn of the event loop they were drawn in — which is why this reads the data URL
    * straight out of the click and awaits nothing before it.
+   *
+   * Where it goes is the API's: the OS's own save dialog in the app, a download in a browser
+   * (A §2.1 — a webview cannot write a file, and only the shell may touch a folder the user
+   * picked outside the workspace). A cancelled dialog writes nothing and says nothing.
    */
   const shoot = (): void => {
     const url = viewer.current?.screenshot();
     if (url === null || url === undefined) {
       return;
     }
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = snapshotName(runId);
-    link.click();
+    void api.savePng(snapshotName(runId), url).catch((e: unknown) => {
+      // A file the shell would not write is A §10's banner, as every other refusal is: the
+      // viewport has nowhere of its own to put a sentence.
+      useWorkspace.getState().setError(toCommandError(e));
+    });
   };
 
   return (

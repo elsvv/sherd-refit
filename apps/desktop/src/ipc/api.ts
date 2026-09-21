@@ -4,9 +4,13 @@ import type { Calibration } from "./bindings/Calibration";
 import type { CandidateRow } from "./bindings/CandidateRow";
 import type { DecisionsFile } from "./bindings/DecisionsFile";
 import type { Event as EngineEvent } from "./bindings/Event";
+import type { ExportWhat } from "./bindings/ExportWhat";
 import type { JobKind } from "./bindings/JobKind";
 import type { Outcome } from "./bindings/Outcome";
+import type { ResolutionDto } from "./bindings/ResolutionDto";
 import type { RunSpec } from "./bindings/RunSpec";
+import type { ScopeDto } from "./bindings/ScopeDto";
+import type { Settings } from "./bindings/Settings";
 import type { WorkspaceView } from "./bindings/WorkspaceView";
 
 /**
@@ -81,6 +85,21 @@ export interface CalibrationView {
 export interface EngineInfoView {
   adapters: string[];
   gpu: boolean;
+}
+
+/**
+ * What «Открыть в Blender» came to (A §9.2), as `commands::BlenderOutcome` serialises it. A
+ * hand-written mirror like [`AppInfo`], because the struct is the shell's own and never travels
+ * through the engine's protocol, so `ts-rs` writes no binding for it.
+ *
+ * `launched: false` with `blender: null` is the ordinary answer on a machine that has no
+ * Blender, and not a failure: the script is written either way, and `script` is its whole path —
+ * which is what [`Api.reveal`] is given for «Показать в папке».
+ */
+export interface BlenderOutcome {
+  launched: boolean;
+  script: string;
+  blender: string | null;
 }
 
 /** Undoes one subscription. */
@@ -167,6 +186,44 @@ export interface Api {
   runLog(runId: string | null, maxLines: number): Promise<string>;
   /** Moves a run's folder to the OS trash (A §4) and hands back the workspace without it. */
   runDelete(runId: string): Promise<WorkspaceView>;
+  /**
+   * Where «Экспорт» offers to write before the user has picked anywhere (A §9.1):
+   * `<workspace>/exports/<date>_<folder|tables>`. A suggestion and nothing more — the dialog
+   * sends back whatever the user settled on.
+   */
+  exportDefaultDest(what: ExportWhat): Promise<string>;
+  /**
+   * Writes the reviewed assembly of `runId` into `dest` (A §9.1). The shell opens a review
+   * session over the run when none is open, so this works from the top bar with «Ревью» never
+   * entered; `dest` must be the whole path of a folder.
+   *
+   * Nothing but the acknowledgement comes back from the call: the export reports itself as the
+   * session's own events — an `assembly` (the refinement A §9.1 runs first, which *is* the run's
+   * new baseline), then the `output` stage's progress for a folder export, then `exported`. A
+   * refusal — the folder is not empty, there is no room, the scans are gone — arrives as
+   * `request_failed` and the session stays open, so the dialog can offer another folder.
+   */
+  exportStart(runId: string, what: ExportWhat, dest: string): Promise<void>;
+  /**
+   * «Открыть в Blender» (A §9.2): the whole assembly or one group, from the original scans or
+   * from the display meshes, as a Python script the shell writes and then tries to launch.
+   */
+  blenderOpen(runId: string, scope: ScopeDto, resolution: ResolutionDto): Promise<BlenderOutcome>;
+  /**
+   * «Показать в папке» (A §9.1, A §9.2). The shell shows only what it has agreed to: a path
+   * inside the open workspace, or inside the folder this session's last export was written into.
+   */
+  reveal(path: string): Promise<void>;
+  /** What the app remembers about this computer (A §11's screen). */
+  settingsGet(): Promise<Settings>;
+  /** Writes them, and answers with what is now on disk — which is what the screen then shows. */
+  settingsSet(settings: Settings): Promise<Settings>;
+  /**
+   * «Снимок PNG» (A §7.2): offers the frame under a name of the window's choosing. In the app
+   * that is the OS's save dialog and a file written by the shell; in a browser it is a download,
+   * which is all a browser can do. Does nothing when the dialog is cancelled.
+   */
+  savePng(name: string, dataUrl: string): Promise<void>;
   /** Which cards the engine sees; asked of a worker once and kept by the shell. */
   engineInfo(): Promise<EngineInfoView>;
   pickFolder(title: string): Promise<string | null>;

@@ -23,6 +23,7 @@ import ReviewRight from "../modes/review/ReviewRight";
 import { useAssembly } from "../state/assembly";
 import { useJobs } from "../state/jobs";
 import { useReview } from "../state/review";
+import { useSettings } from "../state/settings";
 import type { Status } from "../state/status";
 import { deriveStatus, hasUnrefinedGroups } from "../state/status";
 import type { Mode } from "../state/ui";
@@ -31,9 +32,12 @@ import { useWorkspace } from "../state/workspace";
 import Button from "../ui/Button";
 import type { BannerAction, BannerProps } from "./Banner";
 import Banner from "./Banner";
+import BlenderToast from "./BlenderToast";
+import ExportDialog from "./ExportDialog";
 import LaunchSheet from "./LaunchSheet";
 import LogDrawer from "./LogDrawer";
 import RunOverlay from "./RunOverlay";
+import SettingsDialog from "./SettingsDialog";
 import StatusLine from "./StatusLine";
 import TopBar, { assembledRun, modeEnabled, pickAndLinkInput } from "./TopBar";
 
@@ -161,6 +165,9 @@ export default function Frame({ view }: { view: WorkspaceView }) {
   // The frame owns it because more than one place opens the sheet — the top bar's action now,
   // A §10's «Повторить на CPU» next — and only one of them may be up at a time.
   const [sheet, setSheet] = useState<Partial<RunSpec> | null>(null);
+  /** Whether A §9.1's export dialog is up. The frame owns it, as it owns the launch sheet. */
+  const [exporting, setExporting] = useState(false);
+  const settingsOpen = useSettings((state) => state.open);
 
   // A §5's «draft» row: a reassembly the reviewer has not refined yet, straight from the
   // assembly the window is showing (A §8.4).
@@ -388,13 +395,18 @@ export default function Frame({ view }: { view: WorkspaceView }) {
         onAssemble={() => {
           setSheet({});
         }}
+        onExport={() => {
+          setExporting(true);
+        }}
       />
       {banners.map((banner, i) => (
         // Two banners of the same tone can only differ by their text, which is what keys them.
         <Banner key={`${banner.tone}-${String(i)}-${banner.text}`} {...banner} />
       ))}
 
-      <div className="flex min-h-0 flex-1">
+      {/* `relative` for the Blender toast below, which hangs over the corner of the panes and
+          not over the status line. */}
+      <div className="relative flex min-h-0 flex-1">
         {leftOpen ? (
           <aside className={clsx("shrink-0 overflow-hidden border-r border-border bg-panel", leftWidth(mode))}>
             {panes.left}
@@ -414,6 +426,11 @@ export default function Frame({ view }: { view: WorkspaceView }) {
         {rightOpen ? (
           <aside className="w-[260px] shrink-0 overflow-hidden border-l border-border bg-panel">{panes.right}</aside>
         ) : null}
+
+        {/* A §9.2's answer, over the corner of whichever mode the user is in: «Открыть в
+            Blender» is asked for from the export menu and from the group inspector alike, and
+            neither of them is a place a sentence of three lines could be put. */}
+        <BlenderToast />
       </div>
 
       {logOpen ? <LogDrawer view={view} /> : null}
@@ -435,6 +452,26 @@ export default function Frame({ view }: { view: WorkspaceView }) {
           }}
         />
       )}
+
+      {/* A §9.1. Over the run the window is showing, which is the only run the top bar offers
+          the action for; a run deleted or unselected under the dialog takes it away with it. */}
+      {exporting && selectedRunId !== null && assembled ? (
+        <ExportDialog
+          view={view}
+          runId={selectedRunId}
+          onClose={() => {
+            setExporting(false);
+          }}
+        />
+      ) : null}
+
+      {settingsOpen ? (
+        <SettingsDialog
+          onClose={() => {
+            useSettings.getState().setOpen(false);
+          }}
+        />
+      ) : null}
     </div>
   );
 }

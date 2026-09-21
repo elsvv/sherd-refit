@@ -965,6 +965,77 @@ pub(crate) fn reveal(state: State<'_, AppState>, path: String) -> Result<(), Com
         .map_err(|source| AppError::io(&resolved, std::io::Error::other(source)).into())
 }
 
+/// «Снимок PNG» (A §7.2): writes the frame the window drew to the file the user named in the
+/// OS's own save dialog.
+///
+/// **The path is the dialog's answer and is therefore not checked against the workspace**, which
+/// is the one place in this file where that is so. A §2.1 keeps the *window* from reaching
+/// outside the workspace; a save dialog is the user reaching outside it themselves, with the
+/// desktop's own file picker, and a snapshot nobody may put on their desktop is not a snapshot.
+/// Nothing is read, nothing is overwritten that the picker did not already warn about, and the
+/// bytes are the window's own canvas.
+///
+/// Base64 and not an array of bytes: `toDataURL` hands the window base64 already, and a
+/// megapixel PNG as a JSON array of numbers is twenty times its own size on the way through the
+/// IPC. A string that is not base64 at all is a refusal and never a panic (A §10 — everything
+/// the window sends is data from outside).
+///
+/// **`async`**: it writes a file of a few megabytes, which is not the drawing thread's work.
+///
+/// # Errors
+///
+/// [`CommandError`] of kind `json` when `png` is not base64, or `io` when the file cannot be
+/// written.
+#[tauri::command(async)]
+pub(crate) fn snapshot_save(path: String, png: String) -> Result<(), CommandError> {
+    let path = PathBuf::from(path);
+    let bytes = from_base64(&png).ok_or_else(|| {
+        CommandError::malformed(format!(
+            "{}: the snapshot did not arrive as base64",
+            path.display()
+        ))
+    })?;
+    std::fs::write(&path, bytes).map_err(|source| AppError::io(&path, source).into())
+}
+
+/// Standard base64 (RFC 4648, no URL alphabet) as bytes, or `None` for anything that is not.
+///
+/// Written here rather than taken from a crate: it is fifteen lines, this is its only caller,
+/// and a dependency added to a desktop shell is a dependency in every release build of it.
+/// Padding is accepted and not required; whitespace is not — `toDataURL` writes none, and being
+/// lenient about what a malformed payload may contain is how a decoder grows holes.
+fn from_base64(text: &str) -> Option<Vec<u8>> {
+    /// One character's six bits, or `None` for anything outside the alphabet.
+    fn sextet(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some(u32::from(c - b'A')),
+            b'a'..=b'z' => Some(u32::from(c - b'a') + 26),
+            b'0'..=b'9' => Some(u32::from(c - b'0') + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let body = text.trim_end_matches('=').as_bytes();
+    // Four characters carry three bytes; a group of one is a length no encoder can produce.
+    if body.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(body.len() / 4 * 3);
+    for group in body.chunks(4) {
+        let mut bits = 0_u32;
+        for (i, &c) in group.iter().enumerate() {
+            bits |= sextet(c)? << (18 - 6 * i);
+        }
+        // One byte per whole eight bits the group carries: 4 → 3, 3 → 2, 2 → 1. Through
+        // `to_le_bytes` and not an `as u8`, so nothing here is a truncating cast.
+        for i in 0..group.len() - 1 {
+            out.push((bits >> (16 - 8 * i)).to_le_bytes()[0]);
+        }
+    }
+    Some(out)
+}
+
 /// A path as the window receives it.
 ///
 /// Lossless or nothing: a `to_string_lossy` here would hand the window a path with a replacement
@@ -1251,7 +1322,7 @@ pub(crate) fn config_dir(app: &AppHandle) -> Result<PathBuf, CommandError> {
 mod tests {
     use sherd_app_core::decisions::{Decision, DecisionsFile, Verdict};
 
-    use super::{adapter_names, checked, tail};
+    use super::{adapter_names, checked, from_base64, tail};
 
     fn decision(a: &str, b: &str) -> Decision {
         Decision {
@@ -1343,5 +1414,31 @@ mod tests {
         assert_eq!(tail("\n\n\n", 1), "\n");
         // The whole of a text whose line count is exactly what was asked for.
         assert_eq!(tail("a\nb\nc", 3), "a\nb\nc");
+    }
+
+    /// A §7.2's «Снимок PNG» arrives as base64 out of the webview, which is data from outside:
+    /// every shape of it has to answer, and none of them may panic (A §10).
+    #[test]
+    fn a_snapshot_is_decoded_or_refused_and_never_panicked_over() {
+        // RFC 4648's own vectors, with and without the padding the decoder does not require.
+        assert_eq!(from_base64("Zm9vYmFy").as_deref(), Some(&b"foobar"[..]));
+        assert_eq!(from_base64("Zm9vYmE=").as_deref(), Some(&b"fooba"[..]));
+        assert_eq!(from_base64("Zm9vYmE").as_deref(), Some(&b"fooba"[..]));
+        assert_eq!(from_base64("Zm9vYg==").as_deref(), Some(&b"foob"[..]));
+        assert_eq!(from_base64("").as_deref(), Some(&b""[..]));
+        // A PNG's own first eight bytes, which is what a real snapshot starts with.
+        assert_eq!(
+            from_base64("iVBORw0KGgo=").as_deref(),
+            Some(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A][..])
+        );
+        // Both alphabet's last two characters, which a URL-safe encoder would write as `-_`.
+        assert_eq!(from_base64("+/8=").as_deref(), Some(&[0xFB, 0xFF][..]));
+        assert_eq!(from_base64("-_8="), None);
+        // A group of one carries no whole byte: no encoder writes one.
+        assert_eq!(from_base64("Zm9vYmFyZ"), None);
+        // And anything that is not the alphabet — a newline, a space, a data URL left whole.
+        assert_eq!(from_base64("Zm9v YmFy"), None);
+        assert_eq!(from_base64("Zm9v\nYmFy"), None);
+        assert_eq!(from_base64("data:image/png;base64,Zm9v"), None);
     }
 }

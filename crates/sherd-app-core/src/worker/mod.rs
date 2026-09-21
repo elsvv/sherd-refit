@@ -252,12 +252,14 @@ fn fail(emitter: &Emitter, failure: &Failure) -> i32 {
 /// Runs the job; the `Event` it returns is the job's `Done`.
 ///
 /// `requests` is the channel the input reader forwards everything but `cancel` into. Only
-/// [`Job::Review`] reads it; for the other three it is dropped here, which is what makes the
-/// reader's `send` fail and the request disappear instead of piling up behind a job that is 80
-/// minutes long.
+/// [`Job::Review`] reads it; for the other three it is dropped **before the job starts**, which
+/// is what makes the reader's `send` fail and the request disappear instead of piling up behind a
+/// job that is 80 minutes long. Dropped at the end of this function instead, it would be a
+/// channel nobody reads growing for an hour, and the doc above would be untrue of the memory.
 fn dispatch(job: Job, requests: Receiver<Request>, context: &Context) -> Result<Event, Failure> {
     match job {
         Job::Info { adapter, selftest } => {
+            drop(requests);
             context.emitter.emit(&Event::Info {
                 backends: sherd_backend::info_lines(),
                 selftest: if selftest {
@@ -268,8 +270,14 @@ fn dispatch(job: Job, requests: Receiver<Request>, context: &Context) -> Result<
             });
             Ok(Event::Done { counts: None, engine: None, params: None })
         }
-        Job::Prepare(job) => prepare::prepare(&job, context),
-        Job::Run(job) => run::run(&job, context),
+        Job::Prepare(job) => {
+            drop(requests);
+            prepare::prepare(&job, context)
+        }
+        Job::Run(job) => {
+            drop(requests);
+            run::run(&job, context)
+        }
         Job::Review(job) => review::review(&job, requests, context),
     }
 }

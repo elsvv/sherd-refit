@@ -239,6 +239,16 @@ export class AssemblyViewer {
   /** A candidate's partner where the candidate would put it (A §7.2), and what every ghost wears. */
   private readonly ghostNode = new Group();
   private ghostMaterial: MeshStandardMaterial | null = null;
+  /**
+   * The group put back on screen for as long as the ghost hangs on a fragment inside it, or
+   * `null` when the ghost needed nothing shown.
+   *
+   * A §7.2 hides the tray of groups of one by default, and an unpaired fragment is exactly the
+   * one whose candidates a reviewer hovers — «и куда он тогда встанет?» is a question about a
+   * piece that is not standing anywhere yet. Without this the answer was a viewport in which
+   * nothing happened, because the anchor the ghost is measured from was not drawn.
+   */
+  private ghostGroup: number | null = null;
 
   /** Where the camera stood before a pair took the viewport; `null` outside «Пара». */
   private parked: Parked | null = null;
@@ -547,6 +557,12 @@ export class AssemblyViewer {
    * It is a clone of the display mesh and not a second load: the geometry is shared with the
    * fragment it ghosts and is never this method's to give back. There is no ghost while «Пара»
    * is on, because there is nothing there for it to be a ghost *against*.
+   *
+   * The anchor's **group is put on screen** for as long as the ghost hangs, if it was not there
+   * already: a ghost stands at `world(anchor) · pose`, so a piece nobody can see is a ghost
+   * nobody can make sense of — and A §7.2 keeps the tray of unpaired fragments hidden by
+   * default, which is precisely where the fragments whose candidates get hovered are.
+   * [`clearGhost`] puts it back.
    */
   setGhost(ghost: { name: string; anchor: string; pose: number[][]; flip: boolean } | null): void {
     this.clearGhost();
@@ -558,7 +574,17 @@ export class AssemblyViewer {
     const anchor = this.members.get(ghost.anchor);
     const object = member?.object ?? null;
     const on = anchor?.object ?? null;
-    if (anchor === undefined || object === null || on === null || !this.shows(anchor)) {
+    if (anchor === undefined || object === null || on === null) {
+      return;
+    }
+    if (!this.shows(anchor) && this.layoutMode === "spread") {
+      this.ghostGroup = anchor.group;
+      // The reveal goes through the layout and not straight onto the node, so the group is
+      // packed and placed with the others rather than left wherever it last stood — a tray
+      // that has never been shown stands at the origin, over the block.
+      this.relayout();
+    }
+    if (!this.shows(anchor)) {
       return;
     }
     on.updateWorldMatrix(true, false);
@@ -930,10 +956,16 @@ export class AssemblyViewer {
     this.pairNode.visible = false;
     // What is visible at all, first: a hidden group takes no space on the plane.
     for (const [index, group] of this.groups.entries()) {
+      // A group shown for a ghost ([`ghostGroup`]) is laid out like any other, so the tray it
+      // belongs to is packed and placed rather than left at the origin over the block. Only in
+      // «Все группы»: «Одна группа» centres every group on the origin, and a second one revealed
+      // there would stand inside the one the user asked to be alone with.
+      const revealed = this.layoutMode === "spread" && this.ghostGroup === index;
       group.node.visible =
-        !group.hidden &&
-        (!group.singleton || this.unassembled) &&
-        (this.layoutMode === "spread" || this.single === index);
+        revealed ||
+        (!group.hidden &&
+          (!group.singleton || this.unassembled) &&
+          (this.layoutMode === "spread" || this.single === index));
       for (const member of group.members) {
         member.holder.visible = member.object !== null && member.placed;
       }
@@ -1212,9 +1244,18 @@ export class AssemblyViewer {
     }
   }
 
-  /** A ghost's clone off the scene. It shares the fragment's geometry — nothing here is its own. */
+  /**
+   * A ghost's clone off the scene. It shares the fragment's geometry — nothing here is its own.
+   *
+   * And the group [`setGhost`] put on screen for it goes back to being hidden: what the user
+   * arranged (the eye of a row, «Без пары») is theirs, and a hover may not leave it changed.
+   */
   private clearGhost(): void {
     this.ghostNode.clear();
+    if (this.ghostGroup !== null) {
+      this.ghostGroup = null;
+      this.relayout();
+    }
   }
 
   /**

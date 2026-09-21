@@ -45,7 +45,10 @@ pub(crate) struct JobSlot {
     /// answering `Reassemble`, `PairDetail` and `Refine` until it is closed.
     ///
     /// `None` for the two jobs that answer no questions, so that a `review_apply` arriving while
-    /// a run is on is refused here rather than writing a line into a worker that ignores it.
+    /// a run is on is refused here rather than writing a line into a worker that ignores it —
+    /// and `None` again once a session has been asked to close
+    /// ([`crate::commands::review_close`] takes it out): a session on its way out answers no more
+    /// questions either, and `Some` is therefore exactly «there is somebody here to ask».
     pub(crate) requester: Option<Requester>,
     /// How to end it outright (A §10's hard kill), for a [`JobKind::Review`].
     ///

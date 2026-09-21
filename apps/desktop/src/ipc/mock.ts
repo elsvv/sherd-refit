@@ -554,6 +554,16 @@ interface Session {
   runId: string | null;
   baseline: AssemblyDto;
   assembly: AssemblyDto;
+  /**
+   * When this session says `ready`, as `Date.now()` counts — `0` for no session at all.
+   *
+   * The real worker reads its first request only after the collection and the match are loaded
+   * (A §8): a decision made from the «Сборка» inspector opens the session and sends its list in
+   * the same breath, and the answer to that one comes after the loading, not during it. A mock
+   * that answered at once would show a draft assembly over a session the window still believes
+   * is opening, which is a sequence no user can ever produce.
+   */
+  readyAt: number;
 }
 
 /** The mock's whole world. */
@@ -587,7 +597,7 @@ const world: {
   finished: new Set(),
   drops: new Set(),
   dropsWired: false,
-  review: { runId: null, baseline: ASSEMBLY, assembly: ASSEMBLY },
+  review: { runId: null, baseline: ASSEMBLY, assembly: ASSEMBLY, readyAt: 0 },
   filed: {},
   decisions: {},
 };
@@ -1160,7 +1170,7 @@ function closeSession(): void {
     return;
   }
   clearTimers();
-  world.review = { runId: null, baseline: ASSEMBLY, assembly: ASSEMBLY };
+  world.review = { runId: null, baseline: ASSEMBLY, assembly: ASSEMBLY, readyAt: 0 };
   const view = held();
   const freed = view === null ? null : store({ ...view, job: null });
   finish({
@@ -1169,6 +1179,14 @@ function closeSession(): void {
     outcome: { Done: { counts: null, engine: null, params: null } },
     view: freed,
   });
+}
+
+/**
+ * Answers a session request `ms` after it was asked, or `ms` after the session says `ready` when
+ * it is still loading — which is when the worker actually reads the line (see [`Session.readyAt`]).
+ */
+function answer(ms: number, run: () => void): void {
+  at(Math.max(0, world.review.readyAt - Date.now()) + ms, run);
 }
 
 /** Plays the opening of a session: the collection loaded from the cache, then `ready` (A §8). */
@@ -1370,7 +1388,7 @@ export const mockApi: Api = {
     // A §8.4: the session's baseline is `assembly.json` as it stands — the run's own assembly,
     // or the draft a reviewer left there last time.
     const standing = world.filed[runId] ?? ASSEMBLY;
-    world.review = { runId, baseline: standing, assembly: standing };
+    world.review = { runId, baseline: standing, assembly: standing, readyAt: Date.now() + REVIEW_OPEN_MS };
     const held_ = held();
     if (held_ !== null) {
       store({ ...held_, job: { kind: "review", run_id: runId } });
@@ -1394,7 +1412,7 @@ export const mockApi: Api = {
     // and the list itself over its `decisions.json` — before it is sent, as `review_apply` does.
     world.filed[runId] = assembly;
     world.decisions[runId] = decisions.decisions;
-    at(REVIEW_APPLY_MS, () => {
+    answer(REVIEW_APPLY_MS, () => {
       // What could not come along is said first, so the notice is up before the assembly the
       // reviewer will be looking at (the order the worker sends them in).
       if (dropped.length > 0) {

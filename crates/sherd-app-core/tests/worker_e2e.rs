@@ -261,6 +261,15 @@ fn a_review_session_answers_a_decision_with_an_assembly_and_keeps_what_it_refine
     assert!(refined.groups[0].refined, "the group R §9 has just walked is refined");
     assert_ne!(refined.poses, one.poses, "and full resolution moved it");
 
+    // And R §9 again over a group there is nothing left to refine: the group comes back **bit for
+    // bit**. R §8.2's recentring is applied to the groups the reassembly brought and not to the
+    // ones copied from the baseline, or a centroid that is only nearly zero would move this group
+    // by a rounding error on every visit (A §8.4: refined groups stay as they were).
+    ask.send(&Request::Refine { decisions: accepted.clone() }).unwrap();
+    let twice = assembly(&mut worker);
+    assert!(twice.groups[0].refined);
+    assert_eq!(twice.poses, refined.poses, "a second refinement of a refined group moves nothing");
+
     // The same decision again: the group is the same group, so it keeps R §9's poses (A §8.4).
     ask.send(&Request::Reassemble { decisions: accepted }).unwrap();
     let again = assembly(&mut worker);

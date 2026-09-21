@@ -372,11 +372,16 @@ pub(crate) fn review_open(
 /// on disk cannot account for. The whole list travels every time because undo and redo are the
 /// window's (A §8.1) — the shell keeps no second copy to hold in step with it.
 ///
+/// **`async`**, for what that writing costs: `DecisionsFile::save` is an atomic write and ends
+/// with an `fsync`, which on a slow or a network disk is tens of milliseconds the main thread
+/// would spend not drawing. A §8.2's «under a second» is about the whole round trip, and a
+/// reviewer holding `A` down through a queue makes one of these per keypress.
+///
 /// # Errors
 ///
 /// [`CommandError`] of kind `worker` when no session is open or it is no longer listening,
 /// `json` when the list is not one this build can file, `no_workspace`, or `io`.
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn review_apply(
     state: State<'_, AppState>,
     decisions: DecisionsFile,
@@ -434,16 +439,22 @@ pub(crate) fn review_refine(state: State<'_, AppState>) -> Result<(), CommandErr
 /// is no error — the window leaves the mode, and a run started a moment earlier may have closed
 /// the session already.
 ///
+/// The requester is **taken out of the slot** rather than copied from it, which is how the rest
+/// of the shell tells a session that is going from one that is there: it answers no more
+/// questions ([`crate::state::JobSlot::requester`]), and [`jobs::start_review`] over that same
+/// run waits for the slot instead of answering «already open» to a session nobody will ever get
+/// a `ready` from.
+///
 /// # Errors
 ///
 /// [`CommandError`] of kind `worker` when the job slot is poisoned.
 #[tauri::command]
 pub(crate) fn review_close(state: State<'_, AppState>) -> Result<(), CommandError> {
     let open = {
-        let slot = state.job()?;
-        slot.as_ref()
+        let mut slot = state.job()?;
+        slot.as_mut()
             .filter(|job| job.kind == JobKind::Review)
-            .and_then(|job| job.requester.clone())
+            .and_then(|job| job.requester.take())
     };
     if let Some(requester) = open {
         // A session already gone is what was asked for; the error would say nothing useful.

@@ -427,6 +427,14 @@ export const useReview = create<ReviewState>()((set, get) => {
           break;
         }
         case "assembly":
+          // The **run**, as [`applyFinished`] reads it: a session closed from under the window
+          // goes on answering for a moment after another one was opened over another run, and
+          // drawing that answer would put the old run's assembly on the screen under the new
+          // run's name — and file it, since the shell writes every answer over the run it came
+          // from. An answer from a session this store is no longer on is nobody's.
+          if (payload.run_id !== get().runId) {
+            break;
+          }
           // A §2.1: the shell has already filed this over `assembly.json`; the window only has
           // to draw it.
           useAssembly.getState().show(assemblyOf(event));

@@ -319,6 +319,22 @@ function FragmentInspector({
     };
   }, [name]);
 
+  // And it is taken away by the assembly that granted it: «Подтвердить» on a row is answered
+  // within the second with a reassembly that puts the partner where the ghost was standing
+  // (A §8.2), and a translucent copy over the real piece reads as a second piece (A §7.2). The
+  // cursor has not moved, so no row will report it — the row's own `together` is already true
+  // and its `onMouseEnter` will not fire again.
+  useEffect(() => {
+    const ghost = useUi.getState().assemblyGhost;
+    if (ghost === null || ghost.anchor !== name) {
+      return;
+    }
+    const group = assembly.groups.find((row) => row.members.includes(name));
+    if (group !== undefined && group.members.includes(ghost.name)) {
+      useUi.getState().setAssemblyGhost(null);
+    }
+  }, [assembly, name]);
+
   const fields: Field[] = [];
   if (info !== undefined) {
     fields.push(

@@ -171,9 +171,11 @@ impl Session {
     /// nothing else — the rest keep the poses they were refined to.
     ///
     /// R §9 is given the reassembly's own **un-recentred** poses, with every already-refined
-    /// group put back at its refined ones. Those are recentred, and are put through R §8.2's
-    /// recentring again at the end; that is harmless, because a group whose centroid is already
-    /// at the origin is translated by zero.
+    /// group put back at its refined ones. R §8.2's recentring at the end is then applied to the
+    /// groups this reassembly brought and to no others: an already-refined group is already
+    /// centred, and centring it a second time moves it by the rounding error of a centroid that
+    /// is only nearly zero — which A §8.4 forbids, because such a group must come back bit for
+    /// bit as it was refined.
     fn on_refine(&mut self, context: &Context, decisions: &DecisionsFile) -> Result<(), Failure> {
         let (done, fresh) = self.reassemble(context, decisions)?;
         let merged = review::merge_refined(&self.baseline, fresh);
@@ -191,13 +193,18 @@ impl Session {
                 }
             }
         }
-        let unrefined: Vec<Vec<FragId>> = merged
+        // What this reassembly brought, singletons included: the groups whose poses are the fresh
+        // ones and therefore the only groups either R §9 or R §8.2 may move here.
+        let fresh_groups: Vec<Vec<FragId>> = merged
             .groups
             .iter()
             .zip(&done.assembly.groups)
-            .filter(|(group, members)| !group.refined && members.len() > 1)
+            .filter(|(group, _)| !group.refined)
             .map(|(_, members)| members.clone())
             .collect();
+        // R §9 walks joins, so a group of one has nothing for it to do.
+        let unrefined: Vec<Vec<FragId>> =
+            fresh_groups.iter().filter(|members| members.len() > 1).cloned().collect();
         let refined = session::refine_poses(
             Engine::REFERENCE,
             &self.fragments,
@@ -225,7 +232,7 @@ impl Session {
                 s_pen: s,
             })
             .collect();
-        let recentred = recenter(&refined, &pieces, &done.assembly.groups);
+        let recentred = recenter(&refined, &pieces, &fresh_groups);
 
         let mut dto =
             assembly_dto(&self.state.names, &done.assembly.groups, &recentred, &done.used, true);

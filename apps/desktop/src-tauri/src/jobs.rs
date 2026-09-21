@@ -577,6 +577,13 @@ pub(crate) fn start_run(
 /// A session over *another* run, or a `Prepare` or a run that has ended, is closed first by
 /// [`start`]; a `Prepare` or a run that is still going is `busy`, because the worker is theirs.
 ///
+/// «Already open» means a session that can still be **asked** something: one that
+/// [`crate::commands::review_close`] has said goodbye to is in the slot for a moment longer with
+/// its requester taken out of it, and answering `Ok` to that one would leave the mode waiting
+/// for a `ready` the dying worker will never send. Such a session falls through to [`start`],
+/// which waits for the slot and opens a new one — the reviewer who left the mode and came
+/// straight back gets the session they asked for.
+///
 /// # Errors
 ///
 /// As [`start`], plus `io` when the workspace has no such run and `json` when its `run.json`
@@ -589,7 +596,9 @@ pub(crate) fn start_review(
     let open_already = {
         let slot = state.job()?;
         slot.as_ref().is_some_and(|job| {
-            job.kind == JobKind::Review && job.run_id.as_deref() == Some(run_id.as_str())
+            job.kind == JobKind::Review
+                && job.run_id.as_deref() == Some(run_id.as_str())
+                && job.requester.is_some()
         })
     };
     if open_already {

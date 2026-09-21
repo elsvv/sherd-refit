@@ -15,6 +15,7 @@ use std::thread::JoinHandle;
 use sherd_core::Params;
 use sherd_core::assembly::constraints::Constraints;
 
+use crate::decisions::{Decision, DecisionsFile, to_constraints};
 use crate::protocol::{
     AssemblyDto, EngineInfo, Event, FailKind, Job, PROTOCOL, PrepareJob, Request, RunCounts,
     RunJob, RunSpec,
@@ -407,12 +408,56 @@ pub fn prepare_job(ws: &Workspace, spec: &RunSpec) -> Result<Job> {
     }))
 }
 
-/// Opens a run (A §4): the input as it stands now, the next free id, `run.json` in `running`, and
-/// a worker on the job.
+/// A §8.5's «перенести решения»: one run's review, ready to be the next run's starting point.
+///
+/// The three things a carry-over is, kept together so that the shell cannot send the engine one
+/// set of decisions and file another: what the engine is told, what the new run's
+/// `decisions.json` holds, and what could not come along and has to be said.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Carried {
+    /// The run the decisions come from — `run.json`'s `carried_from` of the run about to start.
+    pub from: String,
+    /// The decisions as `constraints.json` (A §8.2): accepted pairs pinned at their pose and not
+    /// matched again, rejected pairs skipped before matching. `None` when nothing survived.
+    pub constraints: Option<Constraints>,
+    /// The new run's `decisions.json`, each decision marked [`Decision::carried_from`] — the
+    /// review of the new run starts where the old one left off rather than from nothing.
+    pub decisions: DecisionsFile,
+    /// The decisions that name a fragment the collection no longer holds. Not carried — they
+    /// would fail `constraints::resolve` and with it the whole run — and reported so that the
+    /// window can tell the reviewer once (A §8.5).
+    pub dropped: Vec<Decision>,
+}
+
+/// The review of `from_run` as the next run's starting point (A §8.5), against the collection
+/// `names` the new run will actually have.
+///
+/// A run with no `decisions.json` carries nothing and is not an error: «перенести решения» is a
+/// checkbox, and a run nobody reviewed is simply a run with nothing to carry.
+///
+/// # Errors
+///
+/// [`AppError::Io`], [`AppError::Json`] or [`AppError::Version`] when the old run's
+/// `decisions.json` cannot be read as one this build wrote.
+pub fn carry(ws: &Workspace, from_run: &str, names: &[String], now: &str) -> Result<Carried> {
+    let file = DecisionsFile::load_or_default(&ws.run_dir(from_run))?;
+    let (constraints, dropped) = to_constraints(&file, names)?;
+    Ok(Carried {
+        from: from_run.to_owned(),
+        constraints,
+        decisions: file.carried(names, from_run, now),
+        dropped,
+    })
+}
+
+/// Opens a run (A §4): the input as it stands now, the next free id, `run.json` in `running`, the
+/// review it continues if it continues one (A §8.5), and a worker on the job.
 ///
 /// `run.json` is written *before* the worker is spawned, and that order is the point: whichever
 /// of the two processes dies, the folder on disk is already a run, and `run::mark_interrupted`
-/// finds it at the next start instead of leaving a folder nobody can account for.
+/// finds it at the next start instead of leaving a folder nobody can account for. `decisions.json`
+/// is written in the same breath, for the same reason: a carried review the window never filed
+/// would be a run whose constraints nobody could account for either.
 ///
 /// # Errors
 ///
@@ -422,8 +467,7 @@ pub fn start_run(
     ws: &Workspace,
     command: &WorkerCommand,
     spec: &RunSpec,
-    constraints: Option<Constraints>,
-    carried_from: Option<String>,
+    carried: Option<Carried>,
     now: chrono::DateTime<chrono::Local>,
 ) -> Result<(RunFile, Worker)> {
     let input = input_of(ws)?;
@@ -434,8 +478,17 @@ pub fn start_run(
     let sheet = serde_json::to_value(spec)
         .map_err(|source| AppError::Json { path: dir.join(run::RUN_FILE), source })?;
     let mut file = RunFile::new(&id, sheet, snapshot, run::timestamp(now));
-    file.carried_from = carried_from;
+    let (constraints, decisions) = match carried {
+        Some(carried) => {
+            file.carried_from = Some(carried.from);
+            (carried.constraints, Some(carried.decisions))
+        }
+        None => (None, None),
+    };
     file.save(&dir)?;
+    if let Some(decisions) = decisions {
+        decisions.save(&dir)?;
+    }
     let job = Job::Run(RunJob {
         workspace: ws.root().to_owned(),
         input,
@@ -515,7 +568,41 @@ fn append(log: Option<&Mutex<std::fs::File>>, line: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Canceller, Requester};
+    use std::path::PathBuf;
+
+    use super::{Canceller, Carried, Requester, WorkerCommand, carry, start_run};
+    use crate::decisions::{Decision, DecisionsFile, Verdict};
+    use crate::protocol::RunSpec;
+    use crate::workspace::Workspace;
+    use crate::{AppError, run};
+
+    /// The run the decisions were made in.
+    const FROM: &str = "2026-09-20_1412";
+    /// When they were carried into the next one.
+    const CARRIED_AT: &str = "2026-09-21T09:15:00+03:00";
+
+    const POSE: [[f64; 4]; 4] =
+        [[1.0, 0.0, 0.0, 0.5], [0.0, 1.0, 0.0, -2.25], [0.0, 0.0, 1.0, 3.0], [0.0, 0.0, 0.0, 1.0]];
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sherd-host-{}-{tag}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn decided(a: &str, b: &str, verdict: Verdict) -> Decision {
+        Decision {
+            a: a.to_owned(),
+            b: b.to_owned(),
+            verdict,
+            pose: (verdict == Verdict::Accept).then_some(POSE),
+            source: Some("probable".to_owned()),
+            bulk: false,
+            at: "2026-09-20T14:31:07+03:00".to_owned(),
+            carried_from: None,
+        }
+    }
 
     /// A §2.2: «Отменить» is pressed while [`super::drive`] holds the worker, so the handle has to
     /// outlive that borrow and cross to the window's own thread. Nothing else about the cancel is
@@ -528,5 +615,71 @@ mod tests {
         const fn goes_anywhere<T: Clone + Send + Sync + 'static>() {}
         goes_anywhere::<Canceller>();
         goes_anywhere::<Requester>();
+    }
+
+    /// A §8.5: the next run starts from the last review — the accepted pair pinned at its pose,
+    /// the rejected one skipped — and a decision about a fragment the collection no longer holds
+    /// is left behind **and said**, because `constraints::resolve` fails a whole run on a name it
+    /// does not know.
+    #[test]
+    fn the_next_run_carries_the_last_review_and_says_what_could_not_come_along() {
+        let ws = Workspace::create(&scratch("carry").join("karas")).unwrap();
+        let mut made = DecisionsFile::default();
+        made.set(decided("pieceA", "pieceB", Verdict::Accept));
+        made.set(decided("pieceA", "gone", Verdict::Reject));
+        std::fs::create_dir_all(ws.run_dir(FROM)).unwrap();
+        made.save(&ws.run_dir(FROM)).unwrap();
+
+        let names = ["pieceA", "pieceB"].map(str::to_owned);
+        let carried = carry(&ws, FROM, &names, CARRIED_AT).unwrap();
+
+        let json =
+            serde_json::to_value(carried.constraints.as_ref().expect("one decision survives"))
+                .unwrap();
+        assert_eq!(json["must_join"].as_array().unwrap().len(), 1);
+        assert_eq!(json["must_join"][0]["a"], "pieceA");
+        assert_eq!(json["must_join"][0]["pose"][1][3], -2.25);
+        assert_eq!(json["must_not_join"], serde_json::json!([]));
+        assert_eq!(carried.dropped.len(), 1);
+        assert_eq!(carried.dropped[0].b, "gone");
+        // and the new run's own file starts from what came along, each entry saying where from
+        assert_eq!(carried.decisions.decisions.len(), 1);
+        let one = &carried.decisions.decisions[0];
+        assert_eq!((one.a.as_str(), one.b.as_str()), ("pieceA", "pieceB"));
+        assert_eq!(one.carried_from.as_deref(), Some(FROM));
+        assert_eq!(one.at, CARRIED_AT);
+        assert_eq!(carried.from, FROM);
+    }
+
+    /// A run that continues a review says so on disk before its worker exists (A §4, A §8.5):
+    /// here the worker cannot even be started, and `runs/<id>/` is still a run that names the
+    /// review it came from and holds it.
+    #[test]
+    fn a_run_started_from_a_review_files_it_before_the_worker() {
+        let root = scratch("carried-run");
+        let mut ws = Workspace::create(&root.join("karas")).unwrap();
+        std::fs::create_dir_all(root.join("scans")).unwrap();
+        ws.set_input(&root.join("scans")).unwrap();
+        let mut made = DecisionsFile::default();
+        made.set(decided("pieceA", "pieceB", Verdict::Accept));
+        let names = ["pieceA", "pieceB"].map(str::to_owned);
+        let carried = Carried {
+            from: FROM.to_owned(),
+            constraints: None,
+            decisions: made.carried(&names, FROM, CARRIED_AT),
+            dropped: Vec::new(),
+        };
+
+        let command = WorkerCommand { program: root.join("no-such-engine"), args: Vec::new() };
+        let started =
+            start_run(&ws, &command, &RunSpec::default(), Some(carried), chrono::Local::now());
+        assert!(matches!(started, Err(AppError::Worker(_))), "{:?}", started.map(|(f, _)| f));
+
+        let runs = run::list(&ws.runs_dir()).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].carried_from.as_deref(), Some(FROM));
+        let filed = DecisionsFile::load_or_default(&ws.run_dir(&runs[0].id)).unwrap();
+        assert_eq!(filed.decisions.len(), 1);
+        assert_eq!(filed.decisions[0].carried_from.as_deref(), Some(FROM));
     }
 }

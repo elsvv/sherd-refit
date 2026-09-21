@@ -71,6 +71,15 @@ fn same_pair(d: &Decision, a: &str, b: &str) -> bool {
     (d.a == a && d.b == b) || (d.a == b && d.b == a)
 }
 
+/// Whether the collection still holds both fragments the decision is about.
+///
+/// The one filter A §8.2 and A §8.5 share: `constraints::resolve` fails a whole run on a name it
+/// does not know, so a decision about a fragment that has been removed or excluded is neither
+/// sent to the engine nor carried into the next run — it is reported instead.
+fn known(d: &Decision, names: &[String]) -> bool {
+    names.contains(&d.a) && names.contains(&d.b)
+}
+
 impl DecisionsFile {
     /// `<dir>/decisions.json`, or no decisions when the run has none yet.
     ///
@@ -112,6 +121,32 @@ impl DecisionsFile {
     pub fn clear(&mut self, a: &str, b: &str) {
         self.decisions.retain(|d| !same_pair(d, a, b));
     }
+
+    /// This file as the *next* run's (A §8.5): every decision whose two fragments `names` still
+    /// holds, marked with the run it came from and with `at`, the moment it was carried.
+    ///
+    /// The decisions left out are [`to_constraints`]'s `dropped` — the same filter, so that what
+    /// the new run's file holds and what its engine is told cannot disagree.
+    ///
+    /// `at` is the carry, not the click: this entry is new in this run's file, while
+    /// [`Decision::carried_from`] keeps where the reviewer's own decision was made and when it
+    /// can be read there.
+    #[must_use]
+    pub fn carried(&self, names: &[String], from_run: &str, at: &str) -> Self {
+        Self {
+            version: DECISIONS_VERSION,
+            decisions: self
+                .decisions
+                .iter()
+                .filter(|d| known(d, names))
+                .map(|d| Decision {
+                    carried_from: Some(from_run.to_owned()),
+                    at: at.to_owned(),
+                    ..d.clone()
+                })
+                .collect(),
+        }
+    }
 }
 
 /// The engine's `constraints.json` for these decisions, and the decisions that could not be
@@ -127,9 +162,8 @@ pub fn to_constraints(
     file: &DecisionsFile,
     names: &[String],
 ) -> Result<(Option<Constraints>, Vec<Decision>)> {
-    let known = |d: &Decision| names.contains(&d.a) && names.contains(&d.b);
     let (kept, dropped): (Vec<&Decision>, Vec<&Decision>) =
-        file.decisions.iter().partition(|d| known(d));
+        file.decisions.iter().partition(|d| known(d, names));
     let dropped: Vec<Decision> = dropped.into_iter().cloned().collect();
     if kept.is_empty() {
         return Ok((None, dropped));

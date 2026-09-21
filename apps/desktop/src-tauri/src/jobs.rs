@@ -423,8 +423,8 @@ fn prepare(ws: &Workspace, command: &WorkerCommand) -> Result<Started, CommandEr
 /// Opens a run: the sheet remembered for the next `Prepare` (A §7.4), `run.json` written as
 /// `running` before anything can go wrong (A §4), and a worker on the job.
 ///
-/// The constraints and the run carried from are `None` here: A §8.5's «продолжить с решениями» is
-/// milestone 5's, and a run started from the launch sheet carries nobody's decisions.
+/// Nothing is carried here: a run started from the launch sheet alone carries nobody's decisions.
+/// A §8.5's «перенести решения» hands [`host::carry`]'s `Carried` to [`host::start_run`] instead.
 fn open_run(
     ws: &mut Workspace,
     command: &WorkerCommand,
@@ -435,7 +435,7 @@ fn open_run(
     let sheet = serde_json::to_value(spec)
         .map_err(|source| AppError::Json { path: ws.root().join(WORKSPACE_FILE), source })?;
     ws.set_last_spec(sheet)?;
-    let (file, worker) = host::start_run(ws, command, spec, None, None, chrono::Local::now())?;
+    let (file, worker) = host::start_run(ws, command, spec, None, chrono::Local::now())?;
     let dir = ws.run_dir(&file.id);
     Ok(Started { job: JobKind::Run, worker, run: Some((file, dir)) })
 }

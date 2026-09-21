@@ -64,8 +64,7 @@ fn a_collection_is_prepared_and_run_and_the_workspace_holds_what_a_4_says() {
     assert!(index[0].stats.faces > 0 && index[0].display_faces > 0);
 
     // Run
-    let (mut run, mut worker) =
-        host::start_run(&ws, &command(), &cpu(), None, None, now()).unwrap();
+    let (mut run, mut worker) = host::start_run(&ws, &command(), &cpu(), None, now()).unwrap();
     let dir = ws.run_dir(&run.id);
     assert_eq!(RunFile::load(&dir).unwrap().status, RunStatus::Running);
     let mut stages: Vec<String> = Vec::new();
@@ -109,8 +108,7 @@ fn a_collection_is_prepared_and_run_and_the_workspace_holds_what_a_4_says() {
 #[test]
 fn a_cancelled_run_ends_as_cancelled() {
     let ws = workspace("cancel");
-    let (mut run, mut worker) =
-        host::start_run(&ws, &command(), &cpu(), None, None, now()).unwrap();
+    let (mut run, mut worker) = host::start_run(&ws, &command(), &cpu(), None, now()).unwrap();
     worker.cancel();
     let outcome = host::drive(&mut worker, |_| {});
     assert!(matches!(outcome, Outcome::Failed { kind: FailKind::Cancelled, .. }), "{outcome:?}");
@@ -176,8 +174,7 @@ fn a_review_session_answers_a_decision_with_an_assembly_and_keeps_what_it_refine
 
     // The shipped rule places nothing on this slab — its one join is probable — which is exactly
     // the starting point a review exists for.
-    let (mut run, mut worker) =
-        host::start_run(&ws, &command(), &cpu(), None, None, now()).unwrap();
+    let (mut run, mut worker) = host::start_run(&ws, &command(), &cpu(), None, now()).unwrap();
     let dir = ws.run_dir(&run.id);
     let outcome = host::drive(&mut worker, |event| {
         if let Event::Assembly(assembly) = event {

@@ -425,20 +425,20 @@ run's `decisions.json` starts from the carried ones.
 
 ### 9.1 Экспорт
 
-A review-session request; the UI opens a session by itself when none is open. `what`:
+A review-session request; the shell opens a session by itself when none is open. Two kinds:
 
-| option | writes | through |
+| kind | writes | through |
 |---|---|---|
-| Папка результата | what `sherd-refit-rs run` writes by default, plus opt-ins for review images, `--placed-all`, `--merged-meshes` | `session::write_outputs` |
-| Таблицы | `transforms.csv`, `transforms.json`, `joins.csv`, `matrices/` | same |
-| Сцена | `scene.glb`, `viewer.html` | same |
-| Меши | `placed/*.ply` | same |
-| Отчёт | `report.md`, `report.json` | same |
+| Папка результата | what `sherd-refit-rs run` writes by default — tables, `report.*`, `transforms.*`, `README.txt`, `scene.glb`, `viewer.html`, `placed/*.ply` — with opt-ins for `--placed-all`, `--merged-meshes` and the group previews | `session::write_reviewed` |
+| Только таблицы и отчёт | the same without any mesh | same |
 
-All of it reflects the reviewed assembly. The human's part is documented by the engine itself:
-decisions arrive as constraints, and `report.md`'s `## Constraints` section already lists each and
-what it did. The destination defaults to `exports/<date>_<what>/` and can be any folder; when done,
-«Показать в папке».
+The engine's switches do not separate the scene from the placed meshes, so the five separate parts
+first drafted here are these two; review images are not offered — the app draws a pair live, which
+is what they were for. All of it reflects the reviewed assembly, and unrefined groups are refined
+first. The human's part is documented by the engine itself: decisions arrive as constraints, and
+`report.md`'s `## Constraints` section lists each and what it did. The destination defaults to
+`exports/<date>_<what>/`, must be an empty folder with room for the export, and can be anywhere;
+when done, «Показать в папке».
 
 ### 9.2 Открыть в Blender
 

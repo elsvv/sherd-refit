@@ -45,6 +45,14 @@ const GAP_FRACTION = 0.15;
 /** Above this many names on screen at once nothing can be read; A §7.2's «Подписи» then narrows. */
 const LABEL_LIMIT = 60;
 
+/**
+ * How wide and how tall one name is on screen, near enough to test two of them for a collision:
+ * the labels are one 10 px line of the same eight-character shape, so an estimate spares a layout
+ * read per name per frame that a measurement of the real element would cost.
+ */
+const LABEL_CHAR = 6.2;
+const LABEL_LINE = 14;
+
 /** How much light the hovered and the selected fragment give off by themselves. */
 const HOVER_LIFT = 0.1;
 const SELECT_LIFT = 0.26;
@@ -862,6 +870,10 @@ export class AssemblyViewer {
    * «Подписи» (A §7.2), re-placed after every frame the stage drew, which is the only moment the
    * camera can have moved. Over [`LABEL_LIMIT`] names nothing is readable, so the layer narrows
    * to the selected group and, failing that, shows nothing at all.
+   *
+   * Under that many, the names still have to be kept off one another: two fragments a hand's width
+   * apart in the pot are a few pixels apart on screen, and two names printed over each other say
+   * less than one name does. The one in front wins, which is the one whose fragment the eye is on.
    */
   private placeLabels(): void {
     if (!this.labelsOn) {
@@ -879,16 +891,42 @@ export class AssemblyViewer {
 
     const width = this.stage.container.clientWidth;
     const height = this.stage.container.clientHeight;
-    let used = 0;
+    const wanted: { name: string; x: number; y: number; depth: number }[] = [];
     for (const member of list) {
       this.worldBox(member, TMP_BOX).getCenter(TMP_V).project(this.stage.camera);
       if (TMP_V.z > 1) {
         continue; // behind the camera
       }
+      wanted.push({
+        name: member.name,
+        x: (TMP_V.x * 0.5 + 0.5) * width,
+        y: (-TMP_V.y * 0.5 + 0.5) * height,
+        depth: TMP_V.z,
+      });
+    }
+    wanted.sort((a, b) => a.depth - b.depth);
+
+    const taken: { left: number; right: number; top: number; bottom: number }[] = [];
+    let used = 0;
+    for (const want of wanted) {
+      const half = (want.name.length * LABEL_CHAR) / 2;
+      const box = {
+        left: want.x - half,
+        right: want.x + half,
+        top: want.y - LABEL_LINE / 2,
+        bottom: want.y + LABEL_LINE / 2,
+      };
+      const clash = taken.some(
+        (other) => box.left < other.right && other.left < box.right && box.top < other.bottom && other.top < box.bottom,
+      );
+      if (clash) {
+        continue;
+      }
+      taken.push(box);
       const label = this.labelAt(used);
-      label.textContent = member.name;
-      label.style.left = `${String((TMP_V.x * 0.5 + 0.5) * width)}px`;
-      label.style.top = `${String((-TMP_V.y * 0.5 + 0.5) * height)}px`;
+      label.textContent = want.name;
+      label.style.left = `${String(want.x)}px`;
+      label.style.top = `${String(want.y)}px`;
       label.hidden = false;
       used += 1;
     }

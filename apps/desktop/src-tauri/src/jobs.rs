@@ -520,11 +520,7 @@ fn learn(app: &AppHandle, counts: &RunCounts) {
 /// is a battery the user did not offer. A machine whose OS refuses the assertion is warned about
 /// and goes on: the job is the job, and most of them finish before any sleep timer.
 fn keep_awake() -> Option<keepawake::KeepAwake> {
-    match keepawake::Builder::default()
-        .idle(true)
-        .reason(AWAKE_REASON)
-        .app_name(AWAKE_APP)
-        .create()
+    match keepawake::Builder::default().idle(true).reason(AWAKE_REASON).app_name(AWAKE_APP).create()
     {
         Ok(awake) => Some(awake),
         Err(error) => {

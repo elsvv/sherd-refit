@@ -356,7 +356,6 @@ fn read_log_tail(path: &Path) -> Result<Vec<u8>, CommandError> {
     Ok(bytes)
 }
 
-
 /// Deletes a run: its folder goes to the OS trash (A §4), never to `remove_dir_all`.
 ///
 /// The trash and not a delete, because a run is hours of someone's machine and the confirmation

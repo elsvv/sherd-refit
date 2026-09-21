@@ -280,6 +280,31 @@ const COUNTS: RunCounts = {
   ],
 };
 
+/**
+ * What the ten-second play of a run leaves behind: the same findings as [`COUNTS`], but with the
+ * seconds the play really spent. A run whose summary says «длительность 0:10» must not go on to
+ * report a matching stage of 15:13 — the two lines are read one under the other.
+ */
+const PLAYED_COUNTS: RunCounts = {
+  ...COUNTS,
+  timings: [
+    { stage: "preprocess", seconds: 0.9 },
+    { stage: "matching", seconds: 7.0 },
+    { stage: "tiers", seconds: 1.0 },
+    { stage: "assembly", seconds: 0.2 },
+    { stage: "refine", seconds: 0.6 },
+    { stage: "output", seconds: 0.3 },
+  ],
+};
+
+/** What the engine says about itself in every mock run that got as far as finishing (A §8.2). */
+const ENGINE: NonNullable<RunFile["engine"]> = {
+  core_version: "0.1.0",
+  algo_ref: "2026-09-06/9d4b9d3",
+  commit: "mock",
+  backend: "gpu:Apple M2 Pro",
+};
+
 /** The sheet a run was started from, as `run.json` keeps it (A §7.4's «Стандарт»). */
 const STANDARD_SPEC: RunSpec = {
   preset: "standard",
@@ -346,15 +371,7 @@ function runFile(
     spec: { ...STANDARD_SPEC },
     params: null,
     input: { files: ALL.map(stamp), excluded: [] },
-    engine:
-      counts === null
-        ? null
-        : {
-            core_version: "0.1.0",
-            algo_ref: "2026-09-06/9d4b9d3",
-            commit: "mock",
-            backend: "gpu:Apple M2 Pro",
-          },
+    engine: counts === null ? null : ENGINE,
     counts,
     carried_from: null,
   };
@@ -602,13 +619,15 @@ function playRun(runId: string): void {
     }
     const finishedAt = timestamp(new Date());
     world.runs = world.runs.map((run) =>
-      run.id === runId ? { ...run, status: { state: "done" }, finished: finishedAt, counts: COUNTS } : run,
+      run.id === runId
+        ? { ...run, status: { state: "done" }, finished: finishedAt, counts: PLAYED_COUNTS, engine: ENGINE }
+        : run,
     );
     const done = store({ ...now, job: null });
     finish({
       job: "run",
       run_id: runId,
-      outcome: { Done: { counts: COUNTS, engine: done.runs[0]?.run.engine ?? null, params: null } },
+      outcome: { Done: { counts: PLAYED_COUNTS, engine: ENGINE, params: null } },
       view: done,
     });
   });

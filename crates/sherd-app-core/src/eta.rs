@@ -99,8 +99,9 @@ impl Calibration {
 
         let first = self.runs == 0;
         // The exponential average, at weight ½ — see the module's note on why it is not a mean.
-        let blend =
-            |known: f64, measured: f64| if first { measured } else { (known + measured) / 2.0 };
+        let blend = |known: f64, measured: f64| {
+            if first { measured } else { f64::midpoint(known, measured) }
+        };
 
         self.pair_seconds = blend(self.pair_seconds, matching / pairs);
         for timing in &counts.timings {
@@ -254,7 +255,7 @@ mod tests {
         calibration.learn(&slow);
 
         assert_eq!(calibration.runs, 2);
-        assert!((calibration.pair_seconds - (first + first * 2.0) / 2.0).abs() < 1e-12);
+        assert!((calibration.pair_seconds - f64::midpoint(first, first * 2.0)).abs() < 1e-12);
         // the ratios are unchanged: every stage doubled with matching
         assert!((calibration.ratios["tiers"] - 33.2 / 996.9).abs() < 1e-12);
     }

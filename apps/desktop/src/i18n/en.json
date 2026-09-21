@@ -176,7 +176,7 @@
     },
     "agree_seeds": {
       "label": "Agreeing runs",
-      "hint": "How many independent runs at different seeds have to confirm a join at the same placement. 0 and 1 are off; 2 is «Thorough»."
+      "hint": "How many independent runs at different seeds have to confirm a join at the same placement. 0 and 1 are off; 2 is “Thorough”."
     },
     "thick_ratio": {
       "label": "Wall-thickness ratio",

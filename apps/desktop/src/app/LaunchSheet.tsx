@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { api } from "../ipc";
@@ -6,9 +6,11 @@ import type { CalibrationView, EngineInfoView } from "../ipc/api";
 import type { BackendChoice } from "../ipc/bindings/BackendChoice";
 import type { Preset } from "../ipc/bindings/Preset";
 import type { RunSpec } from "../ipc/bindings/RunSpec";
+import type { Settings } from "../ipc/bindings/Settings";
 import type { WorkspaceView } from "../ipc/bindings/WorkspaceView";
 import { formatCount } from "../modes/input/format";
 import { useJobs } from "../state/jobs";
+import { useSettings } from "../state/settings";
 import { useUi } from "../state/ui";
 import { useWorkspace } from "../state/workspace";
 import Button from "../ui/Button";
@@ -41,10 +43,35 @@ export interface LaunchSheetProps {
   onClose: () => void;
 }
 
-/** The sheet as it opens: the newest run's own sheet when it can be read, the engine's otherwise. */
-function initial(view: WorkspaceView, patch: Partial<RunSpec>): Draft {
+/**
+ * The engine's defaults under A §11's three machine answers — «Вычисления по умолчанию», «Лимит
+ * памяти» and «Потоки» — or the engine's defaults alone while the settings have not been read.
+ *
+ * Those three are the only part of a sheet that is about this computer rather than about this
+ * collection, which is why the settings screen holds them and why the shell reads two of them for
+ * a `Prepare` it starts on its own (`jobs.rs`' `prepare`). `specOf`'s `machineOf` keeps them out
+ * of what a preset card resets, so what is seeded here is what «Собрать» sends.
+ */
+function machineSpec(machine: Settings | null): RunSpec {
+  if (machine === null) {
+    return DEFAULT_SPEC;
+  }
+  return {
+    ...DEFAULT_SPEC,
+    backend: machine.backend,
+    memory_gb: machine.memory_gb,
+    workers: machine.workers,
+  };
+}
+
+/**
+ * The sheet as it opens: the newest run's own sheet when it can be read, the machine's defaults
+ * otherwise (Task 5: «the launch sheet's defaults come from the settings when the workspace has no
+ * last spec»). `patch` is over both — A §10's «Повторить на CPU» is a choice already made.
+ */
+function initial(view: WorkspaceView, patch: Partial<RunSpec>, machine: Settings | null): Draft {
   const last = parseSpec(view.runs[0]?.run.spec);
-  return draftOf({ ...(last ?? DEFAULT_SPEC), ...patch });
+  return draftOf({ ...(last ?? machineSpec(machine)), ...patch });
 }
 
 /**
@@ -60,7 +87,17 @@ export default function LaunchSheet({ view, patch, onClose }: LaunchSheetProps) 
   const { t } = useTranslation();
   const language = useUi((state) => state.language);
   const selectedRunId = useWorkspace((state) => state.selectedRunId);
-  const [draft, setDraft] = useState<Draft>(() => initial(view, patch));
+  const [draft, setDraft] = useState<Draft>(() => initial(view, patch, useSettings.getState().settings));
+  /**
+   * Whether anything on the sheet has been chosen by hand. The machine's defaults arrive over
+   * IPC, and a value that landed in a field the user was already using would be the sheet moving
+   * under them — so the late answer is only taken while nothing has been touched.
+   */
+  const touched = useRef(false);
+  const edit = (next: Draft): void => {
+    touched.current = true;
+    setDraft(next);
+  };
   const [calibration, setCalibration] = useState<CalibrationView | null>(null);
   const [engine, setEngine] = useState<EngineInfoView | null>(null);
   /** How many decisions the selected run carries (A §8.5); 0 is «there is nothing to carry». */
@@ -91,6 +128,33 @@ export default function LaunchSheet({ view, patch, onClose }: LaunchSheetProps) 
       gone = true;
     };
   }, [selectedRunId]);
+
+  // A §11's three machine answers, for a workspace that has no run of its own to repeat. Asked
+  // for here and not when the window opens, as the estimate and the executor list are: it is one
+  // more command, and a session that never opens the sheet should not pay for it. A workspace
+  // whose newest run has a readable sheet does not ask at all — that sheet is the stronger answer
+  // and the settings would not be used.
+  //
+  // Once per opening: the frame mounts the sheet to open it and unmounts it to close it, so
+  // `view` and `patch` are what they were when it opened.
+  useEffect(() => {
+    if (parseSpec(view.runs[0]?.run.spec) !== null) {
+      return undefined;
+    }
+    let gone = false;
+    void useSettings
+      .getState()
+      .load()
+      .then(() => {
+        const machine = useSettings.getState().settings;
+        if (!gone && !touched.current && machine !== null) {
+          setDraft(initial(view, patch, machine));
+        }
+      });
+    return () => {
+      gone = true;
+    };
+  }, []);
 
   useEffect(() => {
     let gone = false;
@@ -151,7 +215,7 @@ export default function LaunchSheet({ view, patch, onClose }: LaunchSheetProps) 
   })();
 
   const setValue = (key: NumberKey, text: string): void => {
-    setDraft({ ...draft, values: { ...draft.values, [key]: text } });
+    edit({ ...draft, values: { ...draft.values, [key]: text } });
   };
 
   const row = (param: ParamRow) => {
@@ -166,7 +230,7 @@ export default function LaunchSheet({ view, patch, onClose }: LaunchSheetProps) 
           value={draft.tiers}
           defaultValue={DEFAULT_SPEC.tiers}
           onChange={(tiers) => {
-            setDraft({ ...draft, tiers });
+            edit({ ...draft, tiers });
           }}
         />
       );
@@ -236,7 +300,7 @@ export default function LaunchSheet({ view, patch, onClose }: LaunchSheetProps) 
         value={draft.preset}
         options={presets}
         onChange={(preset) => {
-          setDraft(withPreset(draft, preset));
+          edit(withPreset(draft, preset));
         }}
       />
 
@@ -248,7 +312,7 @@ export default function LaunchSheet({ view, patch, onClose }: LaunchSheetProps) 
           value={draft.backend}
           options={executors}
           onChange={(backend) => {
-            setDraft({ ...draft, backend });
+            edit({ ...draft, backend });
           }}
         />
         {/*

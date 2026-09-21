@@ -152,16 +152,23 @@ export function presetSpec(preset: Preset): RunSpec {
 
 /**
  * The sheet after one of the three cards was clicked. «Стандарт» and «Тщательно» *are* the
- * engine's defaults with one threshold moved, so choosing them puts every field back — otherwise
- * a value left over from a custom sheet would be carried into a run the history calls «Стандарт».
- * «Свои параметры» changes nothing but the label: it opens on whatever the last card left, which
- * is what makes it a starting point rather than a blank form.
+ * engine's defaults with one threshold moved, so choosing them puts every threshold back —
+ * otherwise a value left over from a custom sheet would be carried into a run the history calls
+ * «Стандарт». «Свои параметры» changes nothing but the label: it opens on whatever the last card
+ * left, which is what makes it a starting point rather than a blank form.
+ *
+ * The three machine answers survive the card, as [`machineOf`] explains.
  */
 export function withPreset(draft: Draft, preset: Preset): Draft {
   if (preset === "custom") {
     return { ...draft, preset };
   }
-  return { ...draftOf(presetSpec(preset)), backend: draft.backend };
+  const reset = draftOf(presetSpec(preset));
+  return {
+    ...reset,
+    backend: draft.backend,
+    values: { ...reset.values, workers: draft.values.workers, memory_gb: draft.values.memory_gb },
+  };
 }
 
 /** Why a typed value cannot be used, or `null` when it can. */
@@ -214,16 +221,38 @@ function valueOf(draft: Draft, key: NumberKey): number | null {
 }
 
 /**
+ * `workers` and `memory_gb` as the sheet has them — the two numbers that travel with `backend`
+ * rather than with the preset.
+ *
+ * All three are about *this computer* and not about this collection: which executor a run starts
+ * on, how much memory it may take, how many threads it may take. A §11's settings screen is where
+ * the machine answers them once, and the shell reads exactly these two out of it for a `Prepare`
+ * it starts by itself (`jobs.rs`' `prepare`). A card that put them back to the engine's defaults
+ * would mean «Стандарт» quietly gave a run the whole machine after the user had asked it not to.
+ *
+ * A field that does not read as a number falls back to the default instead of making the spec
+ * `null`: outside «Свои параметры» these two are not on the screen, so there would be nothing for
+ * the sheet to point at while «Собрать» stayed disabled.
+ */
+function machineOf(draft: Draft): Pick<RunSpec, "workers" | "memory_gb"> {
+  const errors = fieldErrors(draft);
+  const workers = errors.workers === undefined ? valueOf(draft, "workers") : null;
+  const memory = errors.memory_gb === undefined ? valueOf(draft, "memory_gb") : DEFAULT_SPEC.memory_gb;
+  return { workers: workers ?? DEFAULT_SPEC.workers, memory_gb: memory };
+}
+
+/**
  * What the sheet would start, or `null` while something in it cannot be read as a number in its
  * range — which is what disables «Собрать».
  *
- * Only «Свои параметры» reads the fields. The other two presets *are* the defaults (with
+ * Only «Свои параметры» reads the thresholds. The other two presets *are* the defaults (with
  * «Тщательно»'s one threshold), so they are built from [`presetSpec`] and cannot be made invalid
- * by a field left over from a sheet the user backed out of.
+ * by a field left over from a sheet the user backed out of. The executor and [`machineOf`]'s two
+ * budgets are the sheet's own either way.
  */
 export function specOf(draft: Draft): RunSpec | null {
   if (draft.preset !== "custom") {
-    return { ...presetSpec(draft.preset), backend: draft.backend };
+    return { ...presetSpec(draft.preset), backend: draft.backend, ...machineOf(draft) };
   }
   if (Object.keys(fieldErrors(draft)).length > 0) {
     return null;

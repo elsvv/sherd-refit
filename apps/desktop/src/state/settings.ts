@@ -35,8 +35,10 @@ export interface SettingsState {
   error: CommandError | null;
 
   /**
-   * Reads them. Called when the settings screen opens and not when the window does: it is a
-   * command, and a session that never opens the screen should not pay for one.
+   * Reads them. Called when the settings screen opens, and when «Собрать…» opens over a workspace
+   * that has no run of its own to repeat (A §7.4: the sheet starts from the machine's three
+   * answers then) — not when the window does: it is a command, and a session that opens neither
+   * should not pay for one.
    *
    * A refusal is swallowed: `settings_get` cannot fail, and a failure here can only be the IPC
    * itself — in which case the screen has a bigger problem than its own banner.

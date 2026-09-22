@@ -1,0 +1,126 @@
+name: release
+
+# A tag `v<version>` becomes a GitHub Release with the installers attached — the one place a
+# colleague can download the app from a link, without a GitHub account and without the 14-day
+# life of a workflow artifact. Separate from `desktop.yml` because that one is about proving a
+# push still builds, and this one is about handing something out: it runs on tags only, and its
+# `bundle` job is the twin of `desktop.yml`'s — change both, GitHub Actions has no way to share
+# a job between two files short of a reusable workflow, which would cost more lines than it saves.
+#
+# Nothing here is signed or notarised (sub-project 4, A §12): the release notes say what the two
+# operating systems will ask on first launch.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The tag to release, e.g. v0.1.0 (must exist, and must match the app's version)"
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bundle:
+    name: bundle (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: apps/desktop/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> ../../../target
+      - name: Install the window's dependencies
+        working-directory: apps/desktop
+        run: pnpm install --frozen-lockfile
+      - name: Build the bundle
+        working-directory: apps/desktop
+        run: pnpm tauri build --ci -- --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sherd-refit-${{ matrix.os }}
+          path: target/release/bundle/**
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: publish
+    needs: bundle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      # A release named `v0.2.0` that ships files stamped `0.1.0` would be a lie with a download
+      # button; the app's own version is the one the tag has to agree with.
+      - name: The tag names the version the app was built as
+        run: |
+          app="$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)"
+          test "${TAG#v}" = "$app" || { echo "tag $TAG, but the app is version $app"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          path: bundles
+      # Names without spaces or platform jargon: what a colleague sees in the download list.
+      - name: Collect the installers
+        run: |
+          v="${TAG#v}"
+          mkdir -p out
+          cp bundles/sherd-refit-macos-14/dmg/*.dmg "out/SherdRefit-$v-macos-arm64.dmg"
+          cp bundles/sherd-refit-windows-latest/nsis/*-setup.exe "out/SherdRefit-$v-windows-x64-setup.exe"
+          cp bundles/sherd-refit-windows-latest/msi/*.msi "out/SherdRefit-$v-windows-x64.msi"
+          ls -la out
+      - name: Write the notes
+        run: |
+          v="${TAG#v}"
+          cat > notes.md <<EOF
+          **Sherd Refit $v** — настольное приложение sherd-refit: сборка 3D-сканов керамических фрагментов.
+
+          | файл | для чего |
+          |---|---|
+          | \`SherdRefit-$v-macos-arm64.dmg\` | macOS на Apple Silicon (M1 и новее) |
+          | \`SherdRefit-$v-windows-x64-setup.exe\` | Windows 10/11 — установщик |
+          | \`SherdRefit-$v-windows-x64.msi\` | то же в виде MSI |
+
+          Сборки не подписаны. macOS при первом запуске скажет, что разработчик не подтверждён: правая кнопка по приложению → «Открыть» → «Открыть» (один раз). Windows SmartScreen: «Подробнее» → «Выполнить в любом случае».
+
+          Собрано из \`${GITHUB_SHA::7}\` воркфлоу \`release.yml\`.
+          EOF
+      # A re-run of the same tag replaces the files rather than failing on «release exists» —
+      # and never deletes a release: what was handed out stays handed out.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/* --clobber
+          else
+            gh release create "$TAG" out/* --target "$GITHUB_SHA" --title "Sherd Refit ${TAG#v}" --notes-file notes.md
+          fi
+          gh release view "$TAG" --json url -q .url

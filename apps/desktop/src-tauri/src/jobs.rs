@@ -406,6 +406,12 @@ pub(crate) fn start(
                 {
                     dock.show(*done, *total);
                 }
+                // What `reveal` may open: the folder the worker says it wrote, once it has.
+                if let Event::Exported { dest, .. } = event
+                    && let Ok(mut last) = app.state::<AppState>().last_export()
+                {
+                    *last = Some(dest.clone());
+                }
                 let payload = EngineEvent { job, run_id: id.clone(), event: event.clone() };
                 // A window that has gone away is not a reason to stop the job; the worker is
                 // ended by dropping it, not by an event that could not be delivered.

@@ -187,7 +187,7 @@ export const useExport = create<ExportState>()((set, get) => ({
       stage: null,
       error:
         failure === null
-          ? { kind: "worker", message: "the review session ended before the export was written" }
+          ? { kind: "session_ended", message: "" }
           : { kind: failure.kind, message: failure.message },
     });
   },

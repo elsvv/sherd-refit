@@ -382,7 +382,7 @@ impl Session {
     /// everything a `Tables` one writes and then some, and a reassembly that placed nothing at
     /// all would otherwise ask for no room and still write a report and a `scene.glb`.
     fn estimate(&self, what: ExportWhat, done: &Reassembled) -> Result<u64, Failure> {
-        let ExportWhat::Folder { placed_all, .. } = what else {
+        let ExportWhat::Folder { placed_all, merged_meshes, .. } = what else {
             return Ok(TABLES_ESTIMATE);
         };
         let mut placed = vec![placed_all; self.fragments.len()];
@@ -411,7 +411,9 @@ impl Session {
                 sources = sources.saturating_add(size);
             }
         }
-        Ok(sources.saturating_add(sources / 2).max(TABLES_ESTIMATE))
+        // `assembly_<k>.ply` is every assembled fragment once more at full resolution.
+        let copies: u64 = if merged_meshes { 2 } else { 1 };
+        Ok(sources.saturating_mul(copies).saturating_add(sources / 2).max(TABLES_ESTIMATE))
     }
 
     /// Answers a `PairDetail` (A §8.3): the seam of one placement, as numbers.

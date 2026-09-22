@@ -423,7 +423,9 @@
     "close": "Close",
     "cancel": "Cancel",
     "submit": "Export",
-    "failed": "The export was not written"
+    "failed": "The export was not written",
+    "error": "That did not work",
+    "session_ended": "The review session ended before the export was written. Open Export again."
   },
   "blender": {
     "menu": "Open in Blender",

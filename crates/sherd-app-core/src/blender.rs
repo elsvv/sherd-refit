@@ -295,7 +295,11 @@ def _import(fragment):
     elif kind == "obj":
         bpy.ops.wm.obj_import(filepath=path, forward_axis="Y", up_axis="Z")
     elif kind == "stl":
-        bpy.ops.wm.stl_import(filepath=path, forward_axis="Y", up_axis="Z")
+        if hasattr(bpy.types, "WM_OT_stl_import"):
+            bpy.ops.wm.stl_import(filepath=path, forward_axis="Y", up_axis="Z")
+        else:
+            # В сборках без встроенного импортёра STL читает аддон; оси у него зовутся иначе.
+            bpy.ops.import_mesh.stl(filepath=path, axis_forward="Y", axis_up="Z")
     else:
         bpy.ops.import_scene.gltf(filepath=path)
     return [obj for obj in bpy.data.objects if obj not in before]
@@ -345,7 +349,9 @@ def build():
 
     view_layer = bpy.context.view_layer
     # Импортёры кладут объекты в активную коллекцию. Пусть это будет коллекция
-    # сцены, а не чья-то чужая и, может быть, выключенная.
+    # сцены, а не чья-то чужая и, может быть, выключенная, — а в конце вернётся та,
+    # что была: обещание «ничего не трогает» относится и к ней.
+    previous = view_layer.active_layer_collection
     view_layer.active_layer_collection = view_layer.layer_collection
 
     top = bpy.data.collections.new(TITLE)
@@ -384,6 +390,7 @@ def build():
             empty.location.x = offset
             offset += width * (1.0 + GAP)
 
+    view_layer.active_layer_collection = previous
     _say("объектов: %d" % total)
     _say("масштаб не менялся: единицы — те же, что в сканах")
     lines = ["Объектов: %d." % total, "Масштаб не менялся: единицы те же, что в сканах."]
@@ -540,6 +547,8 @@ fn candidates() -> Vec<PathBuf> {
         .map_or_else(|| PathBuf::from(r"C:\Program Files"), PathBuf::from);
     found.extend(blender_foundation(&windows.join("Blender Foundation")));
     found.extend(on_path("blender"));
+    // Windows resolves a bare name through PATHEXT; `is_file` does not.
+    found.extend(on_path("blender.exe"));
     found
 }
 

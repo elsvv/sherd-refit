@@ -112,12 +112,16 @@ export default function ExportDialog({
 }) {
   const { t } = useTranslation();
   const language = useUi((state) => state.language);
-  const phase = useExport((state) => state.phase);
-  const stage = useExport((state) => state.stage);
-  const done = useExport((state) => state.done);
-  const total = useExport((state) => state.total);
-  const result = useExport((state) => state.result);
-  const error = useExport((state) => state.error);
+  // The store holds one export at a time, and it may be another run's: closed mid-export,
+  // another run selected, the dialog opened again. That run's progress and receipt are not this
+  // dialog's to show.
+  const foreign = useExport((state) => state.runId !== null && state.runId !== runId);
+  const phase = useExport((state) => (foreign ? "idle" : state.phase));
+  const stage = useExport((state) => (foreign ? null : state.stage));
+  const done = useExport((state) => (foreign ? 0 : state.done));
+  const total = useExport((state) => (foreign ? 0 : state.total));
+  const result = useExport((state) => (foreign ? null : state.result));
+  const error = useExport((state) => (foreign ? null : state.error));
   const assembly = useAssembly((state) => state.assembly);
 
   const [kind, setKind] = useState<Kind>("folder");
@@ -362,10 +366,12 @@ export default function ExportDialog({
         </section>
       ) : null}
 
-      {phase === "failed" && error !== null ? (
+      {error !== null ? (
         <section className="mt-3 rounded-md border border-danger px-2 py-1.5">
-          <p className="text-[11px] text-danger">{t("export.failed")}</p>
-          <p className="mt-0.5 text-[10px] leading-snug break-words text-muted">{error.message}</p>
+          <p className="text-[11px] text-danger">{t(phase === "failed" ? "export.failed" : "export.error")}</p>
+          <p className="mt-0.5 text-[10px] leading-snug break-words text-muted">
+            {error.kind === "session_ended" ? t("export.session_ended") : error.message}
+          </p>
         </section>
       ) : null}
     </Dialog>

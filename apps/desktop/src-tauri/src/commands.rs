@@ -587,10 +587,9 @@ pub(crate) fn export_start(
     }
     let dir = run_dir(state.inner(), &run_id)?;
     let decisions = DecisionsFile::load_or_default(&dir)?;
-    // Before the request and not after the answer: the `exported` event the window will reveal
-    // carries this same folder, and A §2.1 lets the window ask to reveal only what the shell has
-    // agreed to. A send that then fails leaves a remembered folder and nothing else.
-    *state.last_export()? = Some(dest.clone());
+    // The folder `reveal` may open is remembered when the worker reports it written (jobs.rs),
+    // not here: until then the window has only *asked* for a path, and A §2.1 lets it reveal what
+    // the shell agreed to and wrote, not any absolute path it cares to name.
     requester.send(&Request::Export { decisions, what, dest })?;
     Ok(())
 }
@@ -875,7 +874,11 @@ fn write_script(exports: &Path, script: &str) -> Result<PathBuf, CommandError> {
         }
         dir = exports.join(format!("{stamp}_blender-{n}"));
     }
-    std::fs::create_dir_all(&dir).map_err(|source| AppError::io(&dir, source))?;
+    std::fs::create_dir_all(exports).map_err(|source| AppError::io(exports, source))?;
+    // `create_dir`, not `create_dir_all`: the loop above stops at the first free name or at its
+    // bound, and a folder that exists after all — the bound, or a race — must be an error rather
+    // than a script overwritten under a Blender that may still be starting on it.
+    std::fs::create_dir(&dir).map_err(|source| AppError::io(&dir, source))?;
     let path = dir.join(BLENDER_SCRIPT);
     std::fs::write(&path, script).map_err(|source| AppError::io(&path, source))?;
     Ok(path)

@@ -356,7 +356,7 @@ impl Session {
             ExportWhat::Tables => (false, false, false, false),
         };
         RunOptions {
-            params: self.state.params.clone(),
+            params: self.state.params,
             preview,
             write_meshes,
             placed_all,

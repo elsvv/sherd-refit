@@ -457,9 +457,7 @@ pub(crate) fn review_refine(state: State<'_, AppState>) -> Result<(), CommandErr
 pub(crate) fn review_close(state: State<'_, AppState>) -> Result<(), CommandError> {
     let open = {
         let mut slot = state.job()?;
-        slot.as_mut()
-            .filter(|job| job.kind == JobKind::Review)
-            .and_then(|job| job.requester.take())
+        slot.as_mut().filter(|job| job.kind == JobKind::Review).and_then(|job| job.requester.take())
     };
     if let Some(requester) = open {
         // A session already gone is what was asked for; the error would say nothing useful.
@@ -1047,16 +1045,14 @@ fn from_base64(text: &str) -> Option<Vec<u8>> {
 ///
 /// [`CommandError`] of kind `io`.
 fn as_text(path: &Path) -> Result<String, CommandError> {
-    match path.to_str() {
-        Some(text) => Ok(text.to_owned()),
-        None => {
-            let why = std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("{} cannot be written as text", path.display()),
-            );
-            Err(AppError::io(path, why).into())
-        }
-    }
+    let Some(text) = path.to_str() else {
+        let why = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} cannot be written as text", path.display()),
+        );
+        return Err(AppError::io(path, why).into());
+    };
+    Ok(text.to_owned())
 }
 
 /// What this build can run on (A §7.4's «Вычисления»), as the launch sheet says it under the

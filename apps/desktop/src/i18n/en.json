@@ -454,7 +454,7 @@
     "workers": "Threads",
     "workers_hint": "0 is one per core of this machine",
     "blender": "Path to Blender",
-    "blender_hint": "empty is «look for Blender where it usually installs itself»",
+    "blender_hint": "empty is: look for Blender where it usually installs itself",
     "blender_auto": "Find it automatically",
     "blender_auto_value": "found automatically",
     "save": "Save",

@@ -15,6 +15,7 @@
 //! is the person who pressed the button, and the group labels («Группа 0») are the same ones the
 //! «Сборка» inspector shows. i18next has nothing to do here — this text is generated, not shown.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -185,7 +186,7 @@ const GLTF_TO_SCAN: [[f64; 4]; 4] =
     [[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
 
 /// The comment every generated script opens with, up to the line that names the assembly.
-const HEADER: &str = r##"# Сборка sherd-refit в Blender.
+const HEADER: &str = r"# Сборка sherd-refit в Blender.
 #
 # Файл написан приложением — «Открыть в Blender». Он ничего не удаляет и ничего
 # не трогает из того, что уже есть в файле: всё складывается в новую коллекцию
@@ -196,10 +197,10 @@ const HEADER: &str = r##"# Сборка sherd-refit в Blender.
 #
 #     blender --python open_in_blender.py
 #
-"##;
+";
 
 /// What the script imports, and the version it insists on.
-const PRELUDE: &str = r##"import os
+const PRELUDE: &str = r"import os
 
 import bpy
 from mathutils import Matrix, Vector
@@ -208,22 +209,22 @@ from mathutils import Matrix, Vector
 # версия проверяется до первого импорта (A §9.2).
 MIN_BLENDER = (4, 0, 0)
 
-"##;
+";
 
 /// Why there is a `TITLE` at all.
 const TITLE_NOTE: &str = "# Имя верхней коллекции: всё, что делает скрипт, лежит внутри неё.\n";
 
 /// [`GLTF_TO_SCAN`]'s reason, for the person reading the script instead of this file.
-const AXIS_NOTE: &str = r##"# Импортёр glTF переводит Y-up в Z-up прямо в вершинах: (x, y, z) -> (x, -z, y).
+const AXIS_NOTE: &str = r"# Импортёр glTF переводит Y-up в Z-up прямо в вершинах: (x, y, z) -> (x, -z, y).
 # Наши GLB хранят координаты скана как есть, поэтому поза домножается справа на
 # обратное преобразование — иначе группа ляжет набок.
-"##;
+";
 
 /// The row's spacing, which is the one number of the layout a person might want to change.
-const GAP_NOTE: &str = r##"# Зазор между группами в ряду — доля ширины предыдущей группы.
+const GAP_NOTE: &str = r"# Зазор между группами в ряду — доля ширины предыдущей группы.
 GAP = 0.2
 
-"##;
+";
 
 /// The Python that builds the scene (A §9.2). Pure: the same input gives the same text, which is
 /// what `blender_golden.py` holds and what the golden test compares against.
@@ -236,12 +237,13 @@ pub fn script(title: &str, groups: &[BlenderGroup], resolution: Resolution) -> S
     // A title with a newline in it would end the comment and start a line of Python: the comment
     // gets one line whatever the shell passed, and `TITLE` itself is an escaped literal.
     let single_line: String = title.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
-    out.push_str(&format!("{HEADER}# «{single_line}»\n\n{PRELUDE}"));
-    out.push_str(&format!("{TITLE_NOTE}TITLE = {}\n\n", py_str(title)));
-    out.push_str(&format!(
+    let _ = write!(out, "{HEADER}# «{single_line}»\n\n{PRELUDE}");
+    let _ = write!(out, "{TITLE_NOTE}TITLE = {}\n\n", py_str(title));
+    let _ = write!(
+        out,
         "{AXIS_NOTE}GLTF_TO_SCAN = Matrix((\n{}\n))\n\n",
         py_rows(&GLTF_TO_SCAN, "    ")
-    ));
+    );
     out.push_str(GAP_NOTE);
     if groups.is_empty() {
         out.push_str("GROUPS = []\n");
@@ -258,7 +260,7 @@ pub fn script(title: &str, groups: &[BlenderGroup], resolution: Resolution) -> S
 
 /// Everything in the script that runs (A §9.2): the same text in every script, so that the part
 /// which differs from export to export is the data above it and nothing else.
-const BODY: &str = r##"
+const BODY: &str = r#"
 
 def _say(message):
     """Консоль Blender — единственное место, где скрипт может говорить подробно."""
@@ -394,7 +396,7 @@ def build():
 
 
 build()
-"##;
+"#;
 
 /// One group as its entry of `GROUPS`.
 fn py_group(group: &BlenderGroup, resolution: Resolution) -> String {
@@ -403,13 +405,14 @@ fn py_group(group: &BlenderGroup, resolution: Resolution) -> String {
     for fragment in &group.fragments {
         let (path, importer) = importer_of(fragment, resolution);
         out.push_str("            {\n");
-        out.push_str(&format!("                \"name\": {},\n", py_str(&fragment.name)));
-        out.push_str(&format!("                \"path\": {},\n", py_path(path)));
-        out.push_str(&format!("                \"importer\": {},\n", py_str(importer)));
-        out.push_str(&format!(
+        let _ = writeln!(out, "                \"name\": {},", py_str(&fragment.name));
+        let _ = writeln!(out, "                \"path\": {},", py_path(path));
+        let _ = writeln!(out, "                \"importer\": {},", py_str(importer));
+        let _ = write!(
+            out,
             "                \"matrix\": (\n{}\n                ),\n",
             py_rows(&fragment.pose, "                    ")
-        ));
+        );
         out.push_str("            },\n");
     }
     out.push_str("        ],\n    },\n");
@@ -470,7 +473,7 @@ fn py_str(value: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             other if other.is_control() => {
-                out.push_str(&format!("\\u{:04x}", u32::from(other)));
+                let _ = write!(out, "\\u{:04x}", u32::from(other));
             }
             other => out.push(other),
         }
